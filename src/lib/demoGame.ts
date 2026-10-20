@@ -176,8 +176,8 @@ export function resolveDemoDice(snapshot: GameSnapshot, dice: number): { snapsho
         : tile.effect_type === 'guarantee_subtract'
           ? Math.max(0, previousBoss.coins - tile.effect_value)
           : tile.effect_type === 'guarantee_multiply'
-            ? Math.min(1_000_000, previousBoss.coins * tile.effect_value)
-            : Math.floor(previousBoss.coins / tile.effect_value)
+            ? Math.round(Math.min(1_000_000, previousBoss.coins * tile.effect_value))
+            : tile.effect_value === 0 ? 0 : Math.round(previousBoss.coins / tile.effect_value)
       players = players.map((item) => item.role === 'boss'
         ? { ...item, coins: nextGuarantee }
         : { ...item, coins: 0 })

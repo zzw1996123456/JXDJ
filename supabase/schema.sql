@@ -104,7 +104,7 @@ create table if not exists public.tile_rule_templates (
   tile_type text not null check (tile_type in ('shared', 'boss', 'runner', 'empty', 'move', 'chance')),
   detail text not null,
   effect_type text not null check (effect_type in ('none', 'guarantee_add', 'guarantee_subtract', 'guarantee_multiply', 'guarantee_divide', 'move', 'skip', 'extra_roll', 'lose_roll', 'advance_chance', 'advance_round', 'finish')),
-  effect_value integer not null default 0,
+  effect_value numeric not null default 0,
   enabled boolean not null default true,
   unique (round_number, name)
 );
@@ -120,10 +120,14 @@ create table if not exists public.room_tiles (
   tile_type text not null check (tile_type in ('shared', 'boss', 'runner', 'empty', 'move', 'chance')),
   detail text not null,
   effect_type text not null check (effect_type in ('none', 'guarantee_add', 'guarantee_subtract', 'guarantee_multiply', 'guarantee_divide', 'move', 'skip', 'extra_roll', 'lose_roll', 'advance_chance', 'advance_round', 'finish')),
-  effect_value integer not null default 0,
+  effect_value numeric not null default 0,
   created_at timestamptz not null default now(),
   unique (room_id, round_number, position)
 );
+
+-- 保底乘除允许小数倍数，旧整数数据会无损转换。
+alter table public.tile_rule_templates alter column effect_value type numeric using effect_value::numeric;
+alter table public.room_tiles alter column effect_value type numeric using effect_value::numeric;
 
 -- 升级旧项目的规则约束，允许概率晋级作为独立效果。
 alter table public.tile_rule_templates drop constraint if exists tile_rule_templates_rule_group_check;
@@ -895,9 +899,11 @@ begin
 end;
 $$;
 
+drop function if exists public.admin_update_room_tile(uuid, text, text, text, text, text, integer);
+
 create or replace function public.admin_update_room_tile(
   p_tile_id uuid, p_name text, p_short_name text, p_tile_type text,
-  p_detail text, p_effect_type text, p_effect_value integer
+  p_detail text, p_effect_type text, p_effect_value numeric
 )
 returns void
 language plpgsql security definer set search_path = public
@@ -919,6 +925,7 @@ begin
   if p_effect_type not in ('none','guarantee_add','guarantee_subtract','guarantee_multiply','guarantee_divide','move','skip','extra_roll','lose_roll','advance_chance','advance_round','finish') then raise exception '格子效果无效'; end if;
   if p_tile_type = 'empty' and (p_effect_type <> 'none' or p_effect_value <> 0) then raise exception '空格不能附带效果'; end if;
   if p_effect_type in ('none','advance_chance','advance_round','finish') and p_effect_value <> 0 then raise exception '该效果的数值必须为 0'; end if;
+  if p_effect_type not in ('guarantee_multiply','guarantee_divide') and p_effect_value <> trunc(p_effect_value) then raise exception '该效果数值必须是整数'; end if;
   if p_effect_type in ('advance_chance','advance_round') and v_tile.round_number = 3 then raise exception '第三轮不能配置晋级效果'; end if;
   if p_effect_type = 'finish' and v_tile.round_number <> 3 then raise exception '结束本局只能配置在第三轮'; end if;
   v_move_limit := case v_tile.round_number when 1 then 2 when 2 then 3 else 5 end;
@@ -926,8 +933,8 @@ begin
   if p_effect_type = 'move' and (p_effect_value = 0 or abs(p_effect_value) > v_move_limit) then raise exception '本轮移动格数超出允许范围'; end if;
   if p_effect_type = 'skip' and p_effect_value not between 1 and v_skip_limit then raise exception '本轮暂停次数超出允许范围'; end if;
   if p_effect_type in ('extra_roll','lose_roll') and p_effect_value not between 1 and 2 then raise exception '掷骰次数效果必须在 1 到 2 之间'; end if;
-  if p_effect_type in ('guarantee_add','guarantee_subtract') and p_effect_value not between 1 and 1000 then raise exception '老板保底加减必须在 1 到 1000 万之间'; end if;
-  if p_effect_type in ('guarantee_multiply','guarantee_divide') and p_effect_value not between 2 and 5 then raise exception '老板保底乘除倍数必须在 2 到 5 之间'; end if;
+  if p_effect_type in ('guarantee_add','guarantee_subtract') and p_effect_value not between 1 and 100000 then raise exception '老板保底加减必须在 1 到 100000 万之间'; end if;
+  if p_effect_type in ('guarantee_multiply','guarantee_divide') and p_effect_value not between 0 and 10 then raise exception '老板保底乘除倍数必须在 0 到 10 之间'; end if;
   if v_tile.tile_type = 'empty' and p_tile_type <> 'empty' and (
     select count(*) from public.room_tiles where room_id = v_tile.room_id and round_number = v_tile.round_number and tile_type = 'empty'
   ) <= 1 then raise exception '每轮至少保留一个空格'; end if;
@@ -1169,14 +1176,14 @@ begin
     when 'guarantee_divide' then
       null;
     when 'move' then
-      v_position := mod(mod(v_position + v_tile.effect_value, v_room.board_size) + v_room.board_size, v_room.board_size);
-      v_distance := greatest(0, v_distance + v_tile.effect_value);
+      v_position := mod(mod(v_position + v_tile.effect_value::integer, v_room.board_size) + v_room.board_size, v_room.board_size);
+      v_distance := greatest(0, v_distance + v_tile.effect_value::integer);
     when 'skip' then
-      v_skip := least(3, v_skip + v_tile.effect_value);
+      v_skip := least(3, v_skip + v_tile.effect_value::integer);
     when 'extra_roll' then
-      v_remaining := least(20, v_remaining + v_tile.effect_value);
+      v_remaining := least(20, v_remaining + v_tile.effect_value::integer);
     when 'lose_roll' then
-      v_modifier := greatest(-4, v_modifier - v_tile.effect_value);
+      v_modifier := greatest(-4, v_modifier - v_tile.effect_value::integer);
     when 'advance_chance' then
       v_advanced := v_room.current_round < 3
         and v_player.role = 'boss'
@@ -1205,8 +1212,8 @@ begin
     v_guarantee := case v_tile.effect_type
       when 'guarantee_add' then least(1000000::numeric, v_guarantee_before::numeric + v_tile.effect_value)::integer
       when 'guarantee_subtract' then greatest(0, v_guarantee_before - v_tile.effect_value)
-      when 'guarantee_multiply' then least(1000000::numeric, v_guarantee_before::numeric * v_tile.effect_value)::integer
-      when 'guarantee_divide' then floor(v_guarantee_before::numeric / v_tile.effect_value)::integer
+      when 'guarantee_multiply' then round(least(1000000::numeric, v_guarantee_before::numeric * v_tile.effect_value))::integer
+      when 'guarantee_divide' then case when v_tile.effect_value = 0 then 0 else round(v_guarantee_before::numeric / v_tile.effect_value)::integer end
     end;
     v_change := v_guarantee - v_guarantee_before;
     update public.room_players set coins = v_guarantee
@@ -1263,7 +1270,7 @@ revoke all on function public.admin_set_player_dice(uuid, uuid, integer) from pu
 revoke all on function public.admin_update_player_role(uuid, uuid, text) from public;
 revoke all on function public.admin_adjust_boss_guarantee(uuid, integer) from public;
 revoke all on function public.admin_set_boss_guarantee(uuid, integer) from public;
-revoke all on function public.admin_update_room_tile(uuid, text, text, text, text, text, integer) from public;
+revoke all on function public.admin_update_room_tile(uuid, text, text, text, text, text, numeric) from public;
 revoke all on function public.admin_start_game(uuid) from public;
 revoke all on function public.admin_finish_room(uuid) from public;
 revoke all on function public.admin_set_room_paused(uuid, boolean) from public;
@@ -1284,7 +1291,7 @@ grant execute on function public.admin_set_player_dice(uuid, uuid, integer) to a
 grant execute on function public.admin_update_player_role(uuid, uuid, text) to authenticated;
 grant execute on function public.admin_adjust_boss_guarantee(uuid, integer) to authenticated;
 grant execute on function public.admin_set_boss_guarantee(uuid, integer) to authenticated;
-grant execute on function public.admin_update_room_tile(uuid, text, text, text, text, text, integer) to authenticated;
+grant execute on function public.admin_update_room_tile(uuid, text, text, text, text, text, numeric) to authenticated;
 grant execute on function public.admin_start_game(uuid) to authenticated;
 grant execute on function public.admin_finish_room(uuid) to authenticated;
 grant execute on function public.admin_set_room_paused(uuid, boolean) to authenticated;

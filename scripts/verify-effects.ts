@@ -50,9 +50,14 @@ assert.equal(resolve('guarantee_subtract', 200).players[0].coins, 0, '老板保�
 
 const guaranteeMultiplied = resolve('guarantee_multiply', 3)
 assert.equal(guaranteeMultiplied.players[0].coins, 300)
+assert.equal(resolve('guarantee_multiply', 2.345).players[0].coins, 235, '保底小数乘法结果应四舍五入')
+assert.equal(resolve('guarantee_multiply', 0).players[0].coins, 0, '0 倍应将老板保底结算为 0')
 
 const guaranteeDivided = resolve('guarantee_divide', 3)
-assert.equal(guaranteeDivided.players[0].coins, 33, '保底除法应向下取整')
+assert.equal(guaranteeDivided.players[0].coins, 33, '保底除法结果应取整')
+assert.equal(resolve('guarantee_divide', 2.5).players[0].coins, 40, '保底除法应支持小数倍数')
+assert.equal(resolve('guarantee_divide', 6).players[0].coins, 17, '保底除法结果应四舍五入')
+assert.equal(resolve('guarantee_divide', 0).players[0].coins, 0, '除数为 0 时应安全结算为 0')
 
 const runnerGuarantee = snapshotFor('guarantee_add', 20)
 runnerGuarantee.players = [
@@ -174,10 +179,10 @@ for (const round of [1, 2, 3] as const) {
       assert.ok(Math.abs(rule.effect_value) <= moveLimit)
     }
     if (rule.effect_type === 'guarantee_add' || rule.effect_type === 'guarantee_subtract') {
-      assert.ok(rule.effect_value >= 1 && rule.effect_value <= 1000)
+      assert.ok(Number.isInteger(rule.effect_value) && rule.effect_value >= 1 && rule.effect_value <= 100000)
     }
     if (rule.effect_type === 'guarantee_multiply' || rule.effect_type === 'guarantee_divide') {
-      assert.ok(rule.effect_value >= 2 && rule.effect_value <= 5)
+      assert.ok(rule.effect_value >= 0 && rule.effect_value <= 10)
     }
     if (rule.effect_type === 'skip') assert.ok(rule.effect_value >= 1 && rule.effect_value <= skipLimit)
     if (rule.effect_type === 'extra_roll' || rule.effect_type === 'lose_roll') assert.ok(rule.effect_value >= 1 && rule.effect_value <= 2)

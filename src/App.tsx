@@ -64,8 +64,6 @@ const ROUND_LABELS: Record<GameRound, string> = { 1: '第一轮', 2: '第二轮'
 const TILE_TYPES = Object.keys(TILE_TYPE_LABELS) as TileType[]
 const TILE_EFFECTS = Object.keys(EFFECT_LABELS) as TileEffect[]
 const GUARANTEE_EFFECTS: GuaranteeEffect[] = ['guarantee_add', 'guarantee_subtract', 'guarantee_multiply', 'guarantee_divide']
-const GUARANTEE_AMOUNTS = [5, 10, 15, 20, 25, 30, 40, 50, 100]
-const GUARANTEE_FACTORS = [2, 3, 4, 5]
 
 function isGuaranteeEffect(effect: TileEffect): effect is GuaranteeEffect {
   return GUARANTEE_EFFECTS.includes(effect as GuaranteeEffect)
@@ -74,13 +72,8 @@ function isGuaranteeEffect(effect: TileEffect): effect is GuaranteeEffect {
 function guaranteePresetLabel(effect: GuaranteeEffect, value: number) {
   if (effect === 'guarantee_add') return `增加 ${value} 万`
   if (effect === 'guarantee_subtract') return `减少 ${value} 万`
-  if (effect === 'guarantee_multiply') return `乘以 ${value}`
-  return `除以 ${value}（小数向下取整）`
-}
-
-function guaranteePresetValues(effect: GuaranteeEffect, currentValue: number) {
-  const presets = effect === 'guarantee_multiply' || effect === 'guarantee_divide' ? GUARANTEE_FACTORS : GUARANTEE_AMOUNTS
-  return presets.includes(currentValue) ? presets : [...presets, currentValue].sort((left, right) => left - right)
+  if (effect === 'guarantee_multiply') return `乘以 ${value}（结果四舍五入取整）`
+  return value === 0 ? '除数为 0，按 0 万结算' : `除以 ${value}（结果四舍五入取整）`
 }
 
 function applyGuaranteePreset(tile: RoomTile, effect: GuaranteeEffect, value: number): RoomTile {
@@ -730,7 +723,15 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       if (!tileDraft.name.trim() || !tileDraft.short_name.trim() || !tileDraft.detail.trim()) {
         throw new Error('格子名称、棋盘短名和说明都不能为空')
       }
-      if (!Number.isInteger(effectValue)) throw new Error('效果数值必须是整数')
+      if (!Number.isFinite(effectValue)) throw new Error('效果数值无效')
+      const acceptsDecimal = ['guarantee_multiply', 'guarantee_divide'].includes(tileDraft.effect_type)
+      if (!acceptsDecimal && !Number.isInteger(effectValue)) throw new Error('该效果数值必须是整数')
+      if (['guarantee_add', 'guarantee_subtract'].includes(tileDraft.effect_type) && (effectValue < 1 || effectValue > 100000)) {
+        throw new Error('保底增加或减少必须是 1–100000 万的整数')
+      }
+      if (acceptsDecimal && (effectValue < 0 || effectValue > 10)) {
+        throw new Error('保底乘除倍数必须在 0–10 之间')
+      }
       const { error: rpcError } = await supabase.rpc('admin_update_room_tile', {
         p_tile_id: tileDraft.id,
         p_name: tileDraft.name.trim(),
@@ -1094,13 +1095,18 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                           {isGuaranteeEffect(tileDraft.effect_type) ? (
                             <label>
                               <span>保底变化</span>
-                              <select disabled={selectedRoom.status !== 'lobby'} onChange={(event) => {
-                                setTileDraft(applyGuaranteePreset(tileDraft, tileDraft.effect_type as GuaranteeEffect, Number(event.target.value)))
-                              }} value={tileDraft.effect_value}>
-                                {guaranteePresetValues(tileDraft.effect_type as GuaranteeEffect, tileDraft.effect_value)
-                                  .map((value) => <option key={value} value={value}>{guaranteePresetLabel(tileDraft.effect_type as GuaranteeEffect, value)}</option>)}
-                              </select>
-                              <small>选择后会自动更新格子名称和落格说明</small>
+                              <input
+                                disabled={selectedRoom.status !== 'lobby'}
+                                max={tileDraft.effect_type === 'guarantee_add' || tileDraft.effect_type === 'guarantee_subtract' ? 100000 : 10}
+                                min={tileDraft.effect_type === 'guarantee_add' || tileDraft.effect_type === 'guarantee_subtract' ? 1 : 0}
+                                onChange={(event) => {
+                                  setTileDraft(applyGuaranteePreset(tileDraft, tileDraft.effect_type as GuaranteeEffect, Number(event.target.value)))
+                                }}
+                                step={tileDraft.effect_type === 'guarantee_add' || tileDraft.effect_type === 'guarantee_subtract' ? 1 : 'any'}
+                                type="number"
+                                value={tileDraft.effect_value || ''}
+                              />
+                              <small>{tileDraft.effect_type === 'guarantee_add' || tileDraft.effect_type === 'guarantee_subtract' ? '手动输入 1–100000 万整数' : '手动输入 0–10 倍，可使用小数，结果四舍五入'}，名称和说明会自动更新</small>
                             </label>
                           ) : (
                             <label><span>效果数值</span><input disabled={selectedRoom.status !== 'lobby' || ['none', 'advance_chance', 'advance_round', 'finish'].includes(tileDraft.effect_type)} onChange={(event) => setTileDraft({ ...tileDraft, effect_value: Number(event.target.value) })} type="number" value={tileDraft.effect_value} /><small>{effectValueHint(tileDraft.effect_type, tileDraft.round_number)}</small></label>
