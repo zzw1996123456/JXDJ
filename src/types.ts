@@ -45,6 +45,7 @@ export interface GameSnapshot {
 export interface TileDefinition {
   name: string
   shortName: string
-  type: 'base' | 'normal' | 'reward' | 'risk' | 'order' | 'supply'
+  type: 'shared' | 'boss' | 'runner'
   detail: string
+  guaranteeChange: number
 }

@@ -560,6 +560,13 @@ button.mode-card {
   color: #15180e;
 }
 
+.role-help {
+  margin: 8px 0 0;
+  color: #7e8678;
+  font-size: 10px;
+  line-height: 1.55;
+}
+
 .button {
   min-height: 46px;
   border: 1px solid transparent;
@@ -812,6 +819,22 @@ button.mode-card {
   border-bottom: 1px solid var(--line);
 }
 
+.player-row.empty {
+  color: #777e72;
+}
+
+.empty-avatar {
+  width: 29px;
+  height: 29px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed #4d5448;
+  border-radius: 50%;
+  color: #697064;
+}
+
 .player-avatar {
   width: 29px;
   height: 29px;
@@ -859,6 +882,22 @@ button.mode-card {
 
 .ready-state.ready {
   color: var(--acid);
+}
+
+.share-state {
+  flex: 0 0 auto;
+  border: 1px solid #3c4237;
+  border-radius: 3px;
+  padding: 3px 6px;
+  color: #737a6e;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.share-state.filled {
+  border-color: #5a613c;
+  color: #d8dfcb;
+  background: #24281d;
 }
 
 .waiting-dot {
@@ -964,25 +1003,19 @@ button.mode-card {
   background: #23271f;
 }
 
-.tile-base {
+.tile-shared {
   border-top-color: var(--acid);
   background: #202516;
 }
 
-.tile-reward {
+.tile-runner {
   border-top-color: var(--cyan);
+  background: #172126;
 }
 
-.tile-risk {
-  border-top-color: var(--orange);
-}
-
-.tile-order {
+.tile-boss {
   border-top-color: #ffd166;
-}
-
-.tile-supply {
-  border-top-color: #8ce99a;
+  background: #242117;
 }
 
 .tile-number {
@@ -992,6 +1025,27 @@ button.mode-card {
   color: #5f665a;
   font-family: 'Barlow Condensed', sans-serif;
   font-size: 9px;
+}
+
+.tile-owner {
+  position: absolute;
+  top: 5px;
+  left: 6px;
+  color: #747b6f;
+  font-size: 8px;
+  font-weight: 700;
+}
+
+.tile-boss .tile-owner {
+  color: #d7ae58;
+}
+
+.tile-runner .tile-owner {
+  color: #63b4d3;
+}
+
+.tile-shared .tile-owner {
+  color: var(--acid);
 }
 
 .tile strong {
@@ -1078,6 +1132,35 @@ button.mode-card {
   margin-top: 9px;
   color: #747b6d;
   font-size: 10px;
+}
+
+.equity-split {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.equity-split span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 26px;
+  border: 1px solid #3e4438;
+  border-radius: 3px;
+  padding: 0 8px;
+  color: #c7cebe;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.equity-split span:first-child {
+  border-color: #66542f;
+  color: #ffd166;
+}
+
+.equity-split span:last-child {
+  border-color: #315a6c;
+  color: var(--cyan);
 }
 
 .game-sidebar {
@@ -1185,11 +1268,21 @@ button.mode-card {
   font-size: 9px;
 }
 
-.coins {
+.guarantee-score {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
   color: #ffd166;
   font-family: 'Barlow Condensed', sans-serif;
   font-size: 14px;
   font-weight: 700;
+}
+
+.guarantee-score small {
+  color: #777e71;
+  font-family: 'Noto Sans SC', sans-serif;
+  font-size: 8px;
+  font-weight: 500;
 }
 
 .event-list {
@@ -1509,6 +1602,7 @@ button.mode-card {
   }
 
   .tile small,
+  .tile-owner,
   .tile-number {
     display: none;
   }

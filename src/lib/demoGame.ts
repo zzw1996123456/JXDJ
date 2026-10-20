@@ -28,7 +28,7 @@ export function createDemoRoom(nickname: string, role: PlayerRole): GameSnapshot
     role,
     position: 0,
     distance: 0,
-    coins: 500,
+    coins: 100,
     is_ready: true,
     turn_order: 0,
     created_at: now(),
@@ -37,7 +37,7 @@ export function createDemoRoom(nickname: string, role: PlayerRole): GameSnapshot
   return {
     room,
     players: [player],
-    events: [{ id: 'welcome', room_id: room.id, message: `${nickname} 创建了本机试玩房`, created_at: now() }],
+    events: [{ id: 'welcome', room_id: room.id, message: `${nickname} 创建了护航协议试玩房，基础保障 100`, created_at: now() }],
     userId: DEMO_USER_ID,
     isDemo: true,
   }
@@ -49,7 +49,7 @@ export function startDemoGame(snapshot: GameSnapshot): GameSnapshot {
     ...snapshot,
     room: { ...snapshot.room, status: 'playing', current_turn: player.user_id },
     events: [
-      { id: crypto.randomUUID(), room_id: snapshot.room.id, message: '行动开始，率先完成 2 圈即可获胜', created_at: now() },
+      { id: crypto.randomUUID(), room_id: snapshot.room.id, message: '护航推演开始：20 个权益格按老板 60%、打手 40%配置', created_at: now() },
       ...snapshot.events,
     ],
   }
@@ -61,27 +61,22 @@ export function rollDemoDice(snapshot: GameSnapshot): { snapshot: GameSnapshot; 
   const distance = current.distance + dice
   const position = distance % BOARD_TILES.length
   const tile = BOARD_TILES[position]
-  let coinChange = 0
-
-  if (tile.type === 'supply') coinChange = 80
-  if (tile.type === 'reward') coinChange = 100
-  if (tile.type === 'order') coinChange = 120
-  if (tile.type === 'risk') coinChange = -60
-  if (Math.floor(distance / BOARD_TILES.length) > Math.floor(current.distance / BOARD_TILES.length)) coinChange += 200
+  let coinChange = tile.guaranteeChange
+  if (Math.floor(distance / BOARD_TILES.length) > Math.floor(current.distance / BOARD_TILES.length)) coinChange += 20
 
   const player = { ...current, distance, position, coins: Math.max(0, current.coins + coinChange) }
   const won = distance >= BOARD_TILES.length * snapshot.room.target_laps
-  const moneyText = coinChange === 0 ? '' : `，金币 ${coinChange > 0 ? '+' : ''}${coinChange}`
+  const guaranteeText = coinChange === 0 ? '' : `，保障值 +${coinChange}`
   const event: GameEvent = {
     id: crypto.randomUUID(),
     room_id: snapshot.room.id,
-    message: `${player.nickname} 掷出 ${dice}，抵达${tile.name}${moneyText}`,
+    message: `${player.nickname} 掷出 ${dice}，触发「${tile.name}」：${tile.detail}${guaranteeText}`,
     created_at: now(),
   }
   const winEvent: GameEvent = {
     id: crypto.randomUUID(),
     room_id: snapshot.room.id,
-    message: `${player.nickname} 完成行动，获得本局第一名`,
+    message: `${player.nickname} 完成两圈护航推演，本局协议生成完毕`,
     created_at: now(),
   }
 

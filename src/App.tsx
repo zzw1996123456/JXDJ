@@ -3,7 +3,6 @@ import {
   ArrowLeft,
   ArrowRight,
   Check,
-  CircleDollarSign,
   Clipboard,
   Crosshair,
   Crown,
@@ -30,6 +29,13 @@ import type { GameEvent, GameSnapshot, Player, PlayerRole, Room } from './types'
 
 const ACTIVE_ROOM_KEY = 'delta-monopoly-active-room'
 const NICKNAME_KEY = 'delta-monopoly-nickname'
+const MAX_PLAYERS = 3
+
+function getPlayerShare(player: Player, players: Player[]) {
+  if (player.role === 'boss') return 60
+  const runnerCount = players.filter((item) => item.role === 'runner').length
+  return runnerCount > 0 ? 40 / runnerCount : 0
+}
 
 function formatError(error: unknown) {
   if (error instanceof Error) return error.message
@@ -125,11 +131,11 @@ function ModeHub({ onSelect }: { onSelect: () => void }) {
               </span>
               <span className="mode-card-copy">
                 <small>趣味单 01</small>
-                <strong>大富翁</strong>
-                <span>掷骰穿越战区，在事件格中争夺金币，率先完成两圈。</span>
+                <strong>护航大富翁</strong>
+                <span>轮流掷骰生成护航条款，在保底、路线与打法之间完成一份小队协议。</span>
               </span>
               <span className="mode-card-footer">
-                <span>2–6 人 · 实时联机</span>
+                <span>2–3 人 · 1老板 + 最多2打手</span>
                 <span className="enter-mode">进入 <ArrowRight size={17} /></span>
               </span>
             </button>
@@ -219,12 +225,12 @@ function MonopolyEntry({
       <main className="home-shell">
         <section className="hero-copy">
           <p className="eyebrow"><Dice5 size={14} /> 趣味单 01 · 大富翁</p>
-          <h1>大富翁<br /><span>战区争夺战。</span></h1>
-          <p className="hero-subtitle">创建一间行动房，和队友在战区棋盘上争夺金币与排名。</p>
+          <h1>大富翁<br /><span>护航协议局。</span></h1>
+          <p className="hero-subtitle">老板与打手轮流掷骰，把保底、搜撤路线、装备档位和交战方式写进本局护航协议。</p>
           <div className="mission-stats" aria-label="游戏规则概览">
-            <span><strong>24</strong> 战区格</span>
-            <span><strong>2</strong> 圈决胜</span>
-            <span><strong>6</strong> 人房间</span>
+            <span><strong>60%</strong> 老板权益</span>
+            <span><strong>40%</strong> 打手权益</span>
+            <span><strong>3</strong> 人上限</span>
           </div>
         </section>
 
@@ -252,12 +258,13 @@ function MonopolyEntry({
           <legend>本局身份</legend>
           <div className="segmented">
             <button className={role === 'runner' ? 'active' : ''} onClick={() => setRole('runner')} type="button">
-              <Swords size={17} /> 打手
+              <Swords size={17} /> 打手席 · 共 40%
             </button>
             <button className={role === 'boss' ? 'active' : ''} onClick={() => setRole('boss')} type="button">
-              <Crown size={17} /> 老板
+              <Crown size={17} /> 老板席 · 60%
             </button>
           </div>
+          <p className="role-help">两名打手满编时各占 20%；只有一名打手时独享打手席 40%。</p>
         </fieldset>
 
         {formError && <p className="form-error" role="alert">{formError}</p>}
@@ -345,6 +352,14 @@ function LobbyView({
   const currentPlayer = snapshot.players.find((player) => player.user_id === snapshot.userId)
   const isHost = snapshot.room.host_user_id === snapshot.userId
   const allReady = snapshot.players.length > 0 && snapshot.players.every((player) => player.is_ready)
+  const boss = snapshot.players.find((player) => player.role === 'boss')
+  const runners = snapshot.players.filter((player) => player.role === 'runner')
+  const validLineup = Boolean(boss) && runners.length >= 1 && runners.length <= 2 && snapshot.players.length <= MAX_PLAYERS
+  const rosterSlots = [
+    { key: 'boss', label: '老板席', share: 60, player: boss },
+    { key: 'runner-1', label: '打手席 A', share: runners.length === 1 ? 40 : 20, player: runners[0] },
+    { key: 'runner-2', label: '打手席 B', share: 20, player: runners[1] },
+  ]
 
   return (
     <div className="app-shell">
@@ -355,9 +370,9 @@ function LobbyView({
           <h1>等待队员<br /><span>进入行动。</span></h1>
           <p>房间码 <strong>{snapshot.room.code}</strong></p>
           <div className="lobby-rule-line">
-            <span><Flag size={17} /> 完成 2 圈</span>
-            <span><CircleDollarSign size={17} /> 初始 500</span>
-            <span><Users size={17} /> 最多 6 人</span>
+            <span><Crown size={17} /> 老板 60%</span>
+            <span><Swords size={17} /> 打手共 40%</span>
+            <span><Users size={17} /> 最多 3 人</span>
           </div>
         </section>
 
@@ -365,25 +380,33 @@ function LobbyView({
           <div className="panel-heading">
             <div>
               <p className="kicker">行动小队</p>
-              <h2>{snapshot.players.length} / 6 已加入</h2>
+              <h2>{snapshot.players.length} / {MAX_PLAYERS} 已加入</h2>
             </div>
             <Users size={22} />
           </div>
 
           <div className="player-list">
-            {snapshot.players.map((player, index) => (
-              <div className="player-row" key={player.id}>
-                <PlayerAvatar index={index} player={player} />
-                <div className="player-info">
-                  <strong>{player.nickname}</strong>
-                  <span>{player.role === 'boss' ? '老板' : '打手'}{player.user_id === snapshot.room.host_user_id ? ' · 房主' : ''}</span>
+            {rosterSlots.map((slot) => {
+              const playerIndex = slot.player ? snapshot.players.findIndex((item) => item.id === slot.player?.id) : 0
+              return (
+                <div className={`player-row ${slot.player ? '' : 'empty'}`} key={slot.key}>
+                  {slot.player
+                    ? <PlayerAvatar index={playerIndex} player={slot.player} />
+                    : <span className="empty-avatar"><UserPlus size={14} /></span>}
+                  <div className="player-info">
+                    <strong>{slot.player?.nickname ?? `等待${slot.label}`}</strong>
+                    <span>{slot.label}{slot.player?.user_id === snapshot.room.host_user_id ? ' · 房主' : ''}</span>
+                  </div>
+                  <span className={`share-state ${slot.player ? 'filled' : ''}`}>{slot.share}% 权益</span>
+                  {slot.player && (
+                    <span className={`ready-state ${slot.player.is_ready ? 'ready' : ''}`}>
+                      {slot.player.is_ready ? <Check size={15} /> : <span className="waiting-dot" />}
+                      {slot.player.is_ready ? '已准备' : '等待中'}
+                    </span>
+                  )}
                 </div>
-                <span className={`ready-state ${player.is_ready ? 'ready' : ''}`}>
-                  {player.is_ready ? <Check size={15} /> : <span className="waiting-dot" />}
-                  {player.is_ready ? '已准备' : '等待中'}
-                </span>
-              </div>
-            ))}
+              )
+            })}
           </div>
 
           <div className="lobby-controls">
@@ -391,13 +414,15 @@ function LobbyView({
               <Shield size={18} /> {currentPlayer?.is_ready ? '取消准备' : '准备'}
             </button>
             {isHost && (
-              <button className="button primary" disabled={busy || !allReady} onClick={onStart} type="button">
+              <button className="button primary" disabled={busy || !allReady || (!snapshot.isDemo && !validLineup)} onClick={onStart} type="button">
                 {busy ? <LoaderCircle className="spin" size={18} /> : <Play size={18} />}
                 开始行动
               </button>
             )}
           </div>
           {snapshot.isDemo && <p className="inline-note">试玩房已自动准备，可直接开始。</p>}
+          {!snapshot.isDemo && !validLineup && <p className="inline-note">至少需要 1 名老板和 1 名打手；满编为 1 老板 + 2 打手。</p>}
+          {!snapshot.isDemo && validLineup && runners.length === 1 && <p className="inline-note">当前打手独享 40% 权益；第 2 名打手加入后各占 20%。</p>}
         </section>
       </main>
     </div>
@@ -414,6 +439,7 @@ function Board({ players }: { players: Player[] }) {
         return (
           <div className={`tile tile-${tile.type}`} key={tile.name} style={getBoardGridPosition(index)}>
             <span className="tile-number">{String(index + 1).padStart(2, '0')}</span>
+            <span className="tile-owner">{tile.type === 'boss' ? '老板' : tile.type === 'runner' ? '打手' : '公共'}</span>
             <strong>{tile.shortName}</strong>
             <small>{tile.detail}</small>
             <div className="tile-players">
@@ -427,8 +453,12 @@ function Board({ players }: { players: Player[] }) {
       <div className="board-center">
         <span className="center-mark"><span /></span>
         <p>TACTICAL BOARD</p>
-        <strong>行动大富翁</strong>
-        <small>穿越战区 · 完成两圈</small>
+        <strong>护航协议局</strong>
+        <div className="equity-split" aria-label="权益格比例">
+          <span><Crown size={14} /> 老板 60%</span>
+          <span><Swords size={14} /> 打手 40%</span>
+        </div>
+        <small>12 个老板格 · 8 个打手格 · 4 个公共节点</small>
       </div>
     </div>
   )
@@ -486,7 +516,7 @@ function GameView({
 
           <section className="ranking-panel">
             <div className="section-title">
-              <p className="kicker">实时排行</p>
+              <p className="kicker">权益进度</p>
               <Flag size={18} />
             </div>
             <div className="ranking-list">
@@ -498,9 +528,9 @@ function GameView({
                     <PlayerAvatar index={originalIndex} player={player} />
                     <div>
                       <strong>{player.nickname}</strong>
-                      <small>{Math.floor(player.distance / snapshot.room.board_size)} 圈 · {player.position + 1} 格</small>
+                      <small>{player.role === 'boss' ? '老板' : '打手'} · {getPlayerShare(player, snapshot.players)}% 权益</small>
                     </div>
-                    <span className="coins">{player.coins}</span>
+                    <span className="guarantee-score"><small>保障</small>{player.coins}</span>
                   </div>
                 )
               })}
@@ -528,9 +558,9 @@ function GameView({
         <div className="modal-backdrop" role="presentation">
           <section aria-labelledby="winner-title" aria-modal="true" className="winner-dialog" role="dialog">
             <span className="winner-icon"><Crown size={34} /></span>
-            <p className="kicker">ACTION COMPLETE</p>
-            <h2 id="winner-title">{winner?.nickname ?? '行动队员'} 获胜</h2>
-            <p>率先完成两圈，带着 {winner?.coins ?? 0} 金币成功撤离。</p>
+            <p className="kicker">AGREEMENT COMPLETE</p>
+            <h2 id="winner-title">护航协议已生成</h2>
+            <p>{winner?.nickname ?? '行动队员'} 完成两圈推演，最终保障值为 {winner?.coins ?? 0}。</p>
             <div className="winner-actions">
               {snapshot.isDemo && <button className="button primary" onClick={onRestart} type="button"><RotateCcw size={18} /> 再来一局</button>}
               <button className="button secondary" onClick={onExit} type="button"><ArrowLeft size={18} /> 返回房间入口</button>
@@ -603,6 +633,10 @@ export default function App() {
       void client.removeChannel(channel)
     }
   }, [snapshot?.room.id, snapshot?.isDemo, snapshot?.userId, refreshRoom])
+
+  useEffect(() => {
+    window.scrollTo({ top: 0, behavior: 'auto' })
+  }, [selectedMode, snapshot?.room.status])
 
   async function runAction(action: () => Promise<void>) {
     setBusy(true)
