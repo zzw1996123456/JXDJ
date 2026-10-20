@@ -20,6 +20,9 @@ import {
   Save,
   Settings2,
   Shield,
+  Shuffle,
+  SlidersHorizontal,
+  SquarePen,
   Sparkles,
   Swords,
   UserPlus,
@@ -27,15 +30,48 @@ import {
   Wifi,
   WifiOff,
 } from 'lucide-react'
-import { getBoardDimensions, getBoardGridPosition, getRoundTiles, PLAYER_COLORS } from './lib/board'
+import {
+  EFFECT_LABELS,
+  getBoardDimensions,
+  getBoardGridPosition,
+  getRoundTiles,
+  PLAYER_COLORS,
+  TILE_TYPE_LABELS,
+} from './lib/board'
 import { createDemoRoom, rollDemoDice, startDemoGame } from './lib/demoGame'
 import { isSupabaseConfigured, supabase } from './lib/supabase'
-import type { GameEvent, GameRound, GameSnapshot, Player, PlayerRole, Room } from './types'
+import type {
+  GameEvent,
+  GameRound,
+  GameSnapshot,
+  Player,
+  PlayerRole,
+  Room,
+  RoomTile,
+  TileEffect,
+  TileType,
+} from './types'
 
 const ACTIVE_ROOM_KEY = 'delta-monopoly-active-room'
 const NICKNAME_KEY = 'delta-monopoly-nickname'
 const MAX_PLAYERS = 3
 const ROUND_LABELS: Record<GameRound, string> = { 1: '第一轮', 2: '第二轮', 3: '第三轮' }
+const TILE_TYPES = Object.keys(TILE_TYPE_LABELS) as TileType[]
+const TILE_EFFECTS = Object.keys(EFFECT_LABELS) as TileEffect[]
+
+function effectValueHint(effect: TileEffect, round: GameRound) {
+  if (effect === 'move') return `正数前进、负数后退，本轮最多 ${round === 1 ? 2 : round === 2 ? 3 : 5} 格`
+  if (effect === 'coins') return '正数增加保障，负数扣减保障'
+  if (effect === 'skip') return `暂停次数，最多 ${round === 1 ? 1 : 2} 次`
+  if (effect === 'extra_roll' || effect === 'lose_roll') return '掷骰次数，允许 1–2 次'
+  if (effect === 'advance_round') return '只允许第一轮和第二轮使用'
+  if (effect === 'finish') return '只允许第三轮使用'
+  return '此效果不需要填写数值'
+}
+
+function availableEffects(round: GameRound) {
+  return TILE_EFFECTS.filter((effect) => effect !== (round === 3 ? 'advance_round' : 'finish'))
+}
 
 function formatError(error: unknown) {
   if (error instanceof Error) return error.message
@@ -56,20 +92,23 @@ async function ensureOnlineUser() {
 
 async function fetchSnapshot(roomId: string, userId: string): Promise<GameSnapshot> {
   if (!supabase) throw new Error('尚未配置 Supabase')
-  const [roomResult, playersResult, eventsResult] = await Promise.all([
+  const [roomResult, playersResult, eventsResult, tilesResult] = await Promise.all([
     supabase.from('rooms').select('*').eq('id', roomId).single(),
     supabase.from('room_players').select('*').eq('room_id', roomId).order('turn_order'),
     supabase.from('game_events').select('*').eq('room_id', roomId).order('created_at', { ascending: false }).limit(40),
+    supabase.from('room_tiles').select('*').eq('room_id', roomId).order('round_number').order('position'),
   ])
 
   if (roomResult.error) throw roomResult.error
   if (playersResult.error) throw playersResult.error
   if (eventsResult.error) throw eventsResult.error
+  if (tilesResult.error) throw tilesResult.error
 
   return {
     room: roomResult.data as Room,
     players: playersResult.data as Player[],
     events: eventsResult.data as GameEvent[],
+    tiles: tilesResult.data as RoomTile[],
     userId,
     isDemo: false,
   }
@@ -132,7 +171,7 @@ function ModeHub({ onSelect }: { onSelect: () => void }) {
               <span className="mode-card-copy">
                 <small>趣味单 01</small>
                 <strong>护航大富翁</strong>
-                <span>从 8 格逐轮晋级到 24 格，在空格与护航条款之间完成三轮推演。</span>
+                <span>每个房间自动生成不同棋盘，在移动、暂停与护航条款之间完成三轮推演。</span>
               </span>
               <span className="mode-card-footer">
                 <span>三轮棋盘 · 最多 3 人</span>
@@ -221,7 +260,7 @@ function MonopolyEntry({
         <section className="hero-copy">
           <p className="eyebrow"><Dice5 size={14} /> 趣味单 01 · 大富翁</p>
           <h1>大富翁<br /><span>护航协议局。</span></h1>
-          <p className="hero-subtitle">三轮棋盘逐步扩张，任何身份都可能触发老板权益、打手权益、公共事件或空格。</p>
+          <p className="hero-subtitle">三轮随机棋盘逐步扩张，每个房间都有不同的移动、回合和护航规则。</p>
           <div className="mission-stats" aria-label="游戏规则概览">
             <span><strong>3</strong> 轮推演</span>
             <span><strong>8/12/24</strong> 格棋盘</span>
@@ -259,7 +298,7 @@ function MonopolyEntry({
               <Crown size={17} /> 老板
             </button>
           </div>
-          <p className="role-help">身份不会限制落格，老板也会触发打手权益，打手也会触发老板权益。</p>
+          <p className="role-help">选择你在本局中的固定席位。</p>
         </fieldset>
 
         {formError && <p className="form-error" role="alert">{formError}</p>}
@@ -341,13 +380,22 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
   const [rooms, setRooms] = useState<Room[]>([])
   const [players, setPlayers] = useState<Player[]>([])
   const [events, setEvents] = useState<GameEvent[]>([])
+  const [roomTiles, setRoomTiles] = useState<RoomTile[]>([])
   const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null)
   const [round1Chance, setRound1Chance] = useState('35')
   const [round2Chance, setRound2Chance] = useState('30')
+  const [startingPlayerId, setStartingPlayerId] = useState('')
+  const [rollsPerTurn, setRollsPerTurn] = useState('1')
+  const [editorRound, setEditorRound] = useState<GameRound>(1)
+  const [selectedTileId, setSelectedTileId] = useState<string | null>(null)
+  const [tileDraft, setTileDraft] = useState<RoomTile | null>(null)
 
   const selectedRoom = rooms.find((room) => room.id === selectedRoomId) ?? null
   const selectedPlayers = players.filter((player) => player.room_id === selectedRoomId)
   const selectedEvents = events.filter((event) => event.room_id === selectedRoomId)
+  const selectedRoundTiles = roomTiles
+    .filter((tile) => tile.room_id === selectedRoomId && tile.round_number === editorRound)
+    .sort((a, b) => a.position - b.position)
   const selectedBosses = selectedPlayers.filter((player) => player.role === 'boss').length
   const selectedRunners = selectedPlayers.filter((player) => player.role === 'runner').length
   const canStart = selectedRoom?.status === 'lobby'
@@ -357,6 +405,18 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
     && selectedRunners >= 1
     && selectedRunners <= 2
     && selectedPlayers.every((player) => player.is_ready)
+
+  const loadRoomTiles = useCallback(async (roomId: string) => {
+    if (!supabase) return
+    const { data, error: tilesError } = await supabase
+      .from('room_tiles')
+      .select('*')
+      .eq('room_id', roomId)
+      .order('round_number')
+      .order('position')
+    if (tilesError) throw tilesError
+    setRoomTiles(data as RoomTile[])
+  }, [])
 
   const loadRoomEvents = useCallback(async (roomId: string) => {
     if (!supabase) return
@@ -430,27 +490,46 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'game_events' }, () => {
         if (selectedRoomId) void loadRoomEvents(selectedRoomId)
       })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'room_tiles' }, () => {
+        if (selectedRoomId) void loadRoomTiles(selectedRoomId)
+      })
       .subscribe()
 
     return () => {
       void client.removeChannel(channel)
     }
-  }, [authorized, loadDashboard, loadRoomEvents, selectedRoomId])
+  }, [authorized, loadDashboard, loadRoomEvents, loadRoomTiles, selectedRoomId])
 
   useEffect(() => {
     if (!authorized) return
     if (!selectedRoomId) {
       setEvents([])
+      setRoomTiles([])
       return
     }
-    void loadRoomEvents(selectedRoomId).catch((loadError) => setError(formatError(loadError)))
-  }, [authorized, loadRoomEvents, selectedRoomId])
+    void Promise.all([loadRoomEvents(selectedRoomId), loadRoomTiles(selectedRoomId)])
+      .catch((loadError) => setError(formatError(loadError)))
+  }, [authorized, loadRoomEvents, loadRoomTiles, selectedRoomId])
 
   useEffect(() => {
     if (!selectedRoom) return
     setRound1Chance(String(selectedRoom.round1_advance_chance))
     setRound2Chance(String(selectedRoom.round2_advance_chance))
-  }, [selectedRoom?.id, selectedRoom?.round1_advance_chance, selectedRoom?.round2_advance_chance])
+    setStartingPlayerId(selectedRoom.starting_player_id ?? '')
+    setRollsPerTurn(String(selectedRoom.rolls_per_turn))
+  }, [
+    selectedRoom?.id,
+    selectedRoom?.round1_advance_chance,
+    selectedRoom?.round2_advance_chance,
+    selectedRoom?.rolls_per_turn,
+    selectedRoom?.starting_player_id,
+  ])
+
+  useEffect(() => {
+    const nextTile = selectedRoundTiles.find((tile) => tile.id === selectedTileId) ?? selectedRoundTiles[0] ?? null
+    setSelectedTileId(nextTile?.id ?? null)
+    setTileDraft(nextTile ? { ...nextTile } : null)
+  }, [editorRound, selectedRoomId, roomTiles])
 
   async function runAdminAction(action: () => Promise<void>) {
     setBusy(true)
@@ -489,6 +568,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       setRooms([])
       setPlayers([])
       setEvents([])
+      setRoomTiles([])
       setSelectedRoomId(null)
     })
   }
@@ -520,6 +600,65 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       })
       if (rpcError) throw rpcError
       await loadDashboard()
+    })
+  }
+
+  function saveRoomSettings() {
+    if (!selectedRoom) return
+    void runAdminAction(async () => {
+      if (!supabase) return
+      const rollCount = Number(rollsPerTurn)
+      if (!Number.isInteger(rollCount) || rollCount < 1 || rollCount > 5) {
+        throw new Error('每回合掷骰次数必须是 1–5 的整数')
+      }
+      if (startingPlayerId && !selectedPlayers.some((player) => player.user_id === startingPlayerId)) {
+        throw new Error('首位玩家必须在当前房间中')
+      }
+      const { error: rpcError } = await supabase.rpc('admin_update_room_settings', {
+        p_room_id: selectedRoom.id,
+        p_starting_player_id: startingPlayerId || null,
+        p_rolls_per_turn: rollCount,
+      })
+      if (rpcError) throw rpcError
+      await loadDashboard()
+    })
+  }
+
+  function randomizeBoard() {
+    if (!selectedRoom) return
+    void runAdminAction(async () => {
+      if (!supabase) return
+      const { error: rpcError } = await supabase.rpc('admin_randomize_room_board', { p_room_id: selectedRoom.id })
+      if (rpcError) throw rpcError
+      await loadRoomTiles(selectedRoom.id)
+    })
+  }
+
+  function chooseTile(tile: RoomTile) {
+    setSelectedTileId(tile.id)
+    setTileDraft({ ...tile })
+  }
+
+  function saveTile() {
+    if (!selectedRoom || !tileDraft) return
+    void runAdminAction(async () => {
+      if (!supabase) return
+      const effectValue = Number(tileDraft.effect_value)
+      if (!tileDraft.name.trim() || !tileDraft.short_name.trim() || !tileDraft.detail.trim()) {
+        throw new Error('格子名称、棋盘短名和说明都不能为空')
+      }
+      if (!Number.isInteger(effectValue)) throw new Error('效果数值必须是整数')
+      const { error: rpcError } = await supabase.rpc('admin_update_room_tile', {
+        p_tile_id: tileDraft.id,
+        p_name: tileDraft.name.trim(),
+        p_short_name: tileDraft.short_name.trim(),
+        p_tile_type: tileDraft.tile_type,
+        p_detail: tileDraft.detail.trim(),
+        p_effect_type: tileDraft.effect_type,
+        p_effect_value: effectValue,
+      })
+      if (rpcError) throw rpcError
+      await loadRoomTiles(selectedRoom.id)
     })
   }
 
@@ -625,14 +764,94 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                   <span><small>状态</small><strong>{selectedRoom.status === 'lobby' ? '等待玩家' : selectedRoom.status === 'playing' ? '进行中' : '已结束'}</strong></span>
                   <span><small>当前轮次</small><strong>{ROUND_LABELS[selectedRoom.current_round]}</strong></span>
                   <span><small>玩家</small><strong>{selectedPlayers.length} / 3</strong></span>
+                  <span><small>每回合掷骰</small><strong>{selectedRoom.rolls_per_turn} 次</strong></span>
                 </div>
+
+                <section className="admin-turn-panel">
+                  <div className="section-title"><p className="kicker">回合设置</p><SlidersHorizontal size={18} /></div>
+                  <div className="turn-settings-grid">
+                    <label>
+                      <span>谁先掷骰</span>
+                      <select disabled={selectedRoom.status !== 'lobby'} onChange={(event) => setStartingPlayerId(event.target.value)} value={startingPlayerId}>
+                        <option value="">按加入顺序自动选择</option>
+                        {selectedPlayers.map((player) => (
+                          <option key={player.id} value={player.user_id}>{player.nickname} · {player.role === 'boss' ? '老板' : '打手'}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      <span>每回合连续掷骰次数</span>
+                      <input disabled={selectedRoom.status !== 'lobby'} max="5" min="1" onChange={(event) => setRollsPerTurn(event.target.value)} type="number" value={rollsPerTurn} />
+                    </label>
+                    <button className="button secondary" disabled={busy || selectedRoom.status !== 'lobby'} onClick={saveRoomSettings} type="button"><Save size={17} /> 保存回合设置</button>
+                  </div>
+                </section>
 
                 <section className="admin-probability-panel">
                   <div className="section-title"><p className="kicker">晋级概率</p><Settings2 size={18} /></div>
                   <div className="probability-grid">
                     <label><span>第一轮 → 第二轮</span><span className="percent-input"><input max="100" min="0" onChange={(event) => setRound1Chance(event.target.value)} type="number" value={round1Chance} /><b>%</b></span></label>
                     <label><span>第二轮 → 第三轮</span><span className="percent-input"><input max="100" min="0" onChange={(event) => setRound2Chance(event.target.value)} type="number" value={round2Chance} /><b>%</b></span></label>
-                    <button className="button secondary" disabled={busy} onClick={saveChances} type="button"><Save size={17} /> 保存概率</button>
+                    <button className="button secondary" disabled={busy || selectedRoom.status !== 'lobby'} onClick={saveChances} type="button"><Save size={17} /> 保存概率</button>
+                  </div>
+                </section>
+
+                <section className="admin-board-panel">
+                  <div className="board-editor-heading">
+                    <div className="section-title"><p className="kicker">随机棋盘与逐格编辑</p><SquarePen size={18} /></div>
+                    <button className="button secondary" disabled={busy || selectedRoom.status !== 'lobby'} onClick={randomizeBoard} type="button"><Shuffle size={17} /> 重新随机全部三轮</button>
+                  </div>
+                  <div className="round-tabs" role="tablist" aria-label="选择编辑轮次">
+                    {([1, 2, 3] as GameRound[]).map((round) => (
+                      <button aria-selected={editorRound === round} className={editorRound === round ? 'active' : ''} key={round} onClick={() => setEditorRound(round)} role="tab" type="button">
+                        {ROUND_LABELS[round]} <small>{round === 1 ? 8 : round === 2 ? 12 : 24} 格</small>
+                      </button>
+                    ))}
+                  </div>
+                  <div className="tile-editor-layout">
+                    <div className="admin-tile-list">
+                      {selectedRoundTiles.map((tile) => (
+                        <button className={`${selectedTileId === tile.id ? 'active' : ''} tile-kind-${tile.tile_type}`} key={tile.id} onClick={() => chooseTile(tile)} type="button">
+                          <span>{String(tile.position + 1).padStart(2, '0')}</span>
+                          <strong>{tile.short_name}</strong>
+                          <small>{EFFECT_LABELS[tile.effect_type]}</small>
+                        </button>
+                      ))}
+                    </div>
+                    {tileDraft ? (
+                      <div className="tile-edit-form">
+                        <div className="tile-edit-title">
+                          <span>第 {tileDraft.position + 1} 格</span>
+                          <strong>{ROUND_LABELS[tileDraft.round_number]}</strong>
+                        </div>
+                        <div className="tile-form-grid">
+                          <label><span>完整名称</span><input disabled={selectedRoom.status !== 'lobby'} maxLength={40} onChange={(event) => setTileDraft({ ...tileDraft, name: event.target.value })} value={tileDraft.name} /></label>
+                          <label><span>棋盘短名</span><input disabled={selectedRoom.status !== 'lobby'} maxLength={16} onChange={(event) => setTileDraft({ ...tileDraft, short_name: event.target.value })} value={tileDraft.short_name} /></label>
+                          <label>
+                            <span>格子分类</span>
+                            <select disabled={selectedRoom.status !== 'lobby'} onChange={(event) => {
+                              const tileType = event.target.value as TileType
+                              setTileDraft({ ...tileDraft, tile_type: tileType, ...(tileType === 'empty' ? { effect_type: 'none' as TileEffect, effect_value: 0 } : {}) })
+                            }} value={tileDraft.tile_type}>
+                              {TILE_TYPES.map((type) => <option key={type} value={type}>{TILE_TYPE_LABELS[type]}</option>)}
+                            </select>
+                          </label>
+                          <label>
+                            <span>实际效果</span>
+                            <select disabled={selectedRoom.status !== 'lobby' || tileDraft.tile_type === 'empty'} onChange={(event) => {
+                              const effectType = event.target.value as TileEffect
+                              const needsZero = effectType === 'none' || effectType === 'advance_round' || effectType === 'finish'
+                              setTileDraft({ ...tileDraft, effect_type: effectType, effect_value: needsZero ? 0 : Math.max(1, Math.abs(tileDraft.effect_value)) })
+                            }} value={tileDraft.effect_type}>
+                              {availableEffects(tileDraft.round_number).map((effect) => <option key={effect} value={effect}>{EFFECT_LABELS[effect]}</option>)}
+                            </select>
+                          </label>
+                          <label className="tile-detail-field"><span>落格说明</span><textarea disabled={selectedRoom.status !== 'lobby'} maxLength={160} onChange={(event) => setTileDraft({ ...tileDraft, detail: event.target.value })} rows={3} value={tileDraft.detail} /></label>
+                          <label><span>效果数值</span><input disabled={selectedRoom.status !== 'lobby' || ['none', 'advance_round', 'finish'].includes(tileDraft.effect_type)} onChange={(event) => setTileDraft({ ...tileDraft, effect_value: Number(event.target.value) })} type="number" value={tileDraft.effect_value} /><small>{effectValueHint(tileDraft.effect_type, tileDraft.round_number)}</small></label>
+                        </div>
+                        <button className="button primary full" disabled={busy || selectedRoom.status !== 'lobby'} onClick={saveTile} type="button"><Save size={17} /> 保存这个格子</button>
+                      </div>
+                    ) : <p className="admin-empty">这一轮还没有生成棋盘格。</p>}
                   </div>
                 </section>
 
@@ -642,7 +861,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                     {selectedPlayers.map((player, index) => (
                       <div className="admin-player-row" key={player.id}>
                         <PlayerAvatar index={index} player={player} />
-                        <span><strong>{player.nickname}</strong><small>{player.role === 'boss' ? '老板' : '打手'}</small></span>
+                        <span><strong>{player.nickname}</strong><small>{player.role === 'boss' ? '老板' : '打手'}{player.user_id === selectedRoom.starting_player_id ? ' · 先手' : ''}</small></span>
                         <em>{player.is_ready ? '已准备' : '未准备'}</em>
                       </div>
                     ))}
@@ -708,6 +927,7 @@ function LobbyView({
             <span><Flag size={17} /> 三轮推演</span>
             <span><Dice5 size={17} /> 8 → 12 → 24 格</span>
             <span><Users size={17} /> 最多 3 人</span>
+            <span><Radio size={17} /> 每回合 {snapshot.room.rolls_per_turn} 次</span>
           </div>
         </section>
 
@@ -730,7 +950,11 @@ function LobbyView({
                     : <span className="empty-avatar"><UserPlus size={14} /></span>}
                   <div className="player-info">
                     <strong>{slot.player?.nickname ?? `等待${slot.label}`}</strong>
-                    <span>{slot.label}{slot.player?.user_id === snapshot.room.host_user_id ? ' · 房主' : ''}</span>
+                    <span>
+                      {slot.label}
+                      {slot.player?.user_id === snapshot.room.starting_player_id ? ' · 先手' : ''}
+                      {slot.player?.user_id === snapshot.room.host_user_id ? ' · 房主' : ''}
+                    </span>
                   </div>
                   <span className={`share-state ${slot.player ? 'filled' : ''}`}>{slot.player ? '已占用' : '空缺'}</span>
                   {slot.player && (
@@ -766,10 +990,9 @@ function LobbyView({
   )
 }
 
-function Board({ players, room }: { players: Player[]; room: Room }) {
-  const tiles = getRoundTiles(room.current_round)
+function Board({ players, room, tiles: allTiles }: { players: Player[]; room: Room; tiles: RoomTile[] }) {
+  const tiles = getRoundTiles(allTiles, room.current_round)
   const dimensions = getBoardDimensions(tiles.length)
-  const advanceChance = room.current_round === 1 ? room.round1_advance_chance : room.round2_advance_chance
 
   return (
     <div
@@ -785,10 +1008,10 @@ function Board({ players, room }: { players: Player[]; room: Room }) {
           .map((player, playerIndex) => ({ player, playerIndex }))
           .filter(({ player }) => player.position === index)
         return (
-          <div className={`tile tile-${tile.type}`} key={`${tile.name}-${index}`} style={getBoardGridPosition(index, tiles.length)}>
+          <div className={`tile tile-${tile.tile_type}`} key={tile.id} style={getBoardGridPosition(index, tiles.length)}>
             <span className="tile-number">{String(index + 1).padStart(2, '0')}</span>
-            <span className="tile-owner">{tile.type === 'boss' ? '老板' : tile.type === 'runner' ? '打手' : tile.type === 'empty' ? '空格' : '公共'}</span>
-            <strong>{tile.shortName}</strong>
+            <span className="tile-owner">{TILE_TYPE_LABELS[tile.tile_type]}</span>
+            <strong>{tile.short_name}</strong>
             <small>{tile.detail}</small>
             <div className="tile-players">
               {playersHere.map(({ player, playerIndex }) => (
@@ -806,8 +1029,7 @@ function Board({ players, room }: { players: Player[]; room: Room }) {
         <span className="center-mark"><span /></span>
         <p>{ROUND_LABELS[room.current_round]} · {tiles.length} CELLS</p>
         <strong>护航协议局</strong>
-        <small>{room.current_round < 3 ? `本轮晋级概率 ${advanceChance}%` : '摇到协议结算格完成本局'}</small>
-        <small>所有身份均可能触发任意权益格</small>
+        <small>每个房间使用独立随机棋盘</small>
       </div>
     </div>
   )
@@ -847,9 +1069,9 @@ function GameView({
               <span className={`turn-indicator ${isMyTurn ? 'active' : ''}`} />
               <p>{snapshot.room.status === 'finished' ? '行动结束' : isMyTurn ? '轮到你行动' : `等待 ${currentPlayer?.nickname ?? '队员'}`}</p>
             </div>
-            <span>{ROUND_LABELS[snapshot.room.current_round]} · {snapshot.room.board_size} 格</span>
+            <span>{ROUND_LABELS[snapshot.room.current_round]} · {snapshot.room.board_size} 格 · 当前剩余 {snapshot.room.rolls_remaining} 次</span>
           </div>
-          <Board players={snapshot.players} room={snapshot.room} />
+          <Board players={snapshot.players} room={snapshot.room} tiles={snapshot.tiles} />
         </section>
 
         <aside className="game-sidebar">
@@ -859,7 +1081,7 @@ function GameView({
             </div>
             <button className="button primary roll-button" disabled={busy || !isMyTurn || snapshot.room.status !== 'playing'} onClick={onRoll} type="button">
               {busy ? <LoaderCircle className="spin" size={19} /> : <Dice5 size={19} />}
-              {isMyTurn ? '掷骰行动' : '等待回合'}
+              {isMyTurn ? `掷骰行动 · 剩余 ${snapshot.room.rolls_remaining}` : '等待回合'}
             </button>
           </section>
 
@@ -877,7 +1099,11 @@ function GameView({
                     <PlayerAvatar index={originalIndex} player={player} />
                     <div>
                       <strong>{player.nickname}</strong>
-                      <small>{player.role === 'boss' ? '老板' : '打手'} · 当前第 {player.position + 1} 格</small>
+                      <small>
+                        {player.role === 'boss' ? '老板' : '打手'} · 第 {player.position + 1} 格
+                        {player.skip_turns > 0 ? ` · 暂停 ${player.skip_turns} 次` : ''}
+                        {player.next_roll_modifier < 0 ? ` · 下回合少摇 ${Math.abs(player.next_roll_modifier)} 次` : ''}
+                      </small>
                     </div>
                     <span className="guarantee-score"><small>保障</small>{player.coins}</span>
                   </div>
@@ -909,7 +1135,7 @@ function GameView({
             <span className="winner-icon"><Crown size={34} /></span>
             <p className="kicker">AGREEMENT COMPLETE</p>
             <h2 id="winner-title">本局已经结束</h2>
-            <p>{winner ? `${winner.nickname} 摇到协议结算格。` : '管理员已结束本局。'} 最终记录已保存在管理面板。</p>
+            <p>{winner ? `${winner.nickname} 完成最终结算。` : '管理员已结束本局。'} 最终记录已保存在管理面板。</p>
             <div className="winner-actions">
               {snapshot.isDemo && <button className="button primary" onClick={onRestart} type="button"><RotateCcw size={18} /> 再来一局</button>}
               <button className="button secondary" onClick={onExit} type="button"><ArrowLeft size={18} /> 返回房间入口</button>
@@ -977,6 +1203,7 @@ export default function App() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'rooms', filter: `id=eq.${roomId}` }, () => void refreshRoom(roomId, userId))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'room_players', filter: `room_id=eq.${roomId}` }, () => void refreshRoom(roomId, userId))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'game_events', filter: `room_id=eq.${roomId}` }, () => void refreshRoom(roomId, userId))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'room_tiles', filter: `room_id=eq.${roomId}` }, () => void refreshRoom(roomId, userId))
       .subscribe()
 
     return () => {

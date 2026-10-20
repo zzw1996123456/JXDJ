@@ -1,6 +1,8 @@
 export type PlayerRole = 'boss' | 'runner'
 export type RoomStatus = 'lobby' | 'playing' | 'finished'
 export type GameRound = 1 | 2 | 3
+export type TileType = 'shared' | 'boss' | 'runner' | 'empty' | 'move' | 'chance'
+export type TileEffect = 'none' | 'coins' | 'move' | 'skip' | 'extra_roll' | 'lose_roll' | 'advance_round' | 'finish'
 
 export interface Room {
   id: string
@@ -14,6 +16,9 @@ export interface Room {
   current_round: GameRound
   round1_advance_chance: number
   round2_advance_chance: number
+  starting_player_id: string | null
+  rolls_per_turn: number
+  rolls_remaining: number
   created_at: string
 }
 
@@ -28,6 +33,23 @@ export interface Player {
   coins: number
   is_ready: boolean
   turn_order: number
+  skip_turns: number
+  next_roll_modifier: number
+  created_at: string
+}
+
+export interface RoomTile {
+  id: string
+  room_id: string
+  template_id: number | null
+  round_number: GameRound
+  position: number
+  name: string
+  short_name: string
+  tile_type: TileType
+  detail: string
+  effect_type: TileEffect
+  effect_value: number
   created_at: string
 }
 
@@ -42,14 +64,17 @@ export interface GameSnapshot {
   room: Room
   players: Player[]
   events: GameEvent[]
+  tiles: RoomTile[]
   userId: string
   isDemo: boolean
 }
 
 export interface TileDefinition {
   name: string
-  shortName: string
-  type: 'shared' | 'boss' | 'runner' | 'empty'
+  short_name: string
+  tile_type: TileType
   detail: string
-  guaranteeChange: number
+  effect_type: TileEffect
+  effect_value: number
+  group: 'empty' | 'contract' | 'movement' | 'turn' | 'dice' | 'advance' | 'finish'
 }
