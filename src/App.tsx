@@ -35,6 +35,9 @@ import {
   Wifi,
   WifiOff,
   X,
+  ZoomIn,
+  ZoomOut,
+  Maximize2,
 } from 'lucide-react'
 import {
   EFFECT_LABELS,
@@ -75,6 +78,14 @@ const TILE_EFFECTS = Object.keys(EFFECT_LABELS) as TileEffect[]
 const GUARANTEE_EFFECTS: GuaranteeEffect[] = ['guarantee_add', 'guarantee_subtract', 'guarantee_multiply', 'guarantee_divide']
 const ROOM_CONFIG_FORMAT = 'jingxu-delta-monopoly-room'
 const ROOM_CONFIG_VERSION = 3
+const MIN_BOARD_ZOOM = 0.1
+const MAX_BOARD_ZOOM = 2
+const BOARD_VIEW_PADDING = 12
+const BOARD_TILE_WIDTH = 120
+const BOARD_TILE_HEIGHT = 92
+const BOARD_GAP = 4
+const BOARD_PADDING = 4
+const BOARD_BORDER = 1
 
 interface RoomConfigFile {
   format: typeof ROOM_CONFIG_FORMAT
@@ -1704,61 +1715,225 @@ const Board = memo(function Board({
 }) {
   const tiles = getRoundTiles(allTiles, displayRound)
   const dimensions = getBoardDimensions(tiles.length)
+  const stageRef = useRef<HTMLDivElement>(null)
+  const boardRef = useRef<HTMLDivElement>(null)
+  const viewRef = useRef({ x: BOARD_VIEW_PADDING, y: BOARD_VIEW_PADDING, scale: 1 })
+  const dragRef = useRef<{ pointerId: number; startX: number; startY: number; originX: number; originY: number } | null>(null)
+  const suppressTileClickRef = useRef(false)
+  const zoomLabelRef = useRef<HTMLSpanElement>(null)
+  const zoomOutButtonRef = useRef<HTMLButtonElement>(null)
+  const zoomInButtonRef = useRef<HTMLButtonElement>(null)
+  const [isDragging, setIsDragging] = useState(false)
+
+  const getScaledBoardSize = useCallback((scale: number) => ({
+    width: (
+      dimensions.columns * BOARD_TILE_WIDTH
+      + (dimensions.columns - 1) * BOARD_GAP
+      + BOARD_PADDING * 2
+    ) * scale + BOARD_BORDER * 2,
+    height: (
+      dimensions.rows * BOARD_TILE_HEIGHT
+      + (dimensions.rows - 1) * BOARD_GAP
+      + BOARD_PADDING * 2
+    ) * scale + BOARD_BORDER * 2,
+  }), [dimensions.columns, dimensions.rows])
+
+  const clampBoardView = useCallback((view: { x: number; y: number; scale: number }) => {
+    const stage = stageRef.current
+    if (!stage) return view
+    const { width, height } = getScaledBoardSize(view.scale)
+    const x = width <= stage.clientWidth
+      ? (stage.clientWidth - width) / 2
+      : Math.min(BOARD_VIEW_PADDING, Math.max(stage.clientWidth - width - BOARD_VIEW_PADDING, view.x))
+    const y = height <= stage.clientHeight
+      ? (stage.clientHeight - height) / 2
+      : Math.min(BOARD_VIEW_PADDING, Math.max(stage.clientHeight - height - BOARD_VIEW_PADDING, view.y))
+    return { ...view, x: Math.round(x), y: Math.round(y) }
+  }, [getScaledBoardSize])
+
+  const applyBoardView = useCallback((view: { x: number; y: number; scale: number }, updateZoom = false) => {
+    const nextView = clampBoardView(view)
+    viewRef.current = nextView
+    if (boardRef.current) {
+      boardRef.current.style.setProperty('--board-scale', String(nextView.scale))
+      boardRef.current.style.transform = `translate3d(${nextView.x}px, ${nextView.y}px, 0)`
+    }
+    if (updateZoom) {
+      const percent = Math.round(nextView.scale * 100)
+      if (zoomLabelRef.current) zoomLabelRef.current.textContent = `${percent}%`
+      if (zoomOutButtonRef.current) zoomOutButtonRef.current.disabled = percent <= MIN_BOARD_ZOOM * 100
+      if (zoomInButtonRef.current) zoomInButtonRef.current.disabled = percent >= MAX_BOARD_ZOOM * 100
+    }
+  }, [clampBoardView])
+
+  const zoomBoard = useCallback((nextScale: number, clientX?: number, clientY?: number) => {
+    const stage = stageRef.current
+    if (!stage) return
+    const current = viewRef.current
+    const scale = Math.min(MAX_BOARD_ZOOM, Math.max(MIN_BOARD_ZOOM, nextScale))
+    const rect = stage.getBoundingClientRect()
+    const anchorX = clientX === undefined ? stage.clientWidth / 2 : clientX - rect.left
+    const anchorY = clientY === undefined ? stage.clientHeight / 2 : clientY - rect.top
+    applyBoardView({
+      scale,
+      x: anchorX - (anchorX - current.x) * (scale / current.scale),
+      y: anchorY - (anchorY - current.y) * (scale / current.scale),
+    }, true)
+  }, [applyBoardView])
+
+  const resetBoardView = useCallback(() => {
+    applyBoardView({ x: BOARD_VIEW_PADDING, y: BOARD_VIEW_PADDING, scale: 1 }, true)
+  }, [applyBoardView])
+
+  const fitBoardView = useCallback(() => {
+    const stage = stageRef.current
+    if (!stage) return
+    const baseSize = getScaledBoardSize(1)
+    const scale = Math.min(
+      1,
+      Math.max(
+        MIN_BOARD_ZOOM,
+        Math.min(
+          (stage.clientWidth - BOARD_VIEW_PADDING * 2 - BOARD_BORDER * 2) / (baseSize.width - BOARD_BORDER * 2),
+          (stage.clientHeight - BOARD_VIEW_PADDING * 2 - BOARD_BORDER * 2) / (baseSize.height - BOARD_BORDER * 2),
+        ),
+      ),
+    )
+    applyBoardView({ x: BOARD_VIEW_PADDING, y: BOARD_VIEW_PADDING, scale }, true)
+  }, [applyBoardView, getScaledBoardSize])
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(resetBoardView)
+    return () => window.cancelAnimationFrame(frame)
+  }, [displayRound, resetBoardView, tiles.length])
+
+  useEffect(() => {
+    const stage = stageRef.current
+    if (!stage || typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(() => applyBoardView(viewRef.current))
+    observer.observe(stage)
+    return () => observer.disconnect()
+  }, [applyBoardView])
+
+  function startBoardDrag(event: React.PointerEvent<HTMLDivElement>) {
+    if (event.button !== 0) return
+    dragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: viewRef.current.x,
+      originY: viewRef.current.y,
+    }
+    suppressTileClickRef.current = false
+  }
+
+  function moveBoard(event: React.PointerEvent<HTMLDivElement>) {
+    const drag = dragRef.current
+    if (!drag || drag.pointerId !== event.pointerId) return
+    const deltaX = event.clientX - drag.startX
+    const deltaY = event.clientY - drag.startY
+    if (Math.abs(deltaX) > 3 || Math.abs(deltaY) > 3) {
+      if (!suppressTileClickRef.current) {
+        suppressTileClickRef.current = true
+        event.currentTarget.setPointerCapture(event.pointerId)
+        setIsDragging(true)
+      }
+    } else {
+      return
+    }
+    applyBoardView({ ...viewRef.current, x: drag.originX + deltaX, y: drag.originY + deltaY })
+  }
+
+  function stopBoardDrag(event: React.PointerEvent<HTMLDivElement>) {
+    if (dragRef.current?.pointerId !== event.pointerId) return
+    dragRef.current = null
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+    setIsDragging(false)
+    window.setTimeout(() => { suppressTileClickRef.current = false }, 0)
+  }
+
+  function handleBoardWheel(event: React.WheelEvent<HTMLDivElement>) {
+    event.preventDefault()
+    zoomBoard(viewRef.current.scale + (event.deltaY < 0 ? 0.1 : -0.1), event.clientX, event.clientY)
+  }
 
   return (
-    <div
-      aria-label={`${roundLabel(displayRound)}行动棋盘`}
-      className={`board board-size-${tiles.length} ${tiles.length > 32 ? 'board-dense' : ''} ${className}`.trim()}
-      style={{
-        '--board-columns': dimensions.columns,
-        '--board-rows': dimensions.rows,
-      } as React.CSSProperties}
-    >
-      {tiles.map((tile, index) => {
-        const playersHere = players
-          .map((player, playerIndex) => ({ player, playerIndex }))
-          .filter(({ player }) => player.position === tile.position)
-        const tileContent = (
-          <>
-            <span className="tile-number">{String(tile.position + 1).padStart(2, '0')}</span>
-            <span className="tile-owner">{TILE_TYPE_LABELS[tile.tile_type]}</span>
-            <strong>{tile.short_name}</strong>
-            <small>{tile.detail}</small>
-            <div className="tile-players">
-              {playersHere.map(({ player, playerIndex }) => (
-                <PlayerAvatar index={playerIndex} key={player.id} player={player} />
-              ))}
-            </div>
-          </>
-        )
-        const tileClassName = `tile tile-${tile.tile_type} ${selectedTileId === tile.id ? 'selected' : ''}`.trim()
-        return onTileSelect ? (
-          <button
-            aria-label={`编辑第 ${index + 1} 格：${tile.short_name}`}
-            aria-pressed={selectedTileId === tile.id}
-            className={tileClassName}
-            key={tile.id}
-            onClick={() => onTileSelect(tile)}
-            style={{ ...getBoardGridPosition(index, tiles.length), ...tileColorStyle(tile) }}
-            type="button"
-          >
-            {tileContent}
-          </button>
-        ) : (
-          <div className={tileClassName} key={tile.id} style={{ ...getBoardGridPosition(index, tiles.length), ...tileColorStyle(tile) }}>
-            {tileContent}
-          </div>
-        )
-      })}
+    <div className={`board-viewport ${className === 'admin-board' ? 'admin-board-viewport' : ''}`}>
+      <div className="board-toolbar" aria-label="棋盘缩放工具">
+        <button aria-label="缩小棋盘" onClick={() => zoomBoard(viewRef.current.scale - 0.2)} ref={zoomOutButtonRef} title="缩小" type="button"><ZoomOut size={16} /></button>
+        <span aria-live="polite" ref={zoomLabelRef}>100%</span>
+        <button aria-label="放大棋盘" onClick={() => zoomBoard(viewRef.current.scale + 0.2)} ref={zoomInButtonRef} title="放大" type="button"><ZoomIn size={16} /></button>
+        <button aria-label="恢复棋盘原始大小" onClick={resetBoardView} title="恢复 100%" type="button"><Crosshair size={16} /></button>
+        <button aria-label="让完整棋盘适应视图" onClick={fitBoardView} title="适应视图" type="button"><Maximize2 size={16} /></button>
+      </div>
       <div
-        className="board-center"
-        data-round={displayRound}
-        style={{ gridColumn: `2 / ${dimensions.columns}`, gridRow: `2 / ${dimensions.rows}` }}
+        className={`board-stage ${isDragging ? 'dragging' : ''}`}
+        onPointerCancel={stopBoardDrag}
+        onPointerDown={startBoardDrag}
+        onPointerMove={moveBoard}
+        onPointerUp={stopBoardDrag}
+        onWheel={handleBoardWheel}
+        ref={stageRef}
       >
-        <span className="center-mark"><span /></span>
-        <p>{roundLabel(displayRound)} · {tiles.length} CELLS</p>
-        <strong>护航协议局</strong>
-        <small>每个房间使用独立随机棋盘</small>
+        <div
+          aria-label={`${roundLabel(displayRound)}行动棋盘`}
+          className={`board board-size-${tiles.length} ${className}`.trim()}
+          ref={boardRef}
+          style={{
+            '--board-columns': dimensions.columns,
+            '--board-rows': dimensions.rows,
+            '--board-scale': 1,
+          } as React.CSSProperties}
+        >
+          {tiles.map((tile, index) => {
+            const playersHere = players
+              .map((player, playerIndex) => ({ player, playerIndex }))
+              .filter(({ player }) => player.position === tile.position)
+            const tileContent = (
+              <>
+                <span className="tile-number">{String(tile.position + 1).padStart(2, '0')}</span>
+                <span className="tile-owner">{TILE_TYPE_LABELS[tile.tile_type]}</span>
+                <strong>{tile.short_name}</strong>
+                <small>{tile.detail}</small>
+                <div className="tile-players">
+                  {playersHere.map(({ player, playerIndex }) => (
+                    <PlayerAvatar index={playerIndex} key={player.id} player={player} />
+                  ))}
+                </div>
+              </>
+            )
+            const tileClassName = `tile tile-${tile.tile_type} ${selectedTileId === tile.id ? 'selected' : ''}`.trim()
+            return onTileSelect ? (
+              <button
+                aria-label={`编辑第 ${index + 1} 格：${tile.short_name}`}
+                aria-pressed={selectedTileId === tile.id}
+                className={tileClassName}
+                key={tile.id}
+                onClick={() => {
+                  if (!suppressTileClickRef.current) onTileSelect(tile)
+                }}
+                style={{ ...getBoardGridPosition(index, tiles.length), ...tileColorStyle(tile) }}
+                type="button"
+              >
+                {tileContent}
+              </button>
+            ) : (
+              <div className={tileClassName} key={tile.id} style={{ ...getBoardGridPosition(index, tiles.length), ...tileColorStyle(tile) }}>
+                {tileContent}
+              </div>
+            )
+          })}
+          <div
+            className="board-center"
+            data-round={displayRound}
+            style={{ gridColumn: `2 / ${dimensions.columns}`, gridRow: `2 / ${dimensions.rows}` }}
+          >
+            <span className="center-mark"><span /></span>
+            <p>{roundLabel(displayRound)} · {tiles.length} CELLS</p>
+            <strong>护航协议局</strong>
+            <small>每个房间使用独立随机棋盘</small>
+          </div>
+        </div>
       </div>
     </div>
   )
@@ -1811,13 +1986,15 @@ function GameView({
             <div className={`dice-face ${busy ? 'rolling' : ''}`} aria-label={dice ? `骰子点数 ${dice}` : '等待掷骰'}>
               {dice ?? <Dice5 size={34} />}
             </div>
-            <button className="button primary roll-button" disabled={busy || snapshot.room.is_paused || !isMyTurn || snapshot.room.status !== 'playing' || (ownPlayer?.dice_count ?? 0) <= 0} onClick={onRoll} type="button">
-              {busy ? <LoaderCircle className="spin" size={19} /> : <Dice5 size={19} />}
-              {snapshot.room.is_paused ? '等待管理员继续' : waitingForDice ? '等待补充骰子' : isMyTurn ? `掷骰行动 · 剩余 ${ownPlayer?.dice_count ?? 0}` : '等待回合'}
-            </button>
-            {snapshot.isDemo && waitingForDice && (
-              <button className="button secondary roll-button" onClick={onAddDemoDice} type="button"><Plus size={19} /> 补充 1 个骰子</button>
-            )}
+            <div className="dice-actions">
+              <button className="button primary roll-button" disabled={busy || snapshot.room.is_paused || !isMyTurn || snapshot.room.status !== 'playing' || (ownPlayer?.dice_count ?? 0) <= 0} onClick={onRoll} type="button">
+                {busy ? <LoaderCircle className="spin" size={19} /> : <Dice5 size={19} />}
+                <span>{snapshot.room.is_paused ? '等待管理员继续' : waitingForDice ? '等待补充骰子' : isMyTurn ? `掷骰行动 · 剩余 ${ownPlayer?.dice_count ?? 0}` : '等待回合'}</span>
+              </button>
+              {snapshot.isDemo && waitingForDice && (
+                <button className="button secondary roll-button" onClick={onAddDemoDice} type="button"><Plus size={19} /><span>补充 1 个骰子</span></button>
+              )}
+            </div>
           </section>
 
           <section className="ranking-panel">

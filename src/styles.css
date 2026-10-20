@@ -1476,17 +1476,6 @@ button.mode-card {
   align-items: start;
 }
 
-.admin-board {
-  min-height: 0;
-  flex: none;
-  aspect-ratio: 4 / 3;
-}
-
-.admin-board.board-size-8,
-.admin-board.board-size-12 {
-  aspect-ratio: 1;
-}
-
 .admin-board .tile {
   appearance: none;
   color: var(--ink);
@@ -1924,49 +1913,97 @@ button.mode-card {
   box-shadow: 0 0 0 5px rgba(217, 255, 79, 0.09);
 }
 
-.board {
-  width: 100%;
+.board-viewport {
+  min-width: 0;
   min-height: 0;
   flex: 1;
-  display: grid;
-  grid-template-columns: repeat(var(--board-columns), minmax(62px, 1fr));
-  grid-template-rows: repeat(var(--board-rows), minmax(70px, 1fr));
-  gap: 4px;
+  display: flex;
+  flex-direction: column;
   border: 1px solid #3a4033;
   background: #0b0d0a;
-  padding: 4px;
 }
 
-.board.board-dense {
-  aspect-ratio: 1;
-  grid-template-columns: repeat(var(--board-columns), minmax(18px, 1fr));
-  grid-template-rows: repeat(var(--board-rows), minmax(18px, 1fr));
-  gap: 1px;
-  padding: 2px;
+.admin-board-viewport {
+  height: 620px;
+  min-height: 460px;
+  flex: none;
 }
 
-.board-dense .tile {
-  border-top-width: 2px;
-  padding: 2px;
+.board-toolbar {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+  border-bottom: 1px solid #30362d;
+  background: #11140f;
+  padding: 4px 6px;
 }
 
-.board-dense .tile strong {
-  font-size: 8px;
-  line-height: 1;
+.board-toolbar button {
+  width: 30px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #3b4237;
+  border-radius: 3px;
+  background: #1d211a;
+  color: var(--ink);
+  cursor: pointer;
 }
 
-.board-dense .tile small,
-.board-dense .tile-owner,
-.board-dense .tile-number {
-  display: none;
+.board-toolbar button:hover:not(:disabled) {
+  border-color: var(--acid);
+  color: var(--acid);
 }
 
-.board-dense .board-center strong {
-  font-size: 24px;
+.board-toolbar button:disabled {
+  cursor: not-allowed;
+  opacity: 0.35;
 }
 
-.board-dense .board-center small {
-  display: none;
+.board-toolbar > span {
+  width: 48px;
+  color: #aeb5a7;
+  font-family: 'Barlow Condensed', sans-serif;
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.board-stage {
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  background-color: #0b0d0a;
+  background-image: linear-gradient(#141811 1px, transparent 1px), linear-gradient(90deg, #141811 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+.board-stage.dragging {
+  cursor: grabbing;
+}
+
+.board {
+  --board-scale: 1;
+  width: max-content;
+  height: max-content;
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: grid;
+  grid-template-columns: repeat(var(--board-columns), calc(120px * var(--board-scale)));
+  grid-template-rows: repeat(var(--board-rows), calc(92px * var(--board-scale)));
+  gap: calc(4px * var(--board-scale));
+  border: 1px solid #3a4033;
+  background: #0b0d0a;
+  padding: calc(4px * var(--board-scale));
+  will-change: transform;
 }
 
 .tile {
@@ -1978,9 +2015,9 @@ button.mode-card {
   justify-content: center;
   overflow: hidden;
   border: 1px solid #34392f;
-  border-top: 3px solid #555d4e;
+  border-top: max(1px, calc(3px * var(--board-scale))) solid #555d4e;
   background: #1b1e18;
-  padding: 8px;
+  padding: calc(8px * var(--board-scale));
 }
 
 .tile:hover {
@@ -2025,19 +2062,19 @@ button.mode-card {
 
 .tile-number {
   position: absolute;
-  top: 5px;
-  right: 6px;
+  top: calc(5px * var(--board-scale));
+  right: calc(6px * var(--board-scale));
   color: var(--tile-meta-color, #5f665a);
   font-family: 'Barlow Condensed', sans-serif;
-  font-size: 9px;
+  font-size: calc(9px * var(--board-scale));
 }
 
 .tile-owner {
   position: absolute;
-  top: 5px;
-  left: 6px;
+  top: calc(5px * var(--board-scale));
+  left: calc(6px * var(--board-scale));
   color: var(--tile-meta-color, #747b6f);
-  font-size: 8px;
+  font-size: calc(8px * var(--board-scale));
   font-weight: 700;
 }
 
@@ -2063,30 +2100,32 @@ button.mode-card {
 .tile strong {
   overflow-wrap: anywhere;
   font-family: 'Barlow Condensed', 'Noto Sans SC', sans-serif;
-  font-size: clamp(11px, 1vw, 15px);
+  font-size: calc(14px * var(--board-scale));
   line-height: 1.2;
 }
 
 .tile small {
-  margin-top: 3px;
+  margin-top: calc(3px * var(--board-scale));
   color: var(--tile-detail-color, #7c8376);
-  font-size: 8px;
+  font-size: calc(8px * var(--board-scale));
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .tile-players {
   position: absolute;
-  right: 5px;
-  bottom: 5px;
+  right: calc(5px * var(--board-scale));
+  bottom: calc(5px * var(--board-scale));
   display: flex;
   flex-direction: row-reverse;
 }
 
 .tile-players .player-avatar {
-  width: 20px;
-  height: 20px;
-  margin-left: -5px;
-  font-size: 9px;
+  width: calc(20px * var(--board-scale));
+  height: calc(20px * var(--board-scale));
+  margin-left: calc(-5px * var(--board-scale));
+  font-size: calc(9px * var(--board-scale));
 }
 
 .board-center {
@@ -2111,7 +2150,7 @@ button.mode-card {
   bottom: -18%;
   color: #1f241b;
   font-family: 'Barlow Condensed', sans-serif;
-  font-size: min(24vw, 330px);
+  font-size: calc(190px * var(--board-scale));
   font-weight: 800;
   line-height: 1;
 }
@@ -2121,29 +2160,52 @@ button.mode-card {
 }
 
 .center-mark {
-  width: 44px;
-  height: 44px;
-  margin-bottom: 14px;
+  width: calc(44px * var(--board-scale));
+  height: calc(44px * var(--board-scale));
+  margin-bottom: calc(14px * var(--board-scale));
+}
+
+.center-mark span {
+  inset: calc(9px * var(--board-scale)) calc(7px * var(--board-scale)) calc(5px * var(--board-scale));
 }
 
 .board-center p {
-  margin: 0 0 5px;
+  margin: 0 0 calc(5px * var(--board-scale));
   color: var(--acid);
   font-family: 'Barlow Condensed', sans-serif;
-  font-size: 11px;
+  font-size: calc(11px * var(--board-scale));
   font-weight: 700;
 }
 
 .board-center strong {
   font-family: 'Barlow Condensed', 'Noto Sans SC', sans-serif;
-  font-size: clamp(24px, 4vw, 48px);
+  font-size: calc(42px * var(--board-scale));
   line-height: 1;
 }
 
 .board-center small {
-  margin-top: 9px;
+  margin-top: calc(9px * var(--board-scale));
   color: #747b6d;
-  font-size: 10px;
+  font-size: calc(10px * var(--board-scale));
+}
+
+.board-size-8 .center-mark {
+  display: none;
+}
+
+.board-size-8 .board-center p {
+  margin-bottom: calc(3px * var(--board-scale));
+  font-size: calc(7px * var(--board-scale));
+}
+
+.board-size-8 .board-center strong {
+  font-size: calc(18px * var(--board-scale));
+  white-space: nowrap;
+}
+
+.board-size-8 .board-center small {
+  margin-top: calc(4px * var(--board-scale));
+  font-size: calc(7px * var(--board-scale));
 }
 
 .equity-split {
@@ -2192,7 +2254,8 @@ button.mode-card {
 
 .dice-panel {
   display: grid;
-  grid-template-columns: 72px 1fr;
+  grid-template-columns: 72px minmax(0, 1fr);
+  align-items: stretch;
   gap: 12px;
   padding: 12px;
 }
@@ -2216,8 +2279,31 @@ button.mode-card {
   animation: dice-shake 280ms linear infinite;
 }
 
+.dice-actions {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .roll-button {
-  height: 72px;
+  width: 100%;
+  min-width: 0;
+  min-height: 46px;
+  flex: 1;
+  height: auto;
+  padding: 9px 12px;
+  line-height: 1.25;
+  white-space: normal;
+}
+
+.roll-button svg {
+  flex: 0 0 auto;
+}
+
+.roll-button span {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .ranking-panel,
@@ -2521,18 +2607,14 @@ button.mode-card {
     grid-template-columns: 1fr;
   }
 
-  .board {
-    min-height: 640px;
+  .board-viewport {
+    height: 640px;
+    min-height: 0;
+    flex: none;
   }
 
-  .board.board-dense {
-    min-height: 0;
-    grid-template-columns: repeat(var(--board-columns), minmax(10px, 1fr));
-    grid-template-rows: repeat(var(--board-rows), minmax(10px, 1fr));
-  }
-
-  .admin-board {
-    min-height: 0;
+  .admin-board-viewport {
+    height: 560px;
   }
 
   .game-sidebar {
@@ -2741,57 +2823,9 @@ button.mode-card {
     padding-top: 10px;
   }
 
-  .board {
-    min-height: 430px;
-    grid-template-columns: repeat(var(--board-columns), minmax(34px, 1fr));
-    grid-template-rows: repeat(var(--board-rows), minmax(52px, 1fr));
-    gap: 2px;
-    padding: 2px;
-  }
-
-  .admin-board {
-    min-height: 0;
-  }
-
-  .tile {
-    border-top-width: 2px;
-    padding: 4px;
-  }
-
-  .tile strong {
-    font-size: 9px;
-    line-height: 1.15;
-  }
-
-  .tile small,
-  .tile-owner,
-  .tile-number {
-    display: none;
-  }
-
-  .tile-players {
-    right: 2px;
-    bottom: 3px;
-  }
-
-  .tile-players .player-avatar {
-    width: 16px;
-    height: 16px;
-    font-size: 7px;
-  }
-
-  .center-mark {
-    width: 34px;
-    height: 34px;
-    margin-bottom: 9px;
-  }
-
-  .board-center strong {
-    font-size: 24px;
-  }
-
-  .board-center small {
-    display: none;
+  .board-viewport,
+  .admin-board-viewport {
+    height: 500px;
   }
 
   .game-sidebar {
