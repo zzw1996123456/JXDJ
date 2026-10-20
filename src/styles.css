@@ -607,6 +607,18 @@ button.mode-card {
   background: #30362b;
 }
 
+.button.danger {
+  border: 1px solid #704038;
+  background: #2d1d1a;
+  color: #ffab9d;
+}
+
+.button.danger:not(:disabled):hover {
+  border-color: var(--orange);
+  background: #3a211d;
+  color: #ffd1ca;
+}
+
 .button.ghost {
   border-color: transparent;
   background: transparent;

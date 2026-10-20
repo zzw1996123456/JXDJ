@@ -25,10 +25,12 @@ import {
   SquarePen,
   Sparkles,
   Swords,
+  Trash2,
   UserPlus,
   Users,
   Wifi,
   WifiOff,
+  X,
 } from 'lucide-react'
 import {
   EFFECT_LABELS,
@@ -383,6 +385,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
   const [events, setEvents] = useState<GameEvent[]>([])
   const [roomTiles, setRoomTiles] = useState<RoomTile[]>([])
   const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null)
+  const [roomPendingDelete, setRoomPendingDelete] = useState<string | null>(null)
   const [round1Chance, setRound1Chance] = useState('35')
   const [round2Chance, setRound2Chance] = useState('30')
   const [startingPlayerId, setStartingPlayerId] = useState('')
@@ -525,6 +528,10 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
     selectedRoom?.rolls_per_turn,
     selectedRoom?.starting_player_id,
   ])
+
+  useEffect(() => {
+    setRoomPendingDelete(null)
+  }, [selectedRoomId])
 
   useEffect(() => {
     const nextTile = selectedRoundTiles.find((tile) => tile.id === selectedTileId) ?? selectedRoundTiles[0] ?? null
@@ -686,6 +693,18 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
     })
   }
 
+  function deleteRoom() {
+    if (!selectedRoom || roomPendingDelete !== selectedRoom.id) return
+    const roomId = selectedRoom.id
+    void runAdminAction(async () => {
+      if (!supabase) return
+      const { error: rpcError } = await supabase.rpc('admin_delete_room', { p_room_id: roomId })
+      if (rpcError) throw rpcError
+      setRoomPendingDelete(null)
+      await loadDashboard()
+    })
+  }
+
   async function copyRoomCode() {
     if (selectedRoom) await navigator.clipboard.writeText(selectedRoom.code)
   }
@@ -774,6 +793,14 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                   <div className="admin-room-actions">
                     <button className="button primary" disabled={busy || !canStart} onClick={startRoom} type="button"><Play size={17} /> 开始房间</button>
                     <button className="button secondary" disabled={busy || selectedRoom.status !== 'playing'} onClick={finishRoom} type="button"><Flag size={17} /> 结束本局</button>
+                    {roomPendingDelete === selectedRoom.id ? (
+                      <>
+                        <button className="button danger" disabled={busy} onClick={deleteRoom} type="button"><Trash2 size={17} /> 确认删除</button>
+                        <button aria-label="取消删除" className="button ghost" disabled={busy} onClick={() => setRoomPendingDelete(null)} title="取消删除" type="button"><X size={17} /></button>
+                      </>
+                    ) : (
+                      <button className="button danger" disabled={busy} onClick={() => setRoomPendingDelete(selectedRoom.id)} type="button"><Trash2 size={17} /> 删除房间</button>
+                    )}
                   </div>
                 </div>
 

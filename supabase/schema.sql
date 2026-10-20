@@ -569,6 +569,17 @@ begin
 end;
 $$;
 
+create or replace function public.admin_delete_room(p_room_id uuid)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+begin
+  if not public.is_admin() then raise exception '只有管理员可以删除房间'; end if;
+  delete from public.rooms where id = p_room_id;
+  if not found then raise exception '房间不存在或已被删除'; end if;
+end;
+$$;
+
 create or replace function public.leave_room(p_room_id uuid)
 returns void
 language plpgsql security definer set search_path = public
@@ -730,6 +741,7 @@ revoke all on function public.admin_update_room_settings(uuid, uuid, integer) fr
 revoke all on function public.admin_update_room_tile(uuid, text, text, text, text, text, integer) from public;
 revoke all on function public.admin_start_game(uuid) from public;
 revoke all on function public.admin_finish_room(uuid) from public;
+revoke all on function public.admin_delete_room(uuid) from public;
 revoke all on function public.leave_room(uuid) from public;
 revoke all on function public.roll_dice(uuid) from public;
 
@@ -742,6 +754,7 @@ grant execute on function public.admin_update_room_settings(uuid, uuid, integer)
 grant execute on function public.admin_update_room_tile(uuid, text, text, text, text, text, integer) to authenticated;
 grant execute on function public.admin_start_game(uuid) to authenticated;
 grant execute on function public.admin_finish_room(uuid) to authenticated;
+grant execute on function public.admin_delete_room(uuid) to authenticated;
 grant execute on function public.leave_room(uuid) to authenticated;
 grant execute on function public.roll_dice(uuid) to authenticated;
 
