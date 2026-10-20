@@ -1616,8 +1616,633 @@ begin
 end $$;
 
 select pg_notify('pgrst', 'reload schema');
-
 -- 创建管理员：先在 Authentication > Users 创建邮箱账号，再把邮箱替换为真实值执行。
 -- insert into public.app_admins(user_id)
 -- select id from auth.users where email = 'admin@example.com'
 -- on conflict (user_id) do nothing;
+
+-- 2026-10: configurable board structure, per-tile colors and import-safe randomization.
+alter table public.rooms add column if not exists total_rounds integer not null default 3;
+alter table public.rooms add column if not exists round1_board_size integer not null default 8;
+alter table public.rooms add column if not exists round2_board_size integer not null default 12;
+alter table public.rooms add column if not exists round3_board_size integer not null default 24;
+alter table public.rooms add column if not exists imported_config boolean not null default false;
+
+alter table public.rooms drop constraint if exists rooms_total_rounds_check;
+alter table public.rooms add constraint rooms_total_rounds_check check (total_rounds between 1 and 3);
+alter table public.rooms drop constraint if exists rooms_round1_board_size_check;
+alter table public.rooms add constraint rooms_round1_board_size_check check (round1_board_size between 8 and 32);
+alter table public.rooms drop constraint if exists rooms_round2_board_size_check;
+alter table public.rooms add constraint rooms_round2_board_size_check check (round2_board_size between 8 and 32);
+alter table public.rooms drop constraint if exists rooms_round3_board_size_check;
+alter table public.rooms add constraint rooms_round3_board_size_check check (round3_board_size between 8 and 32);
+
+alter table public.room_tiles add column if not exists tile_color text;
+alter table public.room_tiles add column if not exists is_randomized boolean not null default true;
+alter table public.room_tiles drop constraint if exists room_tiles_tile_type_check;
+alter table public.room_tiles add constraint room_tiles_tile_type_check
+  check (tile_type in ('start','shared','boss','runner','empty','move','chance'));
+alter table public.room_tiles drop constraint if exists room_tiles_tile_color_check;
+alter table public.room_tiles add constraint room_tiles_tile_color_check
+  check (tile_color is null or tile_color ~ '^#[0-9A-Fa-f]{6}$');
+
+update public.room_tiles set
+  template_id = null,
+  name = '起点',
+  short_name = '起点',
+  tile_type = 'start',
+  detail = '本轮行动从这里开始',
+  effect_type = 'none',
+  effect_value = 0,
+  is_randomized = false
+where position = 0;
+
+create or replace function public.generate_room_round_internal(
+  p_room_id uuid, p_round integer, p_board_size integer, p_is_final boolean
+)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_position integer;
+  v_group text;
+  v_source_round integer;
+  v_template public.tile_rule_templates%rowtype;
+  v_first_advance integer := 1;
+  v_second_advance integer := greatest(2, 1 + floor((p_board_size - 1) / 2.0)::integer);
+begin
+  delete from public.room_tiles where room_id = p_room_id and round_number = p_round;
+  insert into public.room_tiles(
+    room_id, template_id, round_number, position, name, short_name,
+    tile_type, detail, effect_type, effect_value, tile_color, is_randomized
+  ) values (
+    p_room_id, null, p_round, 0, '起点', '起点', 'start',
+    '本轮行动从这里开始', 'none', 0, null, false
+  );
+
+  for v_position in 1..p_board_size - 1 loop
+    if p_is_final and v_position = p_board_size - 1 then
+      v_group := 'finish';
+      v_source_round := 3;
+    elsif not p_is_final and v_position = v_first_advance then
+      v_group := 'advance_chance';
+      v_source_round := least(p_round, 2);
+    elsif not p_is_final and v_position = v_second_advance then
+      v_group := 'advance';
+      v_source_round := least(p_round, 2);
+    elsif v_position = 2 then
+      v_group := 'empty';
+      v_source_round := p_round;
+    else
+      v_group := (array['empty','contract','contract','movement','movement','turn','dice'])[1 + floor(random() * 7)::integer];
+      v_source_round := p_round;
+    end if;
+
+    select * into v_template from public.tile_rule_templates
+    where round_number = v_source_round and rule_group = v_group and enabled
+    order by random() limit 1;
+    if not found then raise exception '第 % 轮的 % 规则池不可用', p_round, v_group; end if;
+
+    insert into public.room_tiles(
+      room_id, template_id, round_number, position, name, short_name,
+      tile_type, detail, effect_type, effect_value, tile_color, is_randomized
+    ) values (
+      p_room_id, v_template.id, p_round, v_position, v_template.name, v_template.short_name,
+      v_template.tile_type, v_template.detail, v_template.effect_type, v_template.effect_value, null, true
+    );
+  end loop;
+end;
+$$;
+
+create or replace function public.generate_room_board_internal(p_room_id uuid)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_room public.rooms%rowtype;
+  v_round integer;
+  v_size integer;
+begin
+  select * into v_room from public.rooms where id = p_room_id;
+  if not found then raise exception '房间不存在'; end if;
+  delete from public.room_tiles where room_id = p_room_id;
+  for v_round in 1..v_room.total_rounds loop
+    v_size := case v_round when 1 then v_room.round1_board_size when 2 then v_room.round2_board_size else v_room.round3_board_size end;
+    perform public.generate_room_round_internal(p_room_id, v_round, v_size, v_round = v_room.total_rounds);
+  end loop;
+end;
+$$;
+
+create or replace function public.randomize_room_tile_internal(p_tile_id uuid)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_tile public.room_tiles%rowtype;
+  v_group text;
+  v_source_round integer;
+  v_template public.tile_rule_templates%rowtype;
+begin
+  select * into v_tile from public.room_tiles where id = p_tile_id for update;
+  if not found or v_tile.tile_type = 'start' then return; end if;
+  if v_tile.effect_type = 'finish' then
+    v_group := 'finish'; v_source_round := 3;
+  elsif v_tile.effect_type = 'advance_chance' then
+    v_group := 'advance_chance'; v_source_round := least(v_tile.round_number, 2);
+  elsif v_tile.effect_type = 'advance_round' then
+    v_group := 'advance'; v_source_round := least(v_tile.round_number, 2);
+  else
+    v_group := (array['empty','contract','contract','movement','movement','turn','dice'])[1 + floor(random() * 7)::integer];
+    v_source_round := v_tile.round_number;
+  end if;
+  select * into v_template from public.tile_rule_templates
+  where round_number = v_source_round and rule_group = v_group and enabled
+  order by random() limit 1;
+  if not found then raise exception '随机规则池不可用'; end if;
+  update public.room_tiles set
+    template_id = v_template.id, name = v_template.name, short_name = v_template.short_name,
+    tile_type = v_template.tile_type, detail = v_template.detail,
+    effect_type = v_template.effect_type, effect_value = v_template.effect_value
+  where id = p_tile_id;
+end;
+$$;
+
+create or replace function public.admin_randomize_room_board(p_room_id uuid)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_room public.rooms%rowtype;
+  v_tile record;
+begin
+  if not public.is_admin() then raise exception '只有管理员可以重新生成棋盘'; end if;
+  select * into v_room from public.rooms where id = p_room_id and status = 'lobby' for update;
+  if not found then raise exception '只能在开局前重新生成棋盘'; end if;
+  for v_tile in
+    select id from public.room_tiles
+    where room_id = p_room_id and tile_type <> 'start'
+      and (not v_room.imported_config or is_randomized)
+  loop
+    perform public.randomize_room_tile_internal(v_tile.id);
+  end loop;
+  insert into public.game_events(room_id, message) values (
+    p_room_id,
+    case when v_room.imported_config
+      then '管理员重新随机了导入设置中允许随机的格子'
+      else '管理员重新随机生成了全部棋盘格'
+    end
+  );
+end;
+$$;
+
+create or replace function public.admin_update_board_structure(
+  p_room_id uuid, p_total_rounds integer, p_round_sizes jsonb
+)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_room public.rooms%rowtype;
+  v_sizes integer[];
+  v_round integer;
+  v_old_size integer;
+begin
+  if not public.is_admin() then raise exception '只有管理员可以修改棋盘结构'; end if;
+  select * into v_room from public.rooms where id = p_room_id and status = 'lobby' for update;
+  if not found then raise exception '只能在开局前修改棋盘结构'; end if;
+  if p_total_rounds not between 1 and 3 then raise exception '轮数必须在 1 到 3 之间'; end if;
+  if jsonb_typeof(p_round_sizes) <> 'array' or jsonb_array_length(p_round_sizes) <> 3 then
+    raise exception '需要提供三轮的格子数';
+  end if;
+  v_sizes := array[(p_round_sizes ->> 0)::integer, (p_round_sizes ->> 1)::integer, (p_round_sizes ->> 2)::integer];
+  if exists (select 1 from unnest(v_sizes[1:p_total_rounds]) as sizes(value) where value not between 8 and 32) then
+    raise exception '每轮格子数必须在 8 到 32 之间';
+  end if;
+
+  update public.rooms set
+    total_rounds = p_total_rounds,
+    round1_board_size = v_sizes[1], round2_board_size = v_sizes[2], round3_board_size = v_sizes[3],
+    board_size = v_sizes[1], imported_config = case when total_rounds <> p_total_rounds then false else imported_config end
+  where id = p_room_id;
+
+  if v_room.total_rounds <> p_total_rounds then
+    perform public.generate_room_board_internal(p_room_id);
+  else
+    delete from public.room_tiles where room_id = p_room_id and round_number > p_total_rounds;
+    for v_round in 1..p_total_rounds loop
+      v_old_size := case v_round when 1 then v_room.round1_board_size when 2 then v_room.round2_board_size else v_room.round3_board_size end;
+      if v_old_size <> v_sizes[v_round] then
+        perform public.generate_room_round_internal(p_room_id, v_round, v_sizes[v_round], v_round = p_total_rounds);
+      end if;
+    end loop;
+  end if;
+  insert into public.game_events(room_id, message)
+  values (p_room_id, '管理员将棋盘设为 ' || p_total_rounds || ' 轮，各轮格子数为 ' || array_to_string(v_sizes[1:p_total_rounds], '/'));
+end;
+$$;
+
+create or replace function public.admin_import_room_config(p_room_id uuid, p_config jsonb)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_room public.rooms%rowtype;
+  v_settings jsonb;
+  v_tiles jsonb;
+  v_tile jsonb;
+  v_version integer;
+  v_name text;
+  v_round1_chance integer;
+  v_round2_chance integer;
+  v_rolls_per_turn integer;
+  v_base_guarantee integer;
+  v_total_rounds integer;
+  v_sizes integer[];
+  v_round integer;
+  v_position integer;
+  v_tile_name text;
+  v_short_name text;
+  v_tile_type text;
+  v_detail text;
+  v_effect_type text;
+  v_effect_value numeric;
+  v_tile_color text;
+  v_is_randomized boolean;
+  v_expected integer := 0;
+begin
+  if not public.is_admin() then raise exception '只有管理员可以导入房间设置'; end if;
+  select * into v_room from public.rooms where id = p_room_id for update;
+  if not found or v_room.status <> 'lobby' then raise exception '只能向等待中的房间导入设置'; end if;
+  v_version := (p_config ->> 'version')::integer;
+  if jsonb_typeof(p_config) <> 'object'
+    or p_config ->> 'format' <> 'jingxu-delta-monopoly-room'
+    or v_version not in (1, 2)
+  then raise exception '房间设置文件格式或版本无效'; end if;
+
+  v_settings := p_config -> 'settings';
+  v_tiles := p_config -> 'tiles';
+  if jsonb_typeof(v_settings) <> 'object' or jsonb_typeof(v_tiles) <> 'array' then
+    raise exception '房间设置文件缺少设置或棋盘格';
+  end if;
+  v_name := trim(v_settings ->> 'name');
+  v_round1_chance := (v_settings ->> 'round1_advance_chance')::integer;
+  v_round2_chance := (v_settings ->> 'round2_advance_chance')::integer;
+  v_rolls_per_turn := (v_settings ->> 'rolls_per_turn')::integer;
+  v_base_guarantee := (v_settings ->> 'base_guarantee')::integer;
+  if v_version = 1 then
+    v_total_rounds := 3;
+    v_sizes := array[8, 12, 24];
+  else
+    v_total_rounds := (v_settings ->> 'total_rounds')::integer;
+    if jsonb_typeof(v_settings -> 'round_sizes') <> 'array' or jsonb_array_length(v_settings -> 'round_sizes') <> 3 then
+      raise exception '导入设置缺少三轮格子数';
+    end if;
+    v_sizes := array[
+      (v_settings -> 'round_sizes' ->> 0)::integer,
+      (v_settings -> 'round_sizes' ->> 1)::integer,
+      (v_settings -> 'round_sizes' ->> 2)::integer
+    ];
+  end if;
+  if char_length(v_name) not between 1 and 24 then raise exception '导入的房间名需要 1 到 24 个字符'; end if;
+  if v_round1_chance not between 0 and 100 or v_round2_chance not between 0 and 100 then raise exception '导入的晋级概率必须在 0 到 100 之间'; end if;
+  if v_rolls_per_turn not between 1 and 5 then raise exception '导入的初始骰子数量必须在 1 到 5 之间'; end if;
+  if v_base_guarantee not between 0 and 10000 then raise exception '导入的基础保底必须在 0 到 10000 万之间'; end if;
+  if v_total_rounds not between 1 and 3 then raise exception '导入的轮数必须在 1 到 3 之间'; end if;
+  if exists (select 1 from unnest(v_sizes[1:v_total_rounds]) as sizes(value) where value not between 8 and 32) then
+    raise exception '导入的每轮格子数必须在 8 到 32 之间';
+  end if;
+  select sum(value) into v_expected from unnest(v_sizes[1:v_total_rounds]) as sizes(value);
+  if jsonb_array_length(v_tiles) <> v_expected then raise exception '导入棋盘格数与轮次设置不一致'; end if;
+
+  delete from public.room_tiles where room_id = p_room_id;
+  for v_tile in select value from jsonb_array_elements(v_tiles) loop
+    v_round := (v_tile ->> 'round_number')::integer;
+    v_position := (v_tile ->> 'position')::integer;
+    if v_round not between 1 and v_total_rounds or v_position not between 0 and v_sizes[v_round] - 1 then
+      raise exception '导入棋盘格的轮次或位置无效';
+    end if;
+    if v_position = 0 then
+      v_tile_name := '起点'; v_short_name := '起点'; v_tile_type := 'start';
+      v_detail := '本轮行动从这里开始'; v_effect_type := 'none'; v_effect_value := 0;
+      v_is_randomized := false;
+    else
+      v_tile_name := trim(v_tile ->> 'name');
+      v_short_name := trim(v_tile ->> 'short_name');
+      v_tile_type := v_tile ->> 'tile_type';
+      v_detail := trim(v_tile ->> 'detail');
+      v_effect_type := v_tile ->> 'effect_type';
+      v_effect_value := (v_tile ->> 'effect_value')::numeric;
+      v_is_randomized := case when v_version = 1 then false else coalesce((v_tile ->> 'is_randomized')::boolean, false) end;
+    end if;
+    v_tile_color := nullif(v_tile ->> 'tile_color', '');
+    if char_length(v_tile_name) not between 1 and 40 or char_length(v_short_name) not between 1 and 16
+      or char_length(v_detail) not between 1 and 160 then raise exception '导入棋盘格的文本长度无效'; end if;
+    if v_tile_type not in ('start','shared','boss','runner','empty','move','chance') then raise exception '导入棋盘格分类无效'; end if;
+    if v_position > 0 and v_tile_type = 'start' then raise exception '每轮只能在第 1 格设置起点'; end if;
+    if v_effect_type not in ('none','guarantee_add','guarantee_subtract','guarantee_multiply','guarantee_divide','move','skip','extra_roll','lose_roll','advance_chance','advance_round','finish') then raise exception '导入棋盘格效果无效'; end if;
+    if v_tile_type in ('start','empty') and (v_effect_type <> 'none' or v_effect_value <> 0) then raise exception '起点和空格不能附带效果'; end if;
+    if v_effect_type in ('none','advance_chance','advance_round','finish') and v_effect_value <> 0 then raise exception '该效果的数值必须为 0'; end if;
+    if v_effect_type in ('advance_chance','advance_round') and v_round = v_total_rounds then raise exception '最终轮不能配置晋级效果'; end if;
+    if v_effect_type = 'finish' and v_round <> v_total_rounds then raise exception '结束格只能配置在最终轮'; end if;
+    if v_effect_type not in ('guarantee_multiply','guarantee_divide') and v_effect_value <> trunc(v_effect_value) then raise exception '该效果数值必须是整数'; end if;
+    if v_effect_type = 'move' and (v_effect_value = 0 or abs(v_effect_value) > 5) then raise exception '移动格数必须在 -5 到 5 之间且不能为 0'; end if;
+    if v_effect_type = 'skip' and v_effect_value not between 1 and 2 then raise exception '暂停次数必须在 1 到 2 之间'; end if;
+    if v_effect_type in ('extra_roll','lose_roll') and v_effect_value not between 1 and 2 then raise exception '骰子数量效果必须在 1 到 2 之间'; end if;
+    if v_effect_type in ('guarantee_add','guarantee_subtract') and v_effect_value not between 1 and 100000 then raise exception '老板保底加减必须在 1 到 100000 万之间'; end if;
+    if v_effect_type in ('guarantee_multiply','guarantee_divide') and v_effect_value not between 0 and 10 then raise exception '老板保底乘除倍数必须在 0 到 10 之间'; end if;
+    if v_tile_color is not null and v_tile_color !~ '^#[0-9A-Fa-f]{6}$' then raise exception '格子颜色必须是 #RRGGBB 格式'; end if;
+    insert into public.room_tiles(
+      room_id, template_id, round_number, position, name, short_name, tile_type,
+      detail, effect_type, effect_value, tile_color, is_randomized
+    ) values (
+      p_room_id, null, v_round, v_position, v_tile_name, v_short_name, v_tile_type,
+      v_detail, v_effect_type, v_effect_value, v_tile_color, v_is_randomized
+    );
+  end loop;
+
+  for v_round in 1..v_total_rounds loop
+    if (select count(*) from public.room_tiles where room_id = p_room_id and round_number = v_round) <> v_sizes[v_round]
+      or not exists (select 1 from public.room_tiles where room_id = p_room_id and round_number = v_round and position = 0 and tile_type = 'start')
+    then raise exception '导入棋盘格位置不连续或缺少起点'; end if;
+    if v_round < v_total_rounds and not exists (
+      select 1 from public.room_tiles where room_id = p_room_id and round_number = v_round and effect_type in ('advance_chance','advance_round')
+    ) then raise exception '导入棋盘的非最终轮至少需要一个晋级格'; end if;
+  end loop;
+  if not exists (select 1 from public.room_tiles where room_id = p_room_id and round_number = v_total_rounds and effect_type = 'finish') then
+    raise exception '导入棋盘的最终轮至少需要一个结束格';
+  end if;
+
+  update public.rooms set
+    name = v_name, round1_advance_chance = v_round1_chance, round2_advance_chance = v_round2_chance,
+    rolls_per_turn = v_rolls_per_turn, rolls_remaining = v_rolls_per_turn, base_guarantee = v_base_guarantee,
+    total_rounds = v_total_rounds, round1_board_size = v_sizes[1], round2_board_size = v_sizes[2], round3_board_size = v_sizes[3],
+    current_round = 1, board_size = v_sizes[1], imported_config = true
+  where id = p_room_id;
+  update public.room_players set
+    dice_count = v_rolls_per_turn, coins = case when role = 'boss' then v_base_guarantee else 0 end, is_ready = false
+  where room_id = p_room_id;
+  insert into public.game_events(room_id, message)
+  values (p_room_id, '管理员导入房间设置；后续随机仅替换文件中允许随机的格子');
+end;
+$$;
+
+drop function if exists public.admin_update_room_tile(uuid, text, text, text, text, text, numeric);
+
+create or replace function public.admin_update_room_tile(
+  p_tile_id uuid, p_name text, p_short_name text, p_tile_type text,
+  p_detail text, p_effect_type text, p_effect_value numeric,
+  p_tile_color text, p_is_randomized boolean
+)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_tile public.room_tiles%rowtype;
+  v_room public.rooms%rowtype;
+begin
+  if not public.is_admin() then raise exception '只有管理员可以编辑棋盘'; end if;
+  select rt.* into v_tile from public.room_tiles rt join public.rooms r on r.id = rt.room_id
+  where rt.id = p_tile_id and r.status = 'lobby' for update of rt;
+  if not found then raise exception '格子不存在，或房间已经开始'; end if;
+  select * into v_room from public.rooms where id = v_tile.room_id;
+  if v_tile.tile_type = 'start' then
+    update public.room_tiles set tile_color = nullif(p_tile_color, ''), is_randomized = false where id = p_tile_id;
+    return;
+  end if;
+  if char_length(trim(p_name)) not between 1 and 40 or char_length(trim(p_short_name)) not between 1 and 16
+    or char_length(trim(p_detail)) not between 1 and 160 then raise exception '格子文本长度无效'; end if;
+  if p_tile_type not in ('shared','boss','runner','empty','move','chance') then raise exception '格子分类无效'; end if;
+  if p_effect_type not in ('none','guarantee_add','guarantee_subtract','guarantee_multiply','guarantee_divide','move','skip','extra_roll','lose_roll','advance_chance','advance_round','finish') then raise exception '格子效果无效'; end if;
+  if p_tile_type = 'empty' and (p_effect_type <> 'none' or p_effect_value <> 0) then raise exception '空格不能附带效果'; end if;
+  if p_effect_type in ('none','advance_chance','advance_round','finish') and p_effect_value <> 0 then raise exception '该效果的数值必须为 0'; end if;
+  if p_effect_type not in ('guarantee_multiply','guarantee_divide') and p_effect_value <> trunc(p_effect_value) then raise exception '该效果数值必须是整数'; end if;
+  if p_effect_type in ('advance_chance','advance_round') and v_tile.round_number = v_room.total_rounds then raise exception '最终轮不能配置晋级效果'; end if;
+  if p_effect_type = 'finish' and v_tile.round_number <> v_room.total_rounds then raise exception '结束本局只能配置在最终轮'; end if;
+  if p_effect_type = 'move' and (p_effect_value = 0 or abs(p_effect_value) > 5) then raise exception '移动格数必须在 -5 到 5 之间且不能为 0'; end if;
+  if p_effect_type = 'skip' and p_effect_value not between 1 and 2 then raise exception '暂停次数必须在 1 到 2 之间'; end if;
+  if p_effect_type in ('extra_roll','lose_roll') and p_effect_value not between 1 and 2 then raise exception '骰子数量效果必须在 1 到 2 之间'; end if;
+  if p_effect_type in ('guarantee_add','guarantee_subtract') and p_effect_value not between 1 and 100000 then raise exception '老板保底加减必须在 1 到 100000 万之间'; end if;
+  if p_effect_type in ('guarantee_multiply','guarantee_divide') and p_effect_value not between 0 and 10 then raise exception '老板保底乘除倍数必须在 0 到 10 之间'; end if;
+  if nullif(p_tile_color, '') is not null and p_tile_color !~ '^#[0-9A-Fa-f]{6}$' then raise exception '格子颜色必须是 #RRGGBB 格式'; end if;
+  if v_tile.effect_type in ('advance_chance','advance_round') and p_effect_type not in ('advance_chance','advance_round') and (
+    select count(*) from public.room_tiles where room_id = v_tile.room_id and round_number = v_tile.round_number and effect_type in ('advance_chance','advance_round')
+  ) <= 1 then raise exception '非最终轮至少保留一个晋级格'; end if;
+  if v_tile.effect_type = 'finish' and p_effect_type <> 'finish' and (
+    select count(*) from public.room_tiles where room_id = v_tile.room_id and round_number = v_room.total_rounds and effect_type = 'finish'
+  ) <= 1 then raise exception '最终轮至少保留一个结束格'; end if;
+  update public.room_tiles set
+    template_id = null, name = trim(p_name), short_name = trim(p_short_name), tile_type = p_tile_type,
+    detail = trim(p_detail), effect_type = p_effect_type, effect_value = p_effect_value,
+    tile_color = nullif(p_tile_color, ''), is_randomized = p_is_randomized
+  where id = p_tile_id;
+  insert into public.game_events(room_id, message)
+  values (v_tile.room_id, '管理员修改了第' || v_tile.round_number || '轮第 ' || (v_tile.position + 1) || ' 格');
+end;
+$$;
+
+create or replace function public.admin_start_game(p_room_id uuid)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_room public.rooms%rowtype;
+  v_first_user uuid;
+  v_first_name text;
+  v_first_order integer;
+  v_rolls integer;
+  v_round integer;
+  v_size integer;
+begin
+  if not public.is_admin() then raise exception '只有管理员可以开始房间'; end if;
+  select * into v_room from public.rooms where id = p_room_id and status = 'lobby' for update;
+  if not found then raise exception '房间不存在或已经开始'; end if;
+  if exists (select 1 from public.room_players where room_id = p_room_id and not is_ready) then raise exception '还有玩家没有准备'; end if;
+  if (select count(*) from public.room_players where room_id = p_room_id) not between 2 and 3
+    or (select count(*) from public.room_players where room_id = p_room_id and role = 'boss') <> 1
+    or (select count(*) from public.room_players where room_id = p_room_id and role = 'runner') not between 1 and 2
+  then raise exception '需要 1 名老板和 1 至 2 名打手才能开始'; end if;
+  for v_round in 1..v_room.total_rounds loop
+    v_size := case v_round when 1 then v_room.round1_board_size when 2 then v_room.round2_board_size else v_room.round3_board_size end;
+    if (select count(*) from public.room_tiles where room_id = p_room_id and round_number = v_round) <> v_size
+      or not exists (select 1 from public.room_tiles where room_id = p_room_id and round_number = v_round and position = 0 and tile_type = 'start')
+    then raise exception '第 % 轮棋盘不完整或缺少起点', v_round; end if;
+    if v_round < v_room.total_rounds and not exists (
+      select 1 from public.room_tiles where room_id = p_room_id and round_number = v_round and effect_type in ('advance_chance','advance_round')
+    ) then raise exception '第 % 轮至少需要一个晋级格', v_round; end if;
+  end loop;
+  if not exists (
+    select 1 from public.room_tiles where room_id = p_room_id and round_number = v_room.total_rounds and effect_type = 'finish'
+  ) then raise exception '最终轮至少需要一个结束格'; end if;
+
+  select p.user_id, p.nickname, p.turn_order into v_first_user, v_first_name, v_first_order
+  from public.room_players p join public.rooms r on r.id = p.room_id
+  where p.room_id = p_room_id and p.user_id = r.starting_player_id limit 1;
+  if v_first_user is null then
+    select user_id, nickname, turn_order into v_first_user, v_first_name, v_first_order
+    from public.room_players where room_id = p_room_id order by turn_order limit 1;
+  end if;
+  update public.rooms set status = 'playing', is_paused = false, current_turn = null, current_round = 1,
+    board_size = round1_board_size, winner_id = null, rolls_remaining = 0 where id = p_room_id;
+  update public.room_players p set position = 0, distance = 0,
+    coins = case when p.role = 'boss' then r.base_guarantee else 0 end,
+    skip_turns = 0, next_roll_modifier = 0, round_roll_count = 0
+  from public.rooms r where p.room_id = p_room_id and r.id = p_room_id;
+  perform public.advance_room_turn_internal(p_room_id, v_first_order - 1);
+  select p.user_id, p.nickname, r.rolls_remaining into v_first_user, v_first_name, v_rolls
+  from public.rooms r join public.room_players p on p.room_id = r.id and p.user_id = r.current_turn
+  where r.id = p_room_id;
+  insert into public.game_events(room_id, message)
+  values (p_room_id, '本局开始，' || v_first_name || ' 先行动，当前有 ' || v_rolls || ' 个骰子');
+end;
+$$;
+
+create or replace function public.roll_dice(p_room_id uuid)
+returns table(dice_value integer, landed_position integer, coin_change integer, winner boolean)
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_room public.rooms%rowtype;
+  v_player public.room_players%rowtype;
+  v_tile public.room_tiles%rowtype;
+  v_dice integer;
+  v_landed integer;
+  v_position integer;
+  v_distance integer;
+  v_change integer := 0;
+  v_remaining integer;
+  v_skip integer;
+  v_modifier integer;
+  v_chance integer;
+  v_candidate_dice integer[];
+  v_should_advance boolean;
+  v_advanced boolean := false;
+  v_finished boolean := false;
+  v_next_round integer;
+  v_next_size integer;
+  v_guarantee_before integer;
+  v_guarantee integer;
+begin
+  select * into v_room from public.rooms where id = p_room_id for update;
+  if not found or v_room.status <> 'playing' then raise exception '当前没有进行中的行动'; end if;
+  if v_room.is_paused then raise exception '本局已被管理员暂停，暂时不能掷骰'; end if;
+  if v_room.current_turn <> auth.uid() then raise exception '还没有轮到你'; end if;
+  select * into v_player from public.room_players where room_id = p_room_id and user_id = auth.uid() for update;
+  if not found then raise exception '你不在该房间中'; end if;
+  if v_player.dice_count <= 0 then raise exception '当前没有可用骰子'; end if;
+
+  if v_room.current_round < v_room.total_rounds then
+    v_chance := case when v_room.current_round = 1 then v_room.round1_advance_chance else v_room.round2_advance_chance end;
+    v_should_advance := v_player.role = 'boss' and v_player.round_roll_count >= 2
+      and floor(random() * 100)::integer < v_chance;
+    select array_agg(candidate.dice order by candidate.dice) into v_candidate_dice
+    from generate_series(1, 6) as candidate(dice)
+    join public.room_tiles rt on rt.room_id = p_room_id
+      and rt.round_number = v_room.current_round
+      and rt.position = mod(v_player.position + candidate.dice, v_room.board_size)
+    where (rt.effect_type in ('advance_chance', 'advance_round')) = v_should_advance;
+    -- Custom board sizes can make one outcome unavailable within six steps.
+    -- Fall back to a normal roll instead of blocking the room.
+    if coalesce(array_length(v_candidate_dice, 1), 0) = 0 then
+      v_dice := floor(random() * 6 + 1)::integer;
+    else
+      v_dice := v_candidate_dice[1 + floor(random() * array_length(v_candidate_dice, 1))::integer];
+    end if;
+  else
+    v_dice := floor(random() * 6 + 1)::integer;
+  end if;
+  v_landed := mod(v_player.position + v_dice, v_room.board_size);
+  v_position := v_landed;
+  v_distance := v_player.distance + v_dice;
+  v_remaining := greatest(0, v_player.dice_count - 1);
+  v_skip := v_player.skip_turns;
+  v_modifier := v_player.next_roll_modifier;
+  select * into v_tile from public.room_tiles
+  where room_id = p_room_id and round_number = v_room.current_round and position = v_landed;
+  if not found then raise exception '当前棋盘配置不完整'; end if;
+
+  case v_tile.effect_type
+    when 'move' then
+      v_position := mod(mod(v_position + v_tile.effect_value::integer, v_room.board_size) + v_room.board_size, v_room.board_size);
+      v_distance := greatest(0, v_distance + v_tile.effect_value::integer);
+    when 'skip' then v_skip := least(3, v_skip + v_tile.effect_value::integer);
+    when 'extra_roll' then v_remaining := least(20, v_remaining + v_tile.effect_value::integer);
+    when 'lose_roll' then v_modifier := greatest(-4, v_modifier - v_tile.effect_value::integer);
+    when 'advance_chance' then
+      v_advanced := v_room.current_round < v_room.total_rounds and v_player.role = 'boss' and v_player.round_roll_count >= 2;
+    when 'advance_round' then
+      v_advanced := v_room.current_round < v_room.total_rounds and v_player.role = 'boss' and v_player.round_roll_count >= 2;
+    when 'finish' then v_finished := v_room.current_round = v_room.total_rounds;
+    else null;
+  end case;
+
+  update public.room_players set position = v_position, distance = v_distance,
+    skip_turns = v_skip, next_roll_modifier = v_modifier, dice_count = v_remaining,
+    round_roll_count = round_roll_count + 1 where id = v_player.id;
+  insert into public.game_events(room_id, message, event_type, metadata)
+  values (
+    p_room_id,
+    v_player.nickname || ' 掷出 ' || v_dice || '，落到「' || v_tile.name || '」：' || v_tile.detail,
+    'roll',
+    jsonb_build_object(
+      'player_id', v_player.id, 'player_name', v_player.nickname, 'role', v_player.role,
+      'round', v_room.current_round, 'dice', v_dice, 'landed_position', v_landed,
+      'tile_name', v_tile.name, 'tile_detail', v_tile.detail, 'tile_type', v_tile.tile_type,
+      'effect_type', v_tile.effect_type, 'effect_value', v_tile.effect_value
+    )
+  );
+  if v_tile.effect_type in ('guarantee_add','guarantee_subtract','guarantee_multiply','guarantee_divide') then
+    select coins into v_guarantee_before from public.room_players where room_id = p_room_id and role = 'boss' for update;
+    if not found then raise exception '当前房间没有老板，无法结算保底'; end if;
+    v_guarantee := case v_tile.effect_type
+      when 'guarantee_add' then least(1000000::numeric, v_guarantee_before::numeric + v_tile.effect_value)::integer
+      when 'guarantee_subtract' then greatest(0, v_guarantee_before - v_tile.effect_value)
+      when 'guarantee_multiply' then round(least(1000000::numeric, v_guarantee_before::numeric * v_tile.effect_value))::integer
+      when 'guarantee_divide' then case when v_tile.effect_value = 0 then 0 else round(v_guarantee_before::numeric / v_tile.effect_value)::integer end
+    end;
+    v_change := v_guarantee - v_guarantee_before;
+    update public.room_players set coins = v_guarantee where room_id = p_room_id and role = 'boss';
+    insert into public.game_events(room_id, message)
+    values (
+      p_room_id,
+      '老板保底' || case v_tile.effect_type
+        when 'guarantee_add' then '增加 ' || v_tile.effect_value || ' 万'
+        when 'guarantee_subtract' then '减少 ' || v_tile.effect_value || ' 万'
+        when 'guarantee_multiply' then '乘以 ' || v_tile.effect_value
+        else '除以 ' || v_tile.effect_value
+      end || '：' || v_guarantee_before || ' 万 → ' || v_guarantee || ' 万'
+    );
+  end if;
+  if v_tile.effect_type = 'move' then
+    insert into public.game_events(room_id, message)
+    values (p_room_id, v_player.nickname || case when v_tile.effect_value > 0 then ' 前进 ' else ' 后退 ' end || abs(v_tile.effect_value) || ' 格，到达第 ' || (v_position + 1) || ' 格');
+  end if;
+
+  if v_finished then
+    if not exists (select 1 from public.room_players where room_id = p_room_id and dice_count > 0) then
+      perform public.create_zero_dice_rule_internal(p_room_id);
+    end if;
+    update public.rooms set status = 'finished', is_paused = false, winner_id = auth.uid(), current_turn = null, rolls_remaining = 0 where id = p_room_id;
+    insert into public.game_events(room_id, message) values (p_room_id, v_player.nickname || ' 完成最终结算，本局结束');
+  else
+    if v_advanced then
+      v_next_round := v_room.current_round + 1;
+      v_next_size := case v_next_round when 2 then v_room.round2_board_size else v_room.round3_board_size end;
+      update public.rooms set current_round = v_next_round, board_size = v_next_size where id = p_room_id;
+      update public.room_players set position = 0, round_roll_count = 0 where room_id = p_room_id;
+      insert into public.game_events(room_id, message)
+      values (p_room_id, '队伍进入第 ' || v_next_round || ' 轮 ' || v_next_size || ' 格棋盘');
+    end if;
+    perform public.advance_room_turn_internal(p_room_id, v_player.turn_order);
+  end if;
+  return query select v_dice, v_position, v_change, v_finished;
+end;
+$$;
+
+revoke all on function public.generate_room_round_internal(uuid, integer, integer, boolean) from public;
+revoke all on function public.randomize_room_tile_internal(uuid) from public;
+revoke all on function public.admin_update_board_structure(uuid, integer, jsonb) from public;
+revoke all on function public.admin_update_room_tile(uuid, text, text, text, text, text, numeric, text, boolean) from public;
+grant execute on function public.admin_update_board_structure(uuid, integer, jsonb) to authenticated;
+grant execute on function public.admin_update_room_tile(uuid, text, text, text, text, text, numeric, text, boolean) to authenticated;
+
+select pg_notify('pgrst', 'reload schema');

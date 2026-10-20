@@ -104,7 +104,7 @@ const ROUND_GROUPS: Record<GameRound, TileDefinition['group'][]> = {
 export const PLAYER_COLORS = ['#dbff4b', '#ff725e', '#50c8ff']
 
 export const TILE_TYPE_LABELS: Record<TileType, string> = {
-  shared: '公共', boss: '老板', runner: '打手', empty: '空格', move: '移动', chance: '事件',
+  start: '起点', shared: '公共', boss: '老板', runner: '打手', empty: '空格', move: '移动', chance: '事件',
 }
 
 export const EFFECT_LABELS: Record<TileEffect, string> = {
@@ -131,10 +131,12 @@ export function createRandomRoomTiles(roomId: string): RoomTile[] {
 
   for (const round of [1, 2, 3] as GameRound[]) {
     const usedNames = new Set<string>()
-    const groups = shuffled(ROUND_GROUPS[round])
+    const remainingGroups = [...ROUND_GROUPS[round]]
+    remainingGroups.splice(remainingGroups.indexOf('contract'), 1)
+    const groups = shuffled(remainingGroups)
     if (round < 3) {
-      const firstAdvancePosition = Math.floor(Math.random() * (groups.length / 2))
-      const advancePositions = [firstAdvancePosition, firstAdvancePosition + groups.length / 2]
+      const firstAdvancePosition = Math.floor(Math.random() * Math.floor(groups.length / 2))
+      const advancePositions = [firstAdvancePosition, firstAdvancePosition + Math.ceil(groups.length / 2)]
       ;(['advance_chance', 'advance'] as TileDefinition['group'][]).forEach((group, index) => {
         const currentPosition = groups.indexOf(group)
         const targetPosition = advancePositions[index]
@@ -143,7 +145,14 @@ export function createRandomRoomTiles(roomId: string): RoomTile[] {
     }
     if (round === 3) groups.push('finish')
 
-    groups.forEach((group, position) => {
+    tiles.push({
+      id: crypto.randomUUID(), room_id: roomId, template_id: null, round_number: round, position: 0,
+      name: '起点', short_name: '起点', tile_type: 'start', detail: '本轮行动从这里开始',
+      effect_type: 'none', effect_value: 0, tile_color: null, is_randomized: false, created_at: createdAt,
+    })
+
+    groups.forEach((group, groupPosition) => {
+      const position = groupPosition + 1
       const candidates = RULE_TEMPLATES[round].filter((rule) => rule.group === group)
       const fresh = candidates.filter((rule) => !usedNames.has(rule.name))
       const pool = fresh.length ? fresh : candidates
@@ -153,7 +162,7 @@ export function createRandomRoomTiles(roomId: string): RoomTile[] {
         id: crypto.randomUUID(), room_id: roomId, template_id: null, round_number: round, position,
         name: selected.name, short_name: selected.short_name, tile_type: selected.tile_type,
         detail: selected.detail, effect_type: selected.effect_type, effect_value: selected.effect_value,
-        created_at: createdAt,
+        tile_color: null, is_randomized: true, created_at: createdAt,
       })
     })
   }
@@ -168,7 +177,22 @@ export function getRoundTiles(tiles: RoomTile[], round: GameRound) {
 export function getBoardDimensions(size: number) {
   if (size === 8) return { columns: 3, rows: 3 }
   if (size === 12) return { columns: 4, rows: 4 }
-  return { columns: 8, rows: 6 }
+  if (size === 24) return { columns: 8, rows: 6 }
+
+  let best = { columns: Math.max(3, Math.ceil(size / 2)), rows: 3 }
+  let bestScore = Number.POSITIVE_INFINITY
+  for (let columns = 3; columns <= Math.max(3, size); columns += 1) {
+    for (let rows = 3; rows <= Math.max(3, size); rows += 1) {
+      const capacity = 2 * columns + 2 * rows - 4
+      if (capacity < size) continue
+      const score = (capacity - size) * 10 + Math.abs(columns - rows)
+      if (score < bestScore) {
+        best = { columns, rows }
+        bestScore = score
+      }
+    }
+  }
+  return best
 }
 
 export function getBoardGridPosition(index: number, size: number) {

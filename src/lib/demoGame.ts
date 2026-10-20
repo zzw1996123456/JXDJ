@@ -16,7 +16,9 @@ export function createDemoRoom(nickname: string, role: PlayerRole): GameSnapshot
     id: 'demo-room', name: '本机试玩房', code: 'DEMO88', host_user_id: DEMO_USER_ID, status: 'lobby', is_paused: false,
     current_turn: null, winner_id: null, board_size: 8, target_laps: 3, current_round: 1,
     round1_advance_chance: 35, round2_advance_chance: 30, starting_player_id: DEMO_USER_ID,
-    rolls_per_turn: 2, rolls_remaining: 2, base_guarantee: 100, created_at: now(),
+    rolls_per_turn: 2, rolls_remaining: 2, base_guarantee: 100,
+    total_rounds: 3, round1_board_size: 8, round2_board_size: 12, round3_board_size: 24,
+    imported_config: false, created_at: now(),
   }
 
   const player: Player = {

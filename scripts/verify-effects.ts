@@ -196,6 +196,11 @@ for (let index = 0; index < 50; index += 1) {
   for (const [round, size] of [[1, 8], [2, 12], [3, 24]] as const) {
     const roundTiles = tiles.filter((tile) => tile.round_number === round)
     assert.equal(roundTiles.length, size)
+    const startTiles = roundTiles.filter((tile) => tile.tile_type === 'start')
+    assert.equal(startTiles.length, 1)
+    assert.equal(startTiles[0].position, 0)
+    assert.equal(startTiles[0].effect_type, 'none')
+    assert.equal(startTiles[0].is_randomized, false)
     assert.ok(roundTiles.some((tile) => tile.tile_type === 'empty'))
   }
   for (const round of [1, 2] as const) {
