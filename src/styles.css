@@ -1415,68 +1415,42 @@ button.mode-card {
 
 .tile-editor-layout {
   display: grid;
-  grid-template-columns: minmax(270px, 0.8fr) minmax(360px, 1.2fr);
+  grid-template-columns: minmax(500px, 1.45fr) minmax(340px, 0.8fr);
   gap: 14px;
   margin-top: 14px;
+  align-items: start;
 }
 
-.admin-tile-list {
-  align-content: start;
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 6px;
-  max-height: 390px;
-  overflow-y: auto;
+.admin-board {
+  min-height: 0;
+  flex: none;
+  aspect-ratio: 4 / 3;
 }
 
-.admin-tile-list button {
-  min-width: 0;
-  min-height: 64px;
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  grid-template-rows: auto auto;
-  gap: 2px 7px;
-  border: 1px solid #343a31;
-  border-top: 3px solid #60675a;
-  border-radius: 3px;
-  background: #171a15;
-  padding: 7px;
+.admin-board.board-size-8,
+.admin-board.board-size-12 {
+  aspect-ratio: 1;
+}
+
+.admin-board .tile {
+  appearance: none;
   color: var(--ink);
   cursor: pointer;
+  font: inherit;
   text-align: left;
 }
 
-.admin-tile-list button.active {
-  border-color: var(--acid);
-  background: #252b1c;
+.admin-board .tile.selected {
+  z-index: 2;
+  outline: 2px solid var(--acid);
+  outline-offset: -2px;
+  box-shadow: inset 0 0 0 1px #11130f;
 }
 
-.admin-tile-list button.tile-kind-boss { border-top-color: #ffd166; }
-.admin-tile-list button.tile-kind-runner { border-top-color: var(--cyan); }
-.admin-tile-list button.tile-kind-move { border-top-color: #67d39a; }
-.admin-tile-list button.tile-kind-chance { border-top-color: var(--orange); }
-.admin-tile-list button.tile-kind-shared { border-top-color: var(--acid); }
-
-.admin-tile-list button > span {
-  grid-row: 1 / 3;
-  color: #666e62;
-  font-family: 'Barlow Condensed', sans-serif;
-  font-size: 12px;
-}
-
-.admin-tile-list strong {
-  overflow: hidden;
-  font-size: 10px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.admin-tile-list small {
-  overflow: hidden;
-  color: #798175;
-  font-size: 8px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.admin-board .tile:focus-visible {
+  z-index: 3;
+  outline: 2px solid var(--cyan);
+  outline-offset: -2px;
 }
 
 .tile-edit-form {
@@ -2220,6 +2194,10 @@ button.mode-card {
     max-height: 250px;
   }
 
+  .tile-editor-layout {
+    grid-template-columns: 1fr;
+  }
+
   .hero-copy {
     padding-top: 40px;
   }
@@ -2241,6 +2219,10 @@ button.mode-card {
 
   .board {
     min-height: 640px;
+  }
+
+  .admin-board {
+    min-height: 0;
   }
 
   .game-sidebar {
@@ -2367,11 +2349,6 @@ button.mode-card {
     grid-column: auto;
   }
 
-  .admin-tile-list {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    max-height: 330px;
-  }
-
   .admin-event-row {
     grid-template-columns: 58px 1fr;
   }
@@ -2446,6 +2423,10 @@ button.mode-card {
     grid-template-rows: repeat(var(--board-rows), minmax(52px, 1fr));
     gap: 2px;
     padding: 2px;
+  }
+
+  .admin-board {
+    min-height: 0;
   }
 
   .tile {

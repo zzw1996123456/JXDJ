@@ -357,7 +357,7 @@ function PlayerAvatar({ player, index }: { player: Player; index: number }) {
   )
 }
 
-function RoomHeader({ snapshot, onExit }: { snapshot: GameSnapshot; onExit: () => void }) {
+function RoomHeader({ snapshot }: { snapshot: GameSnapshot }) {
   const [copied, setCopied] = useState(false)
 
   async function copyCode() {
@@ -376,9 +376,6 @@ function RoomHeader({ snapshot, onExit }: { snapshot: GameSnapshot; onExit: () =
           <strong>{snapshot.room.code}</strong>
           {copied ? <Check size={16} /> : <Clipboard size={16} />}
           {copied && <small className="copy-confirmation">已复制</small>}
-        </button>
-        <button aria-label="暂离房间" className="icon-button" onClick={onExit} title="暂离房间（保留席位）" type="button">
-          <ArrowLeft size={19} />
         </button>
       </div>
     </header>
@@ -944,15 +941,17 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                     ))}
                   </div>
                   <div className="tile-editor-layout">
-                    <div className="admin-tile-list">
-                      {selectedRoundTiles.map((tile) => (
-                        <button className={`${selectedTileId === tile.id ? 'active' : ''} tile-kind-${tile.tile_type}`} key={tile.id} onClick={() => chooseTile(tile)} type="button">
-                          <span>{String(tile.position + 1).padStart(2, '0')}</span>
-                          <strong>{tile.short_name}</strong>
-                          <small>{EFFECT_LABELS[tile.effect_type]}</small>
-                        </button>
-                      ))}
-                    </div>
+                    {selectedRoundTiles.length > 0 && (
+                      <Board
+                        className="admin-board"
+                        displayRound={editorRound}
+                        onTileSelect={chooseTile}
+                        players={[]}
+                        room={selectedRoom}
+                        selectedTileId={selectedTileId}
+                        tiles={roomTiles}
+                      />
+                    )}
                     {tileDraft ? (
                       <div className="tile-edit-form">
                         <div className="tile-edit-title">
@@ -1036,13 +1035,11 @@ function LobbyView({
   busy,
   onReady,
   onStart,
-  onExit,
 }: {
   snapshot: GameSnapshot
   busy: boolean
   onReady: () => void
   onStart: () => void
-  onExit: () => void
 }) {
   const currentPlayer = snapshot.players.find((player) => player.user_id === snapshot.userId)
   const boss = snapshot.players.find((player) => player.role === 'boss')
@@ -1056,7 +1053,7 @@ function LobbyView({
 
   return (
     <div className="app-shell">
-      <RoomHeader onExit={onExit} snapshot={snapshot} />
+      <RoomHeader snapshot={snapshot} />
       <main className="lobby-layout">
         <section className="lobby-intro">
           <p className="eyebrow"><Radio size={14} /> 集结阶段</p>
@@ -1129,14 +1126,30 @@ function LobbyView({
   )
 }
 
-function Board({ players, room, tiles: allTiles }: { players: Player[]; room: Room; tiles: RoomTile[] }) {
-  const tiles = getRoundTiles(allTiles, room.current_round)
+function Board({
+  players,
+  room,
+  tiles: allTiles,
+  displayRound = room.current_round,
+  className = '',
+  selectedTileId,
+  onTileSelect,
+}: {
+  players: Player[]
+  room: Room
+  tiles: RoomTile[]
+  displayRound?: GameRound
+  className?: string
+  selectedTileId?: string | null
+  onTileSelect?: (tile: RoomTile) => void
+}) {
+  const tiles = getRoundTiles(allTiles, displayRound)
   const dimensions = getBoardDimensions(tiles.length)
 
   return (
     <div
-      aria-label={`${ROUND_LABELS[room.current_round]}行动棋盘`}
-      className={`board board-size-${tiles.length}`}
+      aria-label={`${ROUND_LABELS[displayRound]}行动棋盘`}
+      className={`board board-size-${tiles.length} ${className}`.trim()}
       style={{
         '--board-columns': dimensions.columns,
         '--board-rows': dimensions.rows,
@@ -1146,8 +1159,8 @@ function Board({ players, room, tiles: allTiles }: { players: Player[]; room: Ro
         const playersHere = players
           .map((player, playerIndex) => ({ player, playerIndex }))
           .filter(({ player }) => player.position === index)
-        return (
-          <div className={`tile tile-${tile.tile_type}`} key={tile.id} style={getBoardGridPosition(index, tiles.length)}>
+        const tileContent = (
+          <>
             <span className="tile-number">{String(index + 1).padStart(2, '0')}</span>
             <span className="tile-owner">{TILE_TYPE_LABELS[tile.tile_type]}</span>
             <strong>{tile.short_name}</strong>
@@ -1157,16 +1170,34 @@ function Board({ players, room, tiles: allTiles }: { players: Player[]; room: Ro
                 <PlayerAvatar index={playerIndex} key={player.id} player={player} />
               ))}
             </div>
+          </>
+        )
+        const tileClassName = `tile tile-${tile.tile_type} ${selectedTileId === tile.id ? 'selected' : ''}`.trim()
+        return onTileSelect ? (
+          <button
+            aria-label={`编辑第 ${index + 1} 格：${tile.short_name}`}
+            aria-pressed={selectedTileId === tile.id}
+            className={tileClassName}
+            key={tile.id}
+            onClick={() => onTileSelect(tile)}
+            style={getBoardGridPosition(index, tiles.length)}
+            type="button"
+          >
+            {tileContent}
+          </button>
+        ) : (
+          <div className={tileClassName} key={tile.id} style={getBoardGridPosition(index, tiles.length)}>
+            {tileContent}
           </div>
         )
       })}
       <div
         className="board-center"
-        data-round={room.current_round}
+        data-round={displayRound}
         style={{ gridColumn: `2 / ${dimensions.columns}`, gridRow: `2 / ${dimensions.rows}` }}
       >
         <span className="center-mark"><span /></span>
-        <p>{ROUND_LABELS[room.current_round]} · {tiles.length} CELLS</p>
+        <p>{ROUND_LABELS[displayRound]} · {tiles.length} CELLS</p>
         <strong>护航协议局</strong>
         <small>每个房间使用独立随机棋盘</small>
       </div>
@@ -1203,7 +1234,7 @@ function GameView({
 
   return (
     <div className="app-shell game-shell">
-      <RoomHeader onExit={onExit} snapshot={snapshot} />
+      <RoomHeader snapshot={snapshot} />
       <main className="game-layout">
         <section className="board-section">
           <div className="turn-strip">
@@ -1511,7 +1542,7 @@ export default function App() {
         />
       )}
       {snapshot?.room.status === 'lobby' && (
-        <LobbyView busy={busy} onExit={exitRoom} onReady={toggleReady} onStart={startGame} snapshot={snapshot} />
+        <LobbyView busy={busy} onReady={toggleReady} onStart={startGame} snapshot={snapshot} />
       )}
       {snapshot && snapshot.room.status !== 'lobby' && (
         <GameView busy={busy} dice={dice} onAddDemoDice={addDemoDice} onExit={exitRoom} onRestart={restartDemo} onRoll={rollDice} snapshot={snapshot} />
