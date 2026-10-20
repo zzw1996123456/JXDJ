@@ -100,6 +100,16 @@ button:disabled {
   background: #282d24;
 }
 
+.admin-header-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cache-button {
+  color: var(--acid);
+}
+
 .mode-hub {
   width: min(1240px, calc(100% - 48px));
   min-height: calc(100vh - 76px);
@@ -1325,6 +1335,13 @@ button.mode-card {
   margin-top: 0;
 }
 
+.probability-note {
+  margin: 0 0 12px;
+  color: #929a8c;
+  font-size: 10px;
+  line-height: 1.6;
+}
+
 .percent-input {
   height: 42px;
   display: flex;
@@ -2281,6 +2298,10 @@ button.mode-card {
   .back-link svg {
     flex: 0 0 auto;
     color: var(--ink);
+  }
+
+  .cache-button span {
+    display: none;
   }
 
   .home-shell,

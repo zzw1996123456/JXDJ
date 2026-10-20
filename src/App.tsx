@@ -393,6 +393,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
   const [busy, setBusy] = useState(false)
   const [creating, setCreating] = useState(false)
   const [codeCopied, setCodeCopied] = useState(false)
+  const [cacheCleared, setCacheCleared] = useState(false)
   const [error, setError] = useState('')
   const [rooms, setRooms] = useState<Room[]>([])
   const [newRoomName, setNewRoomName] = useState('')
@@ -641,7 +642,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       if (!supabase) return
       const rollCount = Number(rollsPerTurn)
       if (!Number.isInteger(rollCount) || rollCount < 1 || rollCount > 5) {
-        throw new Error('每回合掷骰次数必须是 1–5 的整数')
+        throw new Error('初始骰子数量必须是 1–5 的整数')
       }
       if (startingPlayerId && !selectedPlayers.some((player) => player.user_id === startingPlayerId)) {
         throw new Error('首位玩家必须在当前房间中')
@@ -760,6 +761,27 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
     window.setTimeout(() => setCodeCopied(false), 1600)
   }
 
+  function clearCaches() {
+    void runAdminAction(async () => {
+      if (!supabase) return
+      const { error: rpcError } = await supabase.rpc('admin_clear_cache')
+      if (rpcError) throw rpcError
+      localStorage.removeItem(ACTIVE_ROOM_KEY)
+      localStorage.removeItem(LAST_ROOM_CODE_KEY)
+      localStorage.removeItem(NICKNAME_KEY)
+      if ('caches' in window) {
+        const cacheNames = await window.caches.keys()
+        await Promise.all(cacheNames.map((name) => window.caches.delete(name)))
+      }
+      setEvents([])
+      setRoomTiles([])
+      await loadDashboard()
+      if (selectedRoomId) await Promise.all([loadRoomEvents(selectedRoomId), loadRoomTiles(selectedRoomId)])
+      setCacheCleared(true)
+      window.setTimeout(() => setCacheCleared(false), 1800)
+    })
+  }
+
   if (checking) {
     return <div className="loading-screen"><Logo /><LoaderCircle className="spin" size={28} /></div>
   }
@@ -768,7 +790,14 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
     <div className="admin-page">
       <header className="portal-header">
         <Logo />
-        <button className="back-link" onClick={onBack} type="button"><ArrowLeft size={17} /> 返回玩家入口</button>
+        <div className="admin-header-tools">
+          {authorized && (
+            <button className="back-link cache-button" disabled={busy} onClick={clearCaches} title="清理前端与后端缓存" type="button">
+              {cacheCleared ? <Check size={17} /> : <RotateCcw size={17} />} <span>{cacheCleared ? '已清理' : '清理缓存'}</span>
+            </button>
+          )}
+          <button className="back-link" onClick={onBack} type="button"><ArrowLeft size={17} /> 返回玩家入口</button>
+        </div>
       </header>
 
       {!authorized ? (
@@ -869,7 +898,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                   <span><small>状态</small><strong>{roomStatusLabel(selectedRoom)}</strong></span>
                   <span><small>当前轮次</small><strong>{ROUND_LABELS[selectedRoom.current_round]}</strong></span>
                   <span><small>玩家</small><strong>{selectedPlayers.length} / 3</strong></span>
-                  <span><small>每回合掷骰</small><strong>{selectedRoom.rolls_per_turn} 次</strong></span>
+                  <span><small>初始骰子</small><strong>{selectedRoom.rolls_per_turn} 个</strong></span>
                 </div>
 
                 <section className="admin-turn-panel">
@@ -885,7 +914,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                       </select>
                     </label>
                     <label>
-                      <span>每回合连续掷骰次数</span>
+                      <span>每位玩家初始骰子数量</span>
                       <input disabled={selectedRoom.status !== 'lobby'} max="5" min="1" onChange={(event) => setRollsPerTurn(event.target.value)} type="number" value={rollsPerTurn} />
                     </label>
                     <button className="button secondary" disabled={busy || selectedRoom.status !== 'lobby'} onClick={saveRoomSettings} type="button"><Save size={17} /> 保存回合设置</button>
@@ -894,6 +923,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
 
                 <section className="admin-probability-panel">
                   <div className="section-title"><p className="kicker">每次掷骰晋级概率</p><Settings2 size={18} /></div>
+                  <p className="probability-note">仅老板可以晋级；老板每轮前 2 次掷骰为保护期，打手不会触发晋级。</p>
                   <div className="probability-grid">
                     <label><span>第一轮 → 第二轮</span><span className="percent-input"><input max="100" min="0" onChange={(event) => setRound1Chance(event.target.value)} type="number" value={round1Chance} /><b>%</b></span></label>
                     <label><span>第二轮 → 第三轮</span><span className="percent-input"><input max="100" min="0" onChange={(event) => setRound2Chance(event.target.value)} type="number" value={round2Chance} /><b>%</b></span></label>
@@ -968,7 +998,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                         <PlayerAvatar index={index} player={player} />
                         <span><strong>{player.nickname}</strong><small>{player.role === 'boss' ? '老板' : '打手'}{player.user_id === selectedRoom.starting_player_id ? ' · 先手' : ''} · {player.is_ready ? '已准备' : '未准备'}</small></span>
                         <div className="admin-dice-stepper">
-                          <button aria-label={`减少 ${player.nickname} 的骰子`} disabled={busy || selectedRoom.status === 'finished' || player.dice_count <= 1} onClick={() => adjustPlayerDice(player.id, -1)} title="减少 1 个骰子" type="button"><Minus size={14} /></button>
+                          <button aria-label={`减少 ${player.nickname} 的骰子`} disabled={busy || selectedRoom.status === 'finished' || player.dice_count <= 0} onClick={() => adjustPlayerDice(player.id, -1)} title="减少 1 个骰子" type="button"><Minus size={14} /></button>
                           <strong><Dice5 size={13} /> {player.dice_count}</strong>
                           <button aria-label={`增加 ${player.nickname} 的骰子`} disabled={busy || selectedRoom.status === 'finished' || player.dice_count >= 20} onClick={() => adjustPlayerDice(player.id, 1)} title="增加 1 个骰子" type="button"><Plus size={14} /></button>
                         </div>
@@ -1036,7 +1066,7 @@ function LobbyView({
             <span><Flag size={17} /> 三轮推演</span>
             <span><Dice5 size={17} /> 8 → 12 → 24 格</span>
             <span><Users size={17} /> 最多 3 人</span>
-            <span><Radio size={17} /> 每回合 {snapshot.room.rolls_per_turn} 次</span>
+            <span><Radio size={17} /> 初始骰子 {snapshot.room.rolls_per_turn} 个</span>
           </div>
         </section>
 
@@ -1149,6 +1179,7 @@ function GameView({
   busy,
   dice,
   onRoll,
+  onAddDemoDice,
   onRestart,
   onExit,
 }: {
@@ -1156,6 +1187,7 @@ function GameView({
   busy: boolean
   dice: number | null
   onRoll: () => void
+  onAddDemoDice: () => void
   onRestart: () => void
   onExit: () => void
 }) {
@@ -1163,6 +1195,7 @@ function GameView({
   const ownPlayer = snapshot.players.find((player) => player.user_id === snapshot.userId)
   const winner = snapshot.players.find((player) => player.user_id === snapshot.room.winner_id)
   const isMyTurn = snapshot.room.current_turn === snapshot.userId
+  const waitingForDice = snapshot.room.status === 'playing' && snapshot.room.current_turn === null
   const sortedPlayers = useMemo(
     () => [...snapshot.players].sort((a, b) => b.distance - a.distance || b.coins - a.coins),
     [snapshot.players],
@@ -1176,7 +1209,7 @@ function GameView({
           <div className="turn-strip">
             <div>
               <span className={`turn-indicator ${isMyTurn && !snapshot.room.is_paused ? 'active' : ''}`} />
-              <p>{snapshot.room.is_paused ? '本局已暂停' : snapshot.room.status === 'finished' ? '行动结束' : isMyTurn ? '轮到你行动' : `等待 ${currentPlayer?.nickname ?? '队员'}`}</p>
+              <p>{snapshot.room.is_paused ? '本局已暂停' : snapshot.room.status === 'finished' ? '行动结束' : waitingForDice ? snapshot.isDemo ? '试玩骰子已用完' : '等待管理员补充骰子' : isMyTurn ? '轮到你行动' : `等待 ${currentPlayer?.nickname ?? '队员'}`}</p>
             </div>
             <span>{ROUND_LABELS[snapshot.room.current_round]} · {snapshot.room.board_size} 格 · 当前骰子 {ownPlayer?.dice_count ?? 0} 个</span>
           </div>
@@ -1188,10 +1221,13 @@ function GameView({
             <div className={`dice-face ${busy ? 'rolling' : ''}`} aria-label={dice ? `骰子点数 ${dice}` : '等待掷骰'}>
               {dice ?? <Dice5 size={34} />}
             </div>
-            <button className="button primary roll-button" disabled={busy || snapshot.room.is_paused || !isMyTurn || snapshot.room.status !== 'playing'} onClick={onRoll} type="button">
+            <button className="button primary roll-button" disabled={busy || snapshot.room.is_paused || !isMyTurn || snapshot.room.status !== 'playing' || (ownPlayer?.dice_count ?? 0) <= 0} onClick={onRoll} type="button">
               {busy ? <LoaderCircle className="spin" size={19} /> : <Dice5 size={19} />}
-              {snapshot.room.is_paused ? '等待管理员继续' : isMyTurn ? `掷骰行动 · 剩余 ${ownPlayer?.dice_count ?? 0}` : '等待回合'}
+              {snapshot.room.is_paused ? '等待管理员继续' : waitingForDice ? '等待补充骰子' : isMyTurn ? `掷骰行动 · 剩余 ${ownPlayer?.dice_count ?? 0}` : '等待回合'}
             </button>
+            {snapshot.isDemo && waitingForDice && (
+              <button className="button secondary roll-button" onClick={onAddDemoDice} type="button"><Plus size={19} /> 补充 1 个骰子</button>
+            )}
           </section>
 
           <section className="ranking-panel">
@@ -1435,6 +1471,25 @@ export default function App() {
     setDice(null)
   }
 
+  function addDemoDice() {
+    setSnapshot((current) => {
+      if (!current?.isDemo || current.room.status !== 'playing') return current
+      const player = current.players[0]
+      const nextCount = Math.min(20, player.dice_count + 1)
+      return {
+        ...current,
+        room: { ...current.room, current_turn: player.user_id, rolls_remaining: nextCount },
+        players: [{ ...player, dice_count: nextCount }],
+        events: [{
+          id: crypto.randomUUID(),
+          room_id: current.room.id,
+          message: `${player.nickname} 在试玩模式补充了 1 个骰子`,
+          created_at: new Date().toISOString(),
+        }, ...current.events],
+      }
+    })
+  }
+
   if (loading) {
     return <div className="loading-screen"><Logo /><LoaderCircle className="spin" size={28} /></div>
   }
@@ -1459,7 +1514,7 @@ export default function App() {
         <LobbyView busy={busy} onExit={exitRoom} onReady={toggleReady} onStart={startGame} snapshot={snapshot} />
       )}
       {snapshot && snapshot.room.status !== 'lobby' && (
-        <GameView busy={busy} dice={dice} onExit={exitRoom} onRestart={restartDemo} onRoll={rollDice} snapshot={snapshot} />
+        <GameView busy={busy} dice={dice} onAddDemoDice={addDemoDice} onExit={exitRoom} onRestart={restartDemo} onRoll={rollDice} snapshot={snapshot} />
       )}
       {error && (
         <div className="toast" role="alert">

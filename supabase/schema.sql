@@ -50,6 +50,7 @@ create table if not exists public.room_players (
   skip_turns integer not null default 0,
   next_roll_modifier integer not null default 0,
   dice_count integer not null default 1 check (dice_count between 0 and 20),
+  round_roll_count integer not null default 0 check (round_roll_count >= 0),
   created_at timestamptz not null default now(),
   unique (room_id, user_id),
   unique (room_id, turn_order)
@@ -57,6 +58,7 @@ create table if not exists public.room_players (
 
 alter table public.room_players add column if not exists skip_turns integer not null default 0;
 alter table public.room_players add column if not exists next_roll_modifier integer not null default 0;
+alter table public.room_players add column if not exists round_roll_count integer not null default 0;
 do $$
 begin
   if not exists (
@@ -72,6 +74,8 @@ begin
 end $$;
 alter table public.room_players drop constraint if exists room_players_dice_count_check;
 alter table public.room_players add constraint room_players_dice_count_check check (dice_count between 0 and 20);
+alter table public.room_players drop constraint if exists room_players_round_roll_count_check;
+alter table public.room_players add constraint room_players_round_roll_count_check check (round_roll_count >= 0);
 alter table public.room_players alter column coins set default 100;
 
 create table if not exists public.game_events (
@@ -509,6 +513,77 @@ begin
 end;
 $$;
 
+create or replace function public.advance_room_turn_internal(p_room_id uuid, p_after_order integer)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_room public.rooms%rowtype;
+  v_candidate public.room_players%rowtype;
+  v_player_count integer;
+  v_order integer := coalesce(p_after_order, -1);
+  v_step integer;
+  v_next_rolls integer;
+begin
+  select * into v_room from public.rooms where id = p_room_id for update;
+  if not found or v_room.status <> 'playing' then raise exception '当前没有进行中的行动'; end if;
+  select count(*) into v_player_count from public.room_players where room_id = p_room_id;
+  if v_player_count = 0 then raise exception '房间内没有玩家'; end if;
+
+  for v_step in 1..greatest(v_player_count * 6, 6) loop
+    select * into v_candidate from public.room_players
+    where room_id = p_room_id and turn_order > v_order order by turn_order limit 1;
+    if not found then
+      select * into v_candidate from public.room_players where room_id = p_room_id order by turn_order limit 1;
+    end if;
+    if v_candidate.id is null then exit; end if;
+
+    if v_candidate.skip_turns > 0 then
+      update public.room_players set skip_turns = skip_turns - 1 where id = v_candidate.id;
+      insert into public.game_events(room_id, message) values (p_room_id, v_candidate.nickname || ' 跳过 1 次行动');
+      v_order := v_candidate.turn_order;
+    else
+      v_next_rolls := greatest(0, least(20, v_candidate.dice_count + v_candidate.next_roll_modifier));
+      update public.room_players set next_roll_modifier = 0, dice_count = v_next_rolls where id = v_candidate.id;
+      if v_next_rolls = 0 then
+        insert into public.game_events(room_id, message)
+        values (p_room_id, v_candidate.nickname || ' 没有可用骰子，自动跳过本回合');
+        v_order := v_candidate.turn_order;
+      else
+        update public.rooms set current_turn = v_candidate.user_id, rolls_remaining = v_next_rolls where id = p_room_id;
+        return;
+      end if;
+    end if;
+
+    if mod(v_step, v_player_count) = 0 and not exists (
+      select 1 from public.room_players where room_id = p_room_id and dice_count > 0
+    ) then
+      update public.rooms set current_turn = null, rolls_remaining = 0 where id = p_room_id;
+      insert into public.game_events(room_id, message)
+      values (p_room_id, '所有玩家都没有可用骰子，等待管理员补充');
+      return;
+    end if;
+  end loop;
+
+  update public.rooms set current_turn = null, rolls_remaining = 0 where id = p_room_id;
+  insert into public.game_events(room_id, message)
+  values (p_room_id, '当前没有可行动玩家，等待管理员处理');
+end;
+$$;
+
+revoke all on function public.advance_room_turn_internal(uuid, integer) from public;
+revoke all on function public.advance_room_turn_internal(uuid, integer) from authenticated;
+
+create or replace function public.admin_clear_cache()
+returns void
+language plpgsql security definer set search_path = public
+as $$
+begin
+  if not public.is_admin() then raise exception '只有管理员可以清理缓存'; end if;
+  perform pg_notify('pgrst', 'reload schema');
+end;
+$$;
+
 create or replace function public.admin_update_round_chances(
   p_room_id uuid, p_round1_chance integer, p_round2_chance integer
 )
@@ -533,7 +608,7 @@ language plpgsql security definer set search_path = public
 as $$
 begin
   if not public.is_admin() then raise exception '只有管理员可以修改回合设置'; end if;
-  if p_rolls_per_turn not between 1 and 5 then raise exception '每回合掷骰次数必须在 1 到 5 之间'; end if;
+  if p_rolls_per_turn not between 1 and 5 then raise exception '初始骰子数量必须在 1 到 5 之间'; end if;
   if p_starting_player_id is not null and not exists (
     select 1 from public.room_players where room_id = p_room_id and user_id = p_starting_player_id
   ) then raise exception '首位玩家不在当前房间'; end if;
@@ -542,7 +617,7 @@ begin
   where id = p_room_id and status = 'lobby';
   if not found then raise exception '只能在开局前修改回合设置'; end if;
   update public.room_players set dice_count = p_rolls_per_turn where room_id = p_room_id;
-  insert into public.game_events(room_id, message) values (p_room_id, '管理员更新了首位玩家和每回合掷骰次数');
+  insert into public.game_events(room_id, message) values (p_room_id, '管理员更新了首位玩家和初始骰子数量');
 end;
 $$;
 
@@ -562,13 +637,21 @@ begin
   select * into v_player from public.room_players where id = p_player_id and room_id = p_room_id for update;
   if not found then raise exception '玩家不在当前房间'; end if;
   v_next_count := v_player.dice_count + p_delta;
-  if v_next_count not between 1 and 20 then raise exception '玩家骰子数量必须在 1 到 20 之间'; end if;
+  if v_next_count not between 0 and 20 then raise exception '玩家骰子数量必须在 0 到 20 之间'; end if;
   update public.room_players set dice_count = v_next_count where id = v_player.id;
-  if v_room.status = 'playing' and v_room.current_turn = v_player.user_id then
-    update public.rooms set rolls_remaining = v_next_count where id = p_room_id;
-  end if;
   insert into public.game_events(room_id, message)
   values (p_room_id, '管理员为 ' || v_player.nickname || case when p_delta > 0 then ' 增加 1 个骰子' else ' 减少 1 个骰子' end || '，当前 ' || v_next_count || ' 个');
+  if v_room.status = 'playing' and v_room.current_turn = v_player.user_id then
+    if v_next_count = 0 then
+      insert into public.game_events(room_id, message)
+      values (p_room_id, v_player.nickname || ' 没有可用骰子，自动跳过本回合');
+      perform public.advance_room_turn_internal(p_room_id, v_player.turn_order);
+    else
+      update public.rooms set rolls_remaining = v_next_count where id = p_room_id;
+    end if;
+  elsif v_room.status = 'playing' and v_room.current_turn is null and v_next_count > 0 then
+    perform public.advance_room_turn_internal(p_room_id, v_player.turn_order - 1);
+  end if;
 end;
 $$;
 
@@ -646,6 +729,7 @@ as $$
 declare
   v_first_user uuid;
   v_first_name text;
+  v_first_order integer;
   v_rolls integer;
 begin
   if not public.is_admin() then raise exception '只有管理员可以开始房间'; end if;
@@ -686,21 +770,24 @@ begin
     )
   ) then raise exception '第一轮或第二轮的晋级格布局无效，请重新随机全部三轮'; end if;
 
-  select p.user_id, p.nickname into v_first_user, v_first_name
+  select p.user_id, p.nickname, p.turn_order into v_first_user, v_first_name, v_first_order
   from public.room_players p join public.rooms r on r.id = p.room_id
   where p.room_id = p_room_id and p.user_id = r.starting_player_id limit 1;
   if v_first_user is null then
-    select user_id, nickname into v_first_user, v_first_name from public.room_players
+    select user_id, nickname, turn_order into v_first_user, v_first_name, v_first_order from public.room_players
     where room_id = p_room_id order by turn_order limit 1;
   end if;
-  select rolls_per_turn into v_rolls from public.rooms where id = p_room_id;
-  update public.rooms set status = 'playing', is_paused = false, current_turn = v_first_user, current_round = 1,
-    board_size = 8, winner_id = null, rolls_remaining = v_rolls where id = p_room_id;
+  update public.rooms set status = 'playing', is_paused = false, current_turn = null, current_round = 1,
+    board_size = 8, winner_id = null, rolls_remaining = 0 where id = p_room_id;
   update public.room_players set position = 0, distance = 0, coins = 100, skip_turns = 0,
-    next_roll_modifier = 0, dice_count = v_rolls
+    next_roll_modifier = 0, round_roll_count = 0
   where room_id = p_room_id;
+  perform public.advance_room_turn_internal(p_room_id, v_first_order - 1);
+  select p.user_id, p.nickname, r.rolls_remaining into v_first_user, v_first_name, v_rolls
+  from public.rooms r join public.room_players p on p.room_id = r.id and p.user_id = r.current_turn
+  where r.id = p_room_id;
   insert into public.game_events(room_id, message)
-  values (p_room_id, '本局开始，' || v_first_name || ' 先行动，每回合可掷 ' || v_rolls || ' 次');
+  values (p_room_id, '本局开始，' || v_first_name || ' 先行动，当前有 ' || v_rolls || ' 个骰子');
 end;
 $$;
 
@@ -769,7 +856,6 @@ declare
   v_room public.rooms%rowtype;
   v_player public.room_players%rowtype;
   v_tile public.room_tiles%rowtype;
-  v_candidate public.room_players%rowtype;
   v_dice integer;
   v_landed integer;
   v_position integer;
@@ -785,11 +871,6 @@ declare
   v_finished boolean := false;
   v_next_round integer;
   v_next_size integer;
-  v_player_count integer;
-  v_order integer;
-  v_step integer;
-  v_next_rolls integer;
-  v_next_found boolean := false;
 begin
   select * into v_room from public.rooms where id = p_room_id for update;
   if not found or v_room.status <> 'playing' then raise exception '当前没有进行中的行动'; end if;
@@ -801,7 +882,9 @@ begin
 
   if v_room.current_round < 3 then
     v_chance := case when v_room.current_round = 1 then v_room.round1_advance_chance else v_room.round2_advance_chance end;
-    v_should_advance := floor(random() * 100)::integer < v_chance;
+    v_should_advance := v_player.role = 'boss'
+      and v_player.round_roll_count >= 2
+      and floor(random() * 100)::integer < v_chance;
     select array_agg(candidate.dice order by candidate.dice) into v_candidate_dice
     from generate_series(1, 6) as candidate(dice)
     join public.room_tiles rt on rt.room_id = p_room_id
@@ -838,9 +921,13 @@ begin
     when 'lose_roll' then
       v_modifier := greatest(-4, v_modifier - v_tile.effect_value);
     when 'advance_chance' then
-      v_advanced := v_room.current_round < 3;
+      v_advanced := v_room.current_round < 3
+        and v_player.role = 'boss'
+        and v_player.round_roll_count >= 2;
     when 'advance_round' then
-      v_advanced := v_room.current_round < 3;
+      v_advanced := v_room.current_round < 3
+        and v_player.role = 'boss'
+        and v_player.round_roll_count >= 2;
     when 'finish' then
       v_finished := v_room.current_round = 3;
     else
@@ -849,7 +936,8 @@ begin
 
   update public.room_players set position = v_position, distance = v_distance,
     coins = greatest(0, coins + v_change), skip_turns = v_skip,
-    next_roll_modifier = v_modifier, dice_count = v_remaining
+    next_roll_modifier = v_modifier, dice_count = v_remaining,
+    round_roll_count = round_roll_count + 1
   where id = v_player.id;
   insert into public.game_events(room_id, message)
   values (p_room_id, v_player.nickname || ' 掷出 ' || v_dice || '，落到「' || v_tile.name || '」：' || v_tile.detail);
@@ -865,7 +953,7 @@ begin
       v_next_round := v_room.current_round + 1;
       v_next_size := case when v_next_round = 2 then 12 else 24 end;
       update public.rooms set current_round = v_next_round, board_size = v_next_size where id = p_room_id;
-      update public.room_players set position = 0 where room_id = p_room_id;
+      update public.room_players set position = 0, round_roll_count = 0 where room_id = p_room_id;
       insert into public.game_events(room_id, message)
       values (p_room_id, '队伍进入第' || case when v_next_round = 2 then '二' else '三' end || '轮 ' || v_next_size || ' 格棋盘');
     end if;
@@ -873,29 +961,7 @@ begin
     if v_remaining > 0 then
       update public.rooms set rolls_remaining = v_remaining where id = p_room_id;
     else
-      update public.room_players set dice_count = v_room.rolls_per_turn where id = v_player.id;
-      select count(*) into v_player_count from public.room_players where room_id = p_room_id;
-      v_order := v_player.turn_order;
-      for v_step in 1..greatest(v_player_count * 4, 4) loop
-        select * into v_candidate from public.room_players
-        where room_id = p_room_id and turn_order > v_order order by turn_order limit 1;
-        if not found then
-          select * into v_candidate from public.room_players where room_id = p_room_id order by turn_order limit 1;
-        end if;
-        if v_candidate.id is null then exit; end if;
-        if v_candidate.skip_turns > 0 then
-          update public.room_players set skip_turns = skip_turns - 1 where id = v_candidate.id;
-          insert into public.game_events(room_id, message) values (p_room_id, v_candidate.nickname || ' 跳过 1 次行动');
-          v_order := v_candidate.turn_order;
-        else
-          v_next_rolls := greatest(1, least(20, v_candidate.dice_count + v_candidate.next_roll_modifier));
-          update public.room_players set next_roll_modifier = 0, dice_count = v_next_rolls where id = v_candidate.id;
-          update public.rooms set current_turn = v_candidate.user_id, rolls_remaining = v_next_rolls where id = p_room_id;
-          v_next_found := true;
-          exit;
-        end if;
-      end loop;
-      if not v_next_found then raise exception '无法确定下一位行动玩家'; end if;
+      perform public.advance_room_turn_internal(p_room_id, v_player.turn_order);
     end if;
   end if;
 
@@ -906,6 +972,7 @@ $$;
 revoke all on function public.admin_create_room() from public;
 revoke all on function public.admin_create_room() from authenticated;
 revoke all on function public.admin_create_room(text) from public;
+revoke all on function public.admin_clear_cache() from public;
 revoke all on function public.admin_randomize_room_board(uuid) from public;
 revoke all on function public.join_room(text, text, text) from public;
 revoke all on function public.set_ready(uuid, boolean) from public;
@@ -921,6 +988,7 @@ revoke all on function public.leave_room(uuid) from public;
 revoke all on function public.roll_dice(uuid) from public;
 
 grant execute on function public.admin_create_room(text) to authenticated;
+grant execute on function public.admin_clear_cache() to authenticated;
 grant execute on function public.admin_randomize_room_board(uuid) to authenticated;
 grant execute on function public.join_room(text, text, text) to authenticated;
 grant execute on function public.set_ready(uuid, boolean) to authenticated;

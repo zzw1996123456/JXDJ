@@ -38,6 +38,7 @@ export interface Player {
   skip_turns: number
   next_roll_modifier: number
   dice_count: number
+  round_roll_count: number
   created_at: string
 }
 

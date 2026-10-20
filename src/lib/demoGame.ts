@@ -22,7 +22,7 @@ export function createDemoRoom(nickname: string, role: PlayerRole): GameSnapshot
   const player: Player = {
     id: 'demo-player-record', room_id: room.id, user_id: DEMO_USER_ID, nickname, role,
     position: 0, distance: 0, coins: 100, is_ready: true, turn_order: 0,
-    skip_turns: 0, next_roll_modifier: 0, dice_count: room.rolls_per_turn, created_at: now(),
+    skip_turns: 0, next_roll_modifier: 0, dice_count: room.rolls_per_turn, round_roll_count: 0, created_at: now(),
   }
 
   return {
@@ -45,8 +45,8 @@ export function startDemoGame(snapshot: GameSnapshot): GameSnapshot {
       current_turn: player.user_id,
       rolls_remaining: snapshot.room.rolls_per_turn,
     },
-    players: snapshot.players.map((item) => ({ ...item, dice_count: snapshot.room.rolls_per_turn })),
-    events: [event(snapshot.room.id, `试玩开始，${player.nickname} 先行动，每回合可掷 ${snapshot.room.rolls_per_turn} 次`), ...snapshot.events],
+    players: snapshot.players.map((item) => ({ ...item, dice_count: snapshot.room.rolls_per_turn, round_roll_count: 0 })),
+    events: [event(snapshot.room.id, `试玩开始，${player.nickname} 先行动，初始有 ${snapshot.room.rolls_per_turn} 个骰子`), ...snapshot.events],
   }
 }
 
@@ -86,14 +86,23 @@ export function resolveDemoDice(snapshot: GameSnapshot, dice: number): { snapsho
       break
     case 'advance_chance':
     case 'advance_round':
-      advanced = round < 3
+      advanced = round < 3 && (snapshot.isDemo || current.role === 'boss') && current.round_roll_count >= 2
       break
     case 'finish':
       finished = round === 3
       break
   }
 
-  let player: Player = { ...current, position, distance, coins, skip_turns: skipTurns, next_roll_modifier: nextRollModifier, dice_count: rollsRemaining }
+  let player: Player = {
+    ...current,
+    position,
+    distance,
+    coins,
+    skip_turns: skipTurns,
+    next_roll_modifier: nextRollModifier,
+    dice_count: rollsRemaining,
+    round_roll_count: current.round_roll_count + 1,
+  }
   addedEvents.push(event(snapshot.room.id, `${player.nickname} 掷出 ${dice}，落到「${tile.name}」：${tile.detail}`))
   if (tile.effect_type === 'move') {
     addedEvents.unshift(event(snapshot.room.id, `${player.nickname} ${tile.effect_value > 0 ? '前进' : '后退'} ${Math.abs(tile.effect_value)} 格，到达第 ${position + 1} 格`))
@@ -102,7 +111,7 @@ export function resolveDemoDice(snapshot: GameSnapshot, dice: number): { snapsho
   if (advanced) {
     const nextRound = (round + 1) as 2 | 3
     const nextTiles = getRoundTiles(snapshot.tiles, nextRound)
-    player = { ...player, position: 0 }
+    player = { ...player, position: 0, round_roll_count: 0 }
     room = { ...room, current_round: nextRound, board_size: nextTiles.length }
     addedEvents.unshift(event(room.id, `队伍进入第${nextRound === 2 ? '二' : '三'}轮 ${nextTiles.length} 格棋盘`))
   }
@@ -111,13 +120,8 @@ export function resolveDemoDice(snapshot: GameSnapshot, dice: number): { snapsho
     room = { ...room, status: 'finished', winner_id: player.user_id, current_turn: null, rolls_remaining: 0 }
     addedEvents.unshift(event(room.id, `${player.nickname} 完成最终结算，本局结束`))
   } else if (rollsRemaining <= 0) {
-    if (player.skip_turns > 0) {
-      player = { ...player, skip_turns: player.skip_turns - 1 }
-      addedEvents.unshift(event(room.id, `${player.nickname} 跳过 1 次行动`))
-    }
-    const nextRolls = Math.max(1, Math.min(20, room.rolls_per_turn + player.next_roll_modifier))
-    player = { ...player, next_roll_modifier: 0, dice_count: nextRolls }
-    room = { ...room, current_turn: player.user_id, rolls_remaining: nextRolls }
+    room = { ...room, current_turn: null, rolls_remaining: 0 }
+    addedEvents.unshift(event(room.id, `${player.nickname} 的骰子已用完，等待补充`))
   }
 
   return {
@@ -136,7 +140,8 @@ export function chooseDemoDice(snapshot: GameSnapshot, chanceRoll = Math.random(
   const tiles = getRoundTiles(snapshot.tiles, round)
   const player = snapshot.players[0]
   const advanceChance = round === 1 ? snapshot.room.round1_advance_chance : snapshot.room.round2_advance_chance
-  const shouldAdvance = round < 3 && chanceRoll < advanceChance
+  const canAdvance = (snapshot.isDemo || player.role === 'boss') && player.round_roll_count >= 2
+  const shouldAdvance = round < 3 && canAdvance && chanceRoll < advanceChance
   const candidates = [1, 2, 3, 4, 5, 6].filter((dice) => {
     const tile = tiles[(player.position + dice) % tiles.length]
     const isAdvance = tile.effect_type === 'advance_chance' || tile.effect_type === 'advance_round'

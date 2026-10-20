@@ -3,8 +3,8 @@ import { createRandomRoomTiles, RULE_TEMPLATES } from '../src/lib/board'
 import { chooseDemoDice, createDemoRoom, resolveDemoDice, startDemoGame } from '../src/lib/demoGame'
 import type { GameRound, RoomTile, TileEffect } from '../src/types'
 
-function snapshotFor(effect: TileEffect, value = 0, round: GameRound = 1) {
-  let snapshot = startDemoGame(createDemoRoom('测试玩家', 'runner'))
+function snapshotFor(effect: TileEffect, value = 0, round: GameRound = 1, roundRollCount = 2) {
+  let snapshot = startDemoGame(createDemoRoom('测试玩家', 'boss'))
   snapshot = {
     ...snapshot,
     room: {
@@ -13,7 +13,7 @@ function snapshotFor(effect: TileEffect, value = 0, round: GameRound = 1) {
       board_size: round === 1 ? 8 : round === 2 ? 12 : 24,
       rolls_remaining: 2,
     },
-    players: snapshot.players.map((player) => ({ ...player, position: 0, distance: 0, coins: 100, skip_turns: 0, next_roll_modifier: 0 })),
+    players: snapshot.players.map((player) => ({ ...player, position: 0, distance: 0, coins: 100, skip_turns: 0, next_roll_modifier: 0, round_roll_count: roundRollCount })),
   }
 
   const tileIndex = snapshot.tiles.findIndex((tile) => tile.round_number === round && tile.position === 1)
@@ -32,8 +32,8 @@ function snapshotFor(effect: TileEffect, value = 0, round: GameRound = 1) {
   return { ...snapshot, tiles }
 }
 
-function resolve(effect: TileEffect, value = 0, round: GameRound = 1) {
-  return resolveDemoDice(snapshotFor(effect, value, round), 1).snapshot
+function resolve(effect: TileEffect, value = 0, round: GameRound = 1, roundRollCount = 2) {
+  return resolveDemoDice(snapshotFor(effect, value, round, roundRollCount), 1).snapshot
 }
 
 const noEffect = resolve('none')
@@ -68,11 +68,22 @@ const penaltyTurnStart = snapshotFor('lose_roll', 1)
 penaltyTurnStart.room.rolls_remaining = 1
 penaltyTurnStart.players[0].dice_count = 1
 const penaltyTurn = resolveDemoDice(penaltyTurnStart, 1).snapshot
-assert.equal(penaltyTurn.room.rolls_remaining, 1)
-assert.equal(penaltyTurn.players[0].next_roll_modifier, 0)
+assert.equal(penaltyTurn.room.rolls_remaining, 0)
+assert.equal(penaltyTurn.players[0].dice_count, 0)
+assert.equal(penaltyTurn.room.current_turn, null)
+assert.equal(penaltyTurn.players[0].next_roll_modifier, -1)
+assert.match(penaltyTurn.events[0].message, /骰子已用完，等待补充/)
+
+const protectedAdvance = resolve('advance_round', 0, 1, 0)
+assert.equal(protectedAdvance.room.current_round, 1, '第一轮前两次掷骰不得晋级')
+assert.equal(protectedAdvance.players[0].round_roll_count, 1)
+
+const protectedRoundTwoAdvance = resolve('advance_round', 0, 2, 1)
+assert.equal(protectedRoundTwoAdvance.room.current_round, 2, '第二轮老板前两次掷骰也不得晋级')
 
 const successfulAdvance = resolve('advance_chance', 0, 1)
 assert.equal(successfulAdvance.room.current_round, 2)
+assert.equal(successfulAdvance.players[0].round_roll_count, 0)
 
 const successfulRoundTwoAdvance = resolve('advance_chance', 0, 2)
 assert.equal(successfulRoundTwoAdvance.room.current_round, 3)
@@ -129,18 +140,40 @@ for (let index = 0; index < 50; index += 1) {
   assert.equal(tiles.filter((tile) => tile.round_number === 3 && tile.effect_type === 'finish').length, 1)
 }
 
-const weighted = startDemoGame(createDemoRoom('概率测试', 'runner'))
+const weighted = startDemoGame(createDemoRoom('概率测试', 'boss'))
 weighted.room.round1_advance_chance = 0
 const zeroChanceDice = chooseDemoDice(weighted, 0, 0)
 const zeroChanceTile = weighted.tiles.find((tile) => tile.round_number === 1 && tile.position === zeroChanceDice)
 assert.ok(zeroChanceTile?.effect_type !== 'advance_chance' && zeroChanceTile?.effect_type !== 'advance_round', '0% 不得落到晋级格')
 
+weighted.room.round1_advance_chance = 100
+for (const protectedRollCount of [0, 1]) {
+  weighted.players[0].round_roll_count = protectedRollCount
+  const protectedDice = chooseDemoDice(weighted, 0, 0)
+  const protectedTile = weighted.tiles.find((tile) => tile.round_number === 1 && tile.position === protectedDice)
+  assert.ok(protectedTile?.effect_type !== 'advance_chance' && protectedTile?.effect_type !== 'advance_round', '第一轮前两次不得落到晋级格')
+}
+
 weighted.room.round1_advance_chance = 10
+weighted.players[0].round_roll_count = 2
 const successfulChanceDice = chooseDemoDice(weighted, 9, 0)
 const successfulChanceTile = weighted.tiles.find((tile) => tile.round_number === 1 && tile.position === successfulChanceDice)
 assert.ok(successfulChanceTile?.effect_type === 'advance_chance' || successfulChanceTile?.effect_type === 'advance_round', '10% 命中时必须落到晋级格')
 const failedChanceDice = chooseDemoDice(weighted, 10, 0)
 const failedChanceTile = weighted.tiles.find((tile) => tile.round_number === 1 && tile.position === failedChanceDice)
 assert.ok(failedChanceTile?.effect_type !== 'advance_chance' && failedChanceTile?.effect_type !== 'advance_round', '10% 未命中时不得落到晋级格')
+
+const onlineRunner = startDemoGame(createDemoRoom('打手测试', 'runner'))
+onlineRunner.isDemo = false
+onlineRunner.room.round1_advance_chance = 100
+onlineRunner.players[0].round_roll_count = 20
+const runnerDice = chooseDemoDice(onlineRunner, 0, 0)
+const runnerTile = onlineRunner.tiles.find((tile) => tile.round_number === 1 && tile.position === runnerDice)
+assert.ok(runnerTile?.effect_type !== 'advance_chance' && runnerTile?.effect_type !== 'advance_round', '打手不得落到晋级格')
+
+const forcedRunnerAdvance = snapshotFor('advance_round', 0, 1, 20)
+forcedRunnerAdvance.isDemo = false
+forcedRunnerAdvance.players[0].role = 'runner'
+assert.equal(resolveDemoDice(forcedRunnerAdvance, 1).snapshot.room.current_round, 1, '打手即使落到晋级格也不得晋级')
 
 console.log('效果回归测试通过：全部落格效果、分轮规则与 50 组三轮随机棋盘')
