@@ -20,7 +20,7 @@ export const RULE_TEMPLATES: Record<GameRound, TileDefinition[]> = {
     { name: '情报误导', short_name: '后退 2 格', tile_type: 'chance', detail: '遭遇错误情报，立即后退 2 格', effect_type: 'move', effect_value: -2, group: 'movement' },
     { name: '烟雾封路', short_name: '暂停 1 次', tile_type: 'chance', detail: '前路被封锁，跳过下一次行动', effect_type: 'skip', effect_value: 1, group: 'turn' },
     { name: '临时整备', short_name: '整备 1 次', tile_type: 'shared', detail: '留在原地完成整备，跳过下一次行动', effect_type: 'skip', effect_value: 1, group: 'turn' },
-    { name: '乘胜追击', short_name: '额外 1 次', tile_type: 'chance', detail: '本回合立即增加 1 次掷骰机会', effect_type: 'extra_roll', effect_value: 1, group: 'dice' },
+    { name: '乘胜追击', short_name: '额外 1 次', tile_type: 'chance', detail: '骰子库存立即增加 1 个，之后仍按顺序轮换', effect_type: 'extra_roll', effect_value: 1, group: 'dice' },
     { name: '弹药清点', short_name: '少摇 1 次', tile_type: 'chance', detail: '下个自己的回合减少 1 次掷骰', effect_type: 'lose_roll', effect_value: 1, group: 'dice' },
     { name: '快速通关', short_name: '直达二轮', tile_type: 'chance', detail: '触发快速通关，队伍直接进入第二轮', effect_type: 'advance_round', effect_value: 0, group: 'advance' },
     { name: '紧急转场', short_name: '进入二轮', tile_type: 'shared', detail: '到达本格后，队伍进入第二轮', effect_type: 'advance_chance', effect_value: 0, group: 'advance_chance' },
@@ -44,8 +44,8 @@ export const RULE_TEMPLATES: Record<GameRound, TileDefinition[]> = {
     { name: '等待情报', short_name: '暂停 1 次', tile_type: 'chance', detail: '等待情报确认，跳过下一次行动', effect_type: 'skip', effect_value: 1, group: 'turn' },
     { name: '受伤治疗', short_name: '暂停 2 次', tile_type: 'chance', detail: '需要治疗整备，跳过接下来 2 次行动', effect_type: 'skip', effect_value: 2, group: 'turn' },
     { name: '隐蔽观察', short_name: '隐蔽 1 次', tile_type: 'shared', detail: '原地观察敌情，跳过下一次行动', effect_type: 'skip', effect_value: 1, group: 'turn' },
-    { name: '连续推进', short_name: '额外 1 次', tile_type: 'chance', detail: '本回合立即增加 1 次掷骰机会', effect_type: 'extra_roll', effect_value: 1, group: 'dice' },
-    { name: '双线行动', short_name: '额外 2 次', tile_type: 'chance', detail: '本回合立即增加 2 次掷骰机会', effect_type: 'extra_roll', effect_value: 2, group: 'dice' },
+    { name: '连续推进', short_name: '额外 1 次', tile_type: 'chance', detail: '骰子库存立即增加 1 个，之后仍按顺序轮换', effect_type: 'extra_roll', effect_value: 1, group: 'dice' },
+    { name: '双线行动', short_name: '额外 2 次', tile_type: 'chance', detail: '骰子库存立即增加 2 个，之后仍按顺序轮换', effect_type: 'extra_roll', effect_value: 2, group: 'dice' },
     { name: '负重整理', short_name: '少摇 1 次', tile_type: 'chance', detail: '下个自己的回合减少 1 次掷骰', effect_type: 'lose_roll', effect_value: 1, group: 'dice' },
     { name: '通讯干扰', short_name: '少摇 2 次', tile_type: 'chance', detail: '下个自己的回合减少 2 次掷骰', effect_type: 'lose_roll', effect_value: 2, group: 'dice' },
     { name: '核心情报', short_name: '进入三轮', tile_type: 'chance', detail: '到达本格后，队伍进入第三轮', effect_type: 'advance_chance', effect_value: 0, group: 'advance_chance' },
@@ -78,11 +78,11 @@ export const RULE_TEMPLATES: Record<GameRound, TileDefinition[]> = {
     { name: '静默等待', short_name: '暂停 1 次', tile_type: 'chance', detail: '进入静默状态，跳过下一次行动', effect_type: 'skip', effect_value: 1, group: 'turn' },
     { name: '重整队形', short_name: '暂停 2 次', tile_type: 'shared', detail: '重整队形，跳过接下来 2 次行动', effect_type: 'skip', effect_value: 2, group: 'turn' },
     { name: '撤离点关闭', short_name: '暂停 2 次', tile_type: 'chance', detail: '等待撤离点重开，跳过接下来 2 次行动', effect_type: 'skip', effect_value: 2, group: 'turn' },
-    { name: '补给空投', short_name: '额外 1 次', tile_type: 'chance', detail: '获得补给空投，本回合增加 1 次掷骰', effect_type: 'extra_roll', effect_value: 1, group: 'dice' },
-    { name: '战术连携', short_name: '额外 2 次', tile_type: 'shared', detail: '触发战术连携，本回合增加 2 次掷骰', effect_type: 'extra_roll', effect_value: 2, group: 'dice' },
+    { name: '补给空投', short_name: '额外 1 次', tile_type: 'chance', detail: '获得补给空投，骰子库存立即增加 1 个', effect_type: 'extra_roll', effect_value: 1, group: 'dice' },
+    { name: '战术连携', short_name: '额外 2 次', tile_type: 'shared', detail: '触发战术连携，骰子库存立即增加 2 个', effect_type: 'extra_roll', effect_value: 2, group: 'dice' },
     { name: '信号延迟', short_name: '少摇 1 次', tile_type: 'chance', detail: '下个自己的回合减少 1 次掷骰', effect_type: 'lose_roll', effect_value: 1, group: 'dice' },
     { name: '装备超重', short_name: '少摇 2 次', tile_type: 'chance', detail: '下个自己的回合减少 2 次掷骰', effect_type: 'lose_roll', effect_value: 2, group: 'dice' },
-    { name: '最后冲刺', short_name: '额外 1 次', tile_type: 'move', detail: '进入最后冲刺，本回合增加 1 次掷骰', effect_type: 'extra_roll', effect_value: 1, group: 'dice' },
+    { name: '最后冲刺', short_name: '额外 1 次', tile_type: 'move', detail: '进入最后冲刺，骰子库存立即增加 1 个', effect_type: 'extra_roll', effect_value: 1, group: 'dice' },
     { name: '协议结算', short_name: '协议结算', tile_type: 'shared', detail: '本房间规则全部结算，本局结束', effect_type: 'finish', effect_value: 0, group: 'finish' },
     { name: '成功撤离', short_name: '成功撤离', tile_type: 'boss', detail: '完成最终撤离，本局结束', effect_type: 'finish', effect_value: 0, group: 'finish' },
     { name: '任务完成', short_name: '任务完成', tile_type: 'runner', detail: '护航任务全部完成，本局结束', effect_type: 'finish', effect_value: 0, group: 'finish' },
@@ -103,7 +103,7 @@ export const TILE_TYPE_LABELS: Record<TileType, string> = {
 
 export const EFFECT_LABELS: Record<TileEffect, string> = {
   none: '仅显示规则', coins: '修改保障值', move: '前进 / 后退', skip: '暂停行动',
-  extra_roll: '本回合增加掷骰', lose_roll: '下回合减少掷骰',
+  extra_roll: '增加骰子库存', lose_roll: '下次行动减少骰子',
   advance_chance: '进入下一轮', advance_round: '进入下一轮', finish: '结束本局',
 }
 

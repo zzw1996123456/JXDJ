@@ -50,9 +50,61 @@ export function startDemoGame(snapshot: GameSnapshot): GameSnapshot {
   }
 }
 
+function advanceDemoTurn(room: Room, players: Player[], afterOrder: number) {
+  const nextPlayers = players.map((player) => ({ ...player }))
+  const orderedIds = [...nextPlayers]
+    .sort((left, right) => left.turn_order - right.turn_order)
+    .map((player) => player.id)
+  const addedEvents: GameEvent[] = []
+  let order = afterOrder
+
+  for (let step = 1; step <= Math.max(orderedIds.length * 6, 6); step += 1) {
+    const orderedPlayers = orderedIds.map((id) => nextPlayers.find((player) => player.id === id)!)
+    const candidate = orderedPlayers.find((player) => player.turn_order > order) ?? orderedPlayers[0]
+    if (!candidate) break
+    const candidateIndex = nextPlayers.findIndex((player) => player.id === candidate.id)
+
+    if (candidate.skip_turns > 0) {
+      nextPlayers[candidateIndex] = { ...candidate, skip_turns: candidate.skip_turns - 1 }
+      addedEvents.unshift(event(room.id, `${candidate.nickname} 跳过 1 次行动`))
+      order = candidate.turn_order
+    } else {
+      const diceCount = Math.max(0, Math.min(20, candidate.dice_count + candidate.next_roll_modifier))
+      nextPlayers[candidateIndex] = { ...candidate, dice_count: diceCount, next_roll_modifier: 0 }
+      if (diceCount > 0) {
+        return {
+          room: { ...room, current_turn: candidate.user_id, rolls_remaining: diceCount },
+          players: nextPlayers,
+          events: addedEvents,
+        }
+      }
+      addedEvents.unshift(event(room.id, `${candidate.nickname} 没有可用骰子，自动跳过本回合`))
+      order = candidate.turn_order
+    }
+
+    if (step % nextPlayers.length === 0 && !nextPlayers.some((player) => player.dice_count > 0)) {
+      addedEvents.unshift(event(room.id, '所有玩家都没有可用骰子，等待管理员补充'))
+      return {
+        room: { ...room, current_turn: null, rolls_remaining: 0 },
+        players: nextPlayers,
+        events: addedEvents,
+      }
+    }
+  }
+
+  addedEvents.unshift(event(room.id, '当前没有可行动玩家，等待管理员处理'))
+  return {
+    room: { ...room, current_turn: null, rolls_remaining: 0 },
+    players: nextPlayers,
+    events: addedEvents,
+  }
+}
+
 export function resolveDemoDice(snapshot: GameSnapshot, dice: number): { snapshot: GameSnapshot; dice: number } {
   if (!Number.isInteger(dice) || dice < 1 || dice > 6) throw new Error('骰子点数必须是 1–6')
-  const current = snapshot.players[0]
+  const currentIndex = snapshot.players.findIndex((player) => player.user_id === snapshot.room.current_turn)
+  if (currentIndex < 0) throw new Error('当前没有可行动玩家')
+  const current = snapshot.players[currentIndex]
   const round = snapshot.room.current_round
   const tiles = getRoundTiles(snapshot.tiles, round)
   const landedPosition = (current.position + dice) % tiles.length
@@ -93,7 +145,7 @@ export function resolveDemoDice(snapshot: GameSnapshot, dice: number): { snapsho
       break
   }
 
-  let player: Player = {
+  const player: Player = {
     ...current,
     position,
     distance,
@@ -107,11 +159,12 @@ export function resolveDemoDice(snapshot: GameSnapshot, dice: number): { snapsho
   if (tile.effect_type === 'move') {
     addedEvents.unshift(event(snapshot.room.id, `${player.nickname} ${tile.effect_value > 0 ? '前进' : '后退'} ${Math.abs(tile.effect_value)} 格，到达第 ${position + 1} 格`))
   }
+  let players = snapshot.players.map((item, index) => index === currentIndex ? player : item)
   let room = { ...snapshot.room, rolls_remaining: rollsRemaining }
   if (advanced) {
     const nextRound = (round + 1) as 2 | 3
     const nextTiles = getRoundTiles(snapshot.tiles, nextRound)
-    player = { ...player, position: 0, round_roll_count: 0 }
+    players = players.map((item) => ({ ...item, position: 0, round_roll_count: 0 }))
     room = { ...room, current_round: nextRound, board_size: nextTiles.length }
     addedEvents.unshift(event(room.id, `队伍进入第${nextRound === 2 ? '二' : '三'}轮 ${nextTiles.length} 格棋盘`))
   }
@@ -119,16 +172,18 @@ export function resolveDemoDice(snapshot: GameSnapshot, dice: number): { snapsho
   if (finished) {
     room = { ...room, status: 'finished', winner_id: player.user_id, current_turn: null, rolls_remaining: 0 }
     addedEvents.unshift(event(room.id, `${player.nickname} 完成最终结算，本局结束`))
-  } else if (rollsRemaining <= 0) {
-    room = { ...room, current_turn: null, rolls_remaining: 0 }
-    addedEvents.unshift(event(room.id, `${player.nickname} 的骰子已用完，等待补充`))
+  } else {
+    const nextTurn = advanceDemoTurn(room, players, player.turn_order)
+    room = nextTurn.room
+    players = nextTurn.players
+    addedEvents.unshift(...nextTurn.events)
   }
 
   return {
     dice,
     snapshot: {
       ...snapshot,
-      players: [player],
+      players,
       room,
       events: [...addedEvents, ...snapshot.events],
     },

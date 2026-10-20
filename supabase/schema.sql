@@ -148,7 +148,7 @@ values
   (1,'movement','情报误导','后退 2 格','chance','遭遇错误情报，立即后退 2 格','move',-2),
   (1,'turn','烟雾封路','暂停 1 次','chance','前路被封锁，跳过下一次行动','skip',1),
   (1,'turn','临时整备','整备 1 次','shared','留在原地完成整备，跳过下一次行动','skip',1),
-  (1,'dice','乘胜追击','额外 1 次','chance','本回合立即增加 1 次掷骰机会','extra_roll',1),
+  (1,'dice','乘胜追击','额外 1 次','chance','骰子库存立即增加 1 个，之后仍按顺序轮换','extra_roll',1),
   (1,'dice','弹药清点','少摇 1 次','chance','下个自己的回合减少 1 次掷骰','lose_roll',1),
   (1,'advance','快速通关','直达二轮','chance','触发快速通关，队伍直接进入第二轮','advance_round',0),
   (1,'advance_chance','紧急转场','进入二轮','shared','到达本格后，队伍进入第二轮','advance_chance',0),
@@ -171,8 +171,8 @@ values
   (2,'turn','等待情报','暂停 1 次','chance','等待情报确认，跳过下一次行动','skip',1),
   (2,'turn','受伤治疗','暂停 2 次','chance','需要治疗整备，跳过接下来 2 次行动','skip',2),
   (2,'turn','隐蔽观察','隐蔽 1 次','shared','原地观察敌情，跳过下一次行动','skip',1),
-  (2,'dice','连续推进','额外 1 次','chance','本回合立即增加 1 次掷骰机会','extra_roll',1),
-  (2,'dice','双线行动','额外 2 次','chance','本回合立即增加 2 次掷骰机会','extra_roll',2),
+  (2,'dice','连续推进','额外 1 次','chance','骰子库存立即增加 1 个，之后仍按顺序轮换','extra_roll',1),
+  (2,'dice','双线行动','额外 2 次','chance','骰子库存立即增加 2 个，之后仍按顺序轮换','extra_roll',2),
   (2,'dice','负重整理','少摇 1 次','chance','下个自己的回合减少 1 次掷骰','lose_roll',1),
   (2,'dice','通讯干扰','少摇 2 次','chance','下个自己的回合减少 2 次掷骰','lose_roll',2),
   (2,'advance_chance','核心情报','进入三轮','chance','到达本格后，队伍进入第三轮','advance_chance',0),
@@ -204,11 +204,11 @@ values
   (3,'turn','静默等待','暂停 1 次','chance','进入静默状态，跳过下一次行动','skip',1),
   (3,'turn','重整队形','暂停 2 次','shared','重整队形，跳过接下来 2 次行动','skip',2),
   (3,'turn','撤离点关闭','暂停 2 次','chance','等待撤离点重开，跳过接下来 2 次行动','skip',2),
-  (3,'dice','补给空投','额外 1 次','chance','获得补给空投，本回合增加 1 次掷骰','extra_roll',1),
-  (3,'dice','战术连携','额外 2 次','shared','触发战术连携，本回合增加 2 次掷骰','extra_roll',2),
+  (3,'dice','补给空投','额外 1 次','chance','获得补给空投，骰子库存立即增加 1 个','extra_roll',1),
+  (3,'dice','战术连携','额外 2 次','shared','触发战术连携，骰子库存立即增加 2 个','extra_roll',2),
   (3,'dice','信号延迟','少摇 1 次','chance','下个自己的回合减少 1 次掷骰','lose_roll',1),
   (3,'dice','装备超重','少摇 2 次','chance','下个自己的回合减少 2 次掷骰','lose_roll',2),
-  (3,'dice','最后冲刺','额外 1 次','move','进入最后冲刺，本回合增加 1 次掷骰','extra_roll',1),
+  (3,'dice','最后冲刺','额外 1 次','move','进入最后冲刺，骰子库存立即增加 1 个','extra_roll',1),
   (3,'finish','协议结算','协议结算','shared','本房间规则全部结算，本局结束','finish',0),
   (3,'finish','成功撤离','成功撤离','boss','完成最终撤离，本局结束','finish',0),
   (3,'finish','任务完成','任务完成','runner','护航任务全部完成，本局结束','finish',0)
@@ -958,11 +958,9 @@ begin
       values (p_room_id, '队伍进入第' || case when v_next_round = 2 then '二' else '三' end || '轮 ' || v_next_size || ' 格棋盘');
     end if;
 
-    if v_remaining > 0 then
-      update public.rooms set rolls_remaining = v_remaining where id = p_room_id;
-    else
-      perform public.advance_room_turn_internal(p_room_id, v_player.turn_order);
-    end if;
+    -- One die is one action. Always rotate after a roll. The helper skips
+    -- players who have no dice or who must miss their next action.
+    perform public.advance_room_turn_internal(p_room_id, v_player.turn_order);
   end if;
 
   return query select v_dice, v_position, v_change, v_finished;

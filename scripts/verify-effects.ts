@@ -53,7 +53,7 @@ assert.equal(moveBack.players[0].position, 7)
 assert.equal(moveBack.room.current_round, 1)
 
 const skipped = resolve('skip', 1, 1)
-assert.equal(skipped.players[0].skip_turns, 1)
+assert.equal(skipped.players[0].skip_turns, 0, '单人试玩应立即结算被跳过的下一次行动')
 assert.equal(skipped.room.current_round, 1, '暂停格不得附带晋级')
 
 const extraRoll = resolve('extra_roll', 1)
@@ -61,7 +61,8 @@ assert.equal(extraRoll.room.rolls_remaining, 2)
 assert.equal(extraRoll.room.current_round, 1)
 
 const loseRoll = resolve('lose_roll', 1)
-assert.equal(loseRoll.players[0].next_roll_modifier, -1)
+assert.equal(loseRoll.players[0].next_roll_modifier, 0)
+assert.equal(loseRoll.players[0].dice_count, 0, '单人试玩轮回到自己时应结算少摇 1 次')
 assert.equal(loseRoll.room.current_round, 1)
 
 const penaltyTurnStart = snapshotFor('lose_roll', 1)
@@ -71,8 +72,46 @@ const penaltyTurn = resolveDemoDice(penaltyTurnStart, 1).snapshot
 assert.equal(penaltyTurn.room.rolls_remaining, 0)
 assert.equal(penaltyTurn.players[0].dice_count, 0)
 assert.equal(penaltyTurn.room.current_turn, null)
-assert.equal(penaltyTurn.players[0].next_roll_modifier, -1)
-assert.match(penaltyTurn.events[0].message, /骰子已用完，等待补充/)
+assert.equal(penaltyTurn.players[0].next_roll_modifier, 0)
+assert.match(penaltyTurn.events[0].message, /所有玩家都没有可用骰子/)
+
+const rotatingTurns = snapshotFor('none')
+rotatingTurns.players = [
+  { ...rotatingTurns.players[0], id: 'player-1', user_id: 'user-1', nickname: '一号', turn_order: 0, dice_count: 5 },
+  { ...rotatingTurns.players[0], id: 'player-2', user_id: 'user-2', nickname: '二号', turn_order: 1, dice_count: 5 },
+  { ...rotatingTurns.players[0], id: 'player-3', user_id: 'user-3', nickname: '三号', turn_order: 2, dice_count: 5 },
+]
+rotatingTurns.room.current_turn = 'user-1'
+let rotated = resolveDemoDice(rotatingTurns, 1).snapshot
+assert.equal(rotated.room.current_turn, 'user-2', '一号掷骰后必须立即轮到二号')
+assert.deepEqual(rotated.players.map((player) => player.dice_count), [4, 5, 5])
+rotated = resolveDemoDice(rotated, 1).snapshot
+assert.equal(rotated.room.current_turn, 'user-3', '二号掷骰后必须立即轮到三号')
+assert.deepEqual(rotated.players.map((player) => player.dice_count), [4, 4, 5])
+rotated = resolveDemoDice(rotated, 1).snapshot
+assert.equal(rotated.room.current_turn, 'user-1', '三号掷骰后必须回到一号')
+assert.deepEqual(rotated.players.map((player) => player.dice_count), [4, 4, 4])
+
+const skipsEmptyPlayer = snapshotFor('none')
+skipsEmptyPlayer.players = [
+  { ...skipsEmptyPlayer.players[0], id: 'skip-player-1', user_id: 'skip-user-1', nickname: '一号', turn_order: 0, dice_count: 5 },
+  { ...skipsEmptyPlayer.players[0], id: 'skip-player-2', user_id: 'skip-user-2', nickname: '二号', turn_order: 1, dice_count: 0 },
+  { ...skipsEmptyPlayer.players[0], id: 'skip-player-3', user_id: 'skip-user-3', nickname: '三号', turn_order: 2, dice_count: 5 },
+]
+skipsEmptyPlayer.room.current_turn = 'skip-user-1'
+const skippedEmptyPlayer = resolveDemoDice(skipsEmptyPlayer, 1).snapshot
+assert.equal(skippedEmptyPlayer.room.current_turn, 'skip-user-3', '骰子为 0 的二号必须被自动跳过')
+
+const extraDiceRotates = snapshotFor('extra_roll', 1)
+extraDiceRotates.players = [
+  { ...extraDiceRotates.players[0], id: 'extra-player-1', user_id: 'extra-user-1', nickname: '一号', turn_order: 0, dice_count: 5 },
+  { ...extraDiceRotates.players[0], id: 'extra-player-2', user_id: 'extra-user-2', nickname: '二号', turn_order: 1, dice_count: 5 },
+  { ...extraDiceRotates.players[0], id: 'extra-player-3', user_id: 'extra-user-3', nickname: '三号', turn_order: 2, dice_count: 5 },
+]
+extraDiceRotates.room.current_turn = 'extra-user-1'
+const extraDiceResult = resolveDemoDice(extraDiceRotates, 1).snapshot
+assert.equal(extraDiceResult.players[0].dice_count, 5, '额外骰子应加入库存')
+assert.equal(extraDiceResult.room.current_turn, 'extra-user-2', '获得额外骰子后仍必须轮到下一人')
 
 const protectedAdvance = resolve('advance_round', 0, 1, 0)
 assert.equal(protectedAdvance.room.current_round, 1, '第一轮前两次掷骰不得晋级')
