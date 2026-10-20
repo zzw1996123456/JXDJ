@@ -850,8 +850,15 @@ language plpgsql security definer set search_path = public
 as $$
 begin
   if not public.is_admin() then raise exception '只有管理员可以删除房间'; end if;
-  delete from public.rooms where id = p_room_id;
+
+  -- 显式清理房间的所有业务数据，不仅依赖外键的级联删除。
+  perform 1 from public.rooms where id = p_room_id for update;
   if not found then raise exception '房间不存在或已被删除'; end if;
+
+  delete from public.game_events where room_id = p_room_id;
+  delete from public.room_tiles where room_id = p_room_id;
+  delete from public.room_players where room_id = p_room_id;
+  delete from public.rooms where id = p_room_id;
 end;
 $$;
 

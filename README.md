@@ -147,6 +147,28 @@ git push
 
 同一浏览器的普通标签页会共享匿名登录状态。联机测试时请使用不同浏览器，或一个普通窗口加一个无痕窗口。
 
+### 怎样清空现有房间和玩家数据
+
+在 Supabase 的 `SQL Editor` 执行下面的 SQL。删除全部房间时，每个房间的玩家席位、棋盘和行动记录会一起永久删除，管理员白名单和全局格子规则会保留。
+
+```sql
+begin;
+delete from public.rooms;
+commit;
+```
+
+普通玩家使用 Supabase 匿名登录，所以删除房间后，`Authentication > Users` 里的匿名账号仍会保留。如果这些测试账号也需要清空，在上面的 SQL 成功执行后再执行：
+
+```sql
+delete from auth.users as users
+where users.is_anonymous is true
+  and not exists (
+    select 1 from public.app_admins as admins where admins.user_id = users.id
+  );
+```
+
+这段 SQL 只删除匿名账号，不删除邮箱管理员。已经打开网站的普通玩家需要刷新页面，Supabase 会为他创建新的匿名身份。两种删除都无法恢复。
+
 ### 国内访问速度不稳定
 
 Vercel 和 Supabase 的免费节点通常位于境外，适合原型测试，但中国大陆访问质量无法保证。正式面向大量国内用户时，需要迁移到有备案条件的国内云服务。
