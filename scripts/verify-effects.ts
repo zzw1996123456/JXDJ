@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { createRandomRoomTiles, RULE_TEMPLATES } from '../src/lib/board'
+import { createRandomRoomTiles, getBoardDimensions, getBoardGridPosition, RULE_TEMPLATES } from '../src/lib/board'
 import { chooseDemoDice, createDemoRoom, resolveDemoDice, startDemoGame } from '../src/lib/demoGame'
 import type { GameRound, RoomTile, TileEffect } from '../src/types'
 
@@ -218,11 +218,13 @@ for (let index = 0; index < 50; index += 1) {
 
 const weighted = startDemoGame(createDemoRoom('概率测试', 'boss'))
 weighted.room.round1_advance_chance = 0
+weighted.room.round_advance_chances[0] = 0
 const zeroChanceDice = chooseDemoDice(weighted, 0, 0)
 const zeroChanceTile = weighted.tiles.find((tile) => tile.round_number === 1 && tile.position === zeroChanceDice)
 assert.ok(zeroChanceTile?.effect_type !== 'advance_chance' && zeroChanceTile?.effect_type !== 'advance_round', '0% 不得落到晋级格')
 
 weighted.room.round1_advance_chance = 100
+weighted.room.round_advance_chances[0] = 100
 for (const protectedRollCount of [0, 1]) {
   weighted.players[0].round_roll_count = protectedRollCount
   const protectedDice = chooseDemoDice(weighted, 0, 0)
@@ -231,6 +233,7 @@ for (const protectedRollCount of [0, 1]) {
 }
 
 weighted.room.round1_advance_chance = 10
+weighted.room.round_advance_chances[0] = 10
 weighted.players[0].round_roll_count = 2
 const successfulChanceDice = chooseDemoDice(weighted, 9, 0)
 const successfulChanceTile = weighted.tiles.find((tile) => tile.round_number === 1 && tile.position === successfulChanceDice)
@@ -242,6 +245,7 @@ assert.ok(failedChanceTile?.effect_type !== 'advance_chance' && failedChanceTile
 const onlineRunner = startDemoGame(createDemoRoom('打手测试', 'runner'))
 onlineRunner.isDemo = false
 onlineRunner.room.round1_advance_chance = 100
+onlineRunner.room.round_advance_chances[0] = 100
 onlineRunner.players[0].round_roll_count = 20
 const runnerDice = chooseDemoDice(onlineRunner, 0, 0)
 const runnerTile = onlineRunner.tiles.find((tile) => tile.round_number === 1 && tile.position === runnerDice)
@@ -252,4 +256,15 @@ forcedRunnerAdvance.isDemo = false
 forcedRunnerAdvance.players[0].role = 'runner'
 assert.equal(resolveDemoDice(forcedRunnerAdvance, 1).snapshot.room.current_round, 1, '打手即使落到晋级格也不得晋级')
 
-console.log('效果回归测试通过：全部落格效果、分轮规则与 50 组三轮随机棋盘')
+for (let size = 2; size <= 100; size += 2) {
+  const dimensions = getBoardDimensions(size)
+  const positions = Array.from({ length: size }, (_, index) => getBoardGridPosition(index, size))
+  const uniquePositions = new Set(positions.map((position) => `${position.gridColumn}:${position.gridRow}`))
+  assert.equal(uniquePositions.size, size, `${size} 格棋盘不能出现重叠位置`)
+  for (const position of positions) {
+    assert.ok(position.gridColumn >= 1 && position.gridColumn <= dimensions.columns, `${size} 格棋盘列坐标越界`)
+    assert.ok(position.gridRow >= 1 && position.gridRow <= dimensions.rows, `${size} 格棋盘行坐标越界`)
+  }
+}
+
+console.log('效果回归测试通过：全部落格效果、分轮规则、50 组三轮随机棋盘与 2–100 偶数格布局')

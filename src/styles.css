@@ -1316,9 +1316,16 @@ button.mode-card {
 .turn-settings-grid,
 .probability-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr auto;
   gap: 10px;
   align-items: end;
+}
+
+.probability-grid {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+
+.probability-grid > .button {
+  min-height: 42px;
 }
 
 .turn-settings-grid {
@@ -1429,10 +1436,10 @@ button.mode-card {
 
 .round-tabs {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(105px, 1fr));
   border: 1px solid #3a4035;
   border-radius: 4px;
-  overflow: hidden;
+  overflow: clip;
 }
 
 .round-tabs button {
@@ -1928,6 +1935,38 @@ button.mode-card {
   border: 1px solid #3a4033;
   background: #0b0d0a;
   padding: 4px;
+}
+
+.board.board-dense {
+  aspect-ratio: 1;
+  grid-template-columns: repeat(var(--board-columns), minmax(18px, 1fr));
+  grid-template-rows: repeat(var(--board-rows), minmax(18px, 1fr));
+  gap: 1px;
+  padding: 2px;
+}
+
+.board-dense .tile {
+  border-top-width: 2px;
+  padding: 2px;
+}
+
+.board-dense .tile strong {
+  font-size: 8px;
+  line-height: 1;
+}
+
+.board-dense .tile small,
+.board-dense .tile-owner,
+.board-dense .tile-number {
+  display: none;
+}
+
+.board-dense .board-center strong {
+  font-size: 24px;
+}
+
+.board-dense .board-center small {
+  display: none;
 }
 
 .tile {
@@ -2484,6 +2523,12 @@ button.mode-card {
 
   .board {
     min-height: 640px;
+  }
+
+  .board.board-dense {
+    min-height: 0;
+    grid-template-columns: repeat(var(--board-columns), minmax(10px, 1fr));
+    grid-template-rows: repeat(var(--board-rows), minmax(10px, 1fr));
   }
 
   .admin-board {

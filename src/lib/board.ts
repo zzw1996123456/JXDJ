@@ -1,11 +1,13 @@
 import type { GameRound, RoomTile, TileDefinition, TileEffect, TileType } from '../types'
 
+type TemplateRound = 1 | 2 | 3
+
 const emptyRule: TileDefinition = {
   name: '空格', short_name: '空格', tile_type: 'empty', detail: '平安经过，本格不触发额外效果',
   effect_type: 'none', effect_value: 0, group: 'empty',
 }
 
-export const RULE_TEMPLATES: Record<GameRound, TileDefinition[]> = {
+export const RULE_TEMPLATES: Record<TemplateRound, TileDefinition[]> = {
   1: [
     emptyRule,
     { name: '基础保底', short_name: '基础保底', tile_type: 'boss', detail: '老板保底增加 20 万', effect_type: 'guarantee_add', effect_value: 20, group: 'contract' },
@@ -95,7 +97,7 @@ export const RULE_TEMPLATES: Record<GameRound, TileDefinition[]> = {
   ],
 }
 
-const ROUND_GROUPS: Record<GameRound, TileDefinition['group'][]> = {
+const ROUND_GROUPS: Record<TemplateRound, TileDefinition['group'][]> = {
   1: ['empty', 'contract', 'movement', 'movement', 'turn', 'dice', 'advance_chance', 'advance'],
   2: ['empty', 'empty', 'contract', 'contract', 'movement', 'movement', 'turn', 'turn', 'dice', 'dice', 'advance_chance', 'advance'],
   3: ['empty', 'empty', 'empty', 'empty', 'contract', 'contract', 'contract', 'contract', 'contract', 'movement', 'movement', 'movement', 'movement', 'movement', 'movement', 'turn', 'turn', 'turn', 'dice', 'dice', 'dice', 'dice', 'dice'],
@@ -129,7 +131,7 @@ export function createRandomRoomTiles(roomId: string): RoomTile[] {
   const createdAt = new Date().toISOString()
   const tiles: RoomTile[] = []
 
-  for (const round of [1, 2, 3] as GameRound[]) {
+  for (const round of [1, 2, 3] as TemplateRound[]) {
     const usedNames = new Set<string>()
     const remainingGroups = [...ROUND_GROUPS[round]]
     remainingGroups.splice(remainingGroups.indexOf('contract'), 1)

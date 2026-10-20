@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowLeft,
   ArrowRight,
@@ -64,12 +64,17 @@ const ACTIVE_ROOM_KEY = 'delta-monopoly-active-room'
 const NICKNAME_KEY = 'delta-monopoly-nickname'
 const LAST_ROOM_CODE_KEY = 'delta-monopoly-last-room-code'
 const MAX_PLAYERS = 3
-const ROUND_LABELS: Record<GameRound, string> = { 1: '第一轮', 2: '第二轮', 3: '第三轮' }
+const MAX_ROUNDS = 10
+const MIN_BOARD_SIZE = 2
+const MAX_BOARD_SIZE = 100
+const DEFAULT_ROUND_SIZES = [8, 12, 24, 24, 24, 24, 24, 24, 24, 24]
+const DEFAULT_ADVANCE_CHANCES = [35, 30, 30, 30, 30, 30, 30, 30, 30]
+const NO_PLAYERS: Player[] = []
 const TILE_TYPES = Object.keys(TILE_TYPE_LABELS) as TileType[]
 const TILE_EFFECTS = Object.keys(EFFECT_LABELS) as TileEffect[]
 const GUARANTEE_EFFECTS: GuaranteeEffect[] = ['guarantee_add', 'guarantee_subtract', 'guarantee_multiply', 'guarantee_divide']
 const ROOM_CONFIG_FORMAT = 'jingxu-delta-monopoly-room'
-const ROOM_CONFIG_VERSION = 2
+const ROOM_CONFIG_VERSION = 3
 
 interface RoomConfigFile {
   format: typeof ROOM_CONFIG_FORMAT
@@ -82,15 +87,40 @@ interface RoomConfigFile {
     rolls_per_turn: number
     base_guarantee: number
     total_rounds: number
-    round_sizes: [number, number, number]
+    round_sizes: number[]
+    round_advance_chances: number[]
   }
   tiles: Array<Pick<RoomTile, 'round_number' | 'position' | 'name' | 'short_name' | 'tile_type' | 'detail' | 'effect_type' | 'effect_value' | 'tile_color' | 'is_randomized'>>
 }
 
+function roundLabel(round: GameRound) {
+  return `第 ${round} 轮`
+}
+
+function roomRoundSizes(room: Room) {
+  if (Array.isArray(room.round_board_sizes) && room.round_board_sizes.length === MAX_ROUNDS) {
+    return room.round_board_sizes.map(Number)
+  }
+  return [room.round1_board_size ?? 8, room.round2_board_size ?? 12, room.round3_board_size ?? 24, ...DEFAULT_ROUND_SIZES.slice(3)]
+}
+
+function roomAdvanceChances(room: Room) {
+  if (Array.isArray(room.round_advance_chances) && room.round_advance_chances.length === MAX_ROUNDS - 1) {
+    return room.round_advance_chances.map(Number)
+  }
+  return [room.round1_advance_chance ?? 35, room.round2_advance_chance ?? 30, ...DEFAULT_ADVANCE_CHANCES.slice(2)]
+}
+
 function roundBoardSize(room: Room, round: GameRound) {
-  if (round === 1) return room.round1_board_size ?? 8
-  if (round === 2) return room.round2_board_size ?? 12
-  return room.round3_board_size ?? 24
+  return roomRoundSizes(room)[round - 1] ?? DEFAULT_ROUND_SIZES[round - 1] ?? 24
+}
+
+function roomBoardSizeSummary(room: Room) {
+  const sizes = roomRoundSizes(room).slice(0, room.total_rounds ?? 3)
+  if (sizes.length <= 4) return `${sizes.join(' → ')} 格`
+  const minimum = Math.min(...sizes)
+  const maximum = Math.max(...sizes)
+  return minimum === maximum ? `每轮 ${minimum} 格` : `每轮 ${minimum}–${maximum} 格`
 }
 
 function tileColorStyle(tile: RoomTile): React.CSSProperties {
@@ -280,10 +310,10 @@ function ModeHub({ onSelect }: { onSelect: () => void }) {
               <span className="mode-card-copy">
                 <small>趣味单 01</small>
                 <strong>护航大富翁</strong>
-                <span>每个房间自动生成不同棋盘，在移动、暂停与护航条款之间完成三轮推演。</span>
+                <span>每个房间自动生成不同棋盘，可配置最多十轮移动、暂停与护航条款。</span>
               </span>
               <span className="mode-card-footer">
-                <span>三轮棋盘 · 最多 3 人</span>
+                <span>1–10 轮棋盘 · 最多 3 人</span>
                 <span className="enter-mode">进入 <ArrowRight size={17} /></span>
               </span>
             </button>
@@ -369,7 +399,7 @@ function MonopolyEntry({
         <section className="hero-copy">
           <p className="eyebrow"><Dice5 size={14} /> 趣味单 01 · 大富翁</p>
           <h1>大富翁<br /><span>护航协议局。</span></h1>
-          <p className="hero-subtitle">三轮随机棋盘逐步扩张，每个房间都有不同的移动、回合和护航规则。</p>
+          <p className="hero-subtitle">多轮随机棋盘逐步扩张，每个房间都有不同的移动、回合和护航规则。</p>
           <div className="mission-stats" aria-label="游戏规则概览">
             <span><strong>3</strong> 轮推演</span>
             <span><strong>8/12/24</strong> 格棋盘</span>
@@ -495,13 +525,12 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
   const [roomTiles, setRoomTiles] = useState<RoomTile[]>([])
   const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null)
   const [roomPendingDelete, setRoomPendingDelete] = useState<string | null>(null)
-  const [round1Chance, setRound1Chance] = useState('35')
-  const [round2Chance, setRound2Chance] = useState('30')
+  const [advanceChances, setAdvanceChances] = useState<string[]>(DEFAULT_ADVANCE_CHANCES.map(String))
   const [startingPlayerId, setStartingPlayerId] = useState('')
   const [rollsPerTurn, setRollsPerTurn] = useState('1')
   const [baseGuarantee, setBaseGuarantee] = useState('100')
   const [totalRounds, setTotalRounds] = useState(3)
-  const [roundSizes, setRoundSizes] = useState<[number, number, number]>([8, 12, 24])
+  const [roundSizes, setRoundSizes] = useState<number[]>(DEFAULT_ROUND_SIZES)
   const [editorRound, setEditorRound] = useState<GameRound>(1)
   const [selectedTileId, setSelectedTileId] = useState<string | null>(null)
   const [tileDraft, setTileDraft] = useState<RoomTile | null>(null)
@@ -510,6 +539,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
   const [suffixDrafts, setSuffixDrafts] = useState<Record<number, string>>({})
   const [configNotice, setConfigNotice] = useState('')
   const configInputRef = useRef<HTMLInputElement>(null)
+  const tileRefreshTimerRef = useRef<number | null>(null)
 
   const selectedRoom = rooms.find((room) => room.id === selectedRoomId) ?? null
   const selectedPlayers = players.filter((player) => player.room_id === selectedRoomId)
@@ -626,7 +656,12 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
         if (selectedRoomId) void loadRoomEvents(selectedRoomId)
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'room_tiles' }, () => {
-        if (selectedRoomId) void loadRoomTiles(selectedRoomId)
+        if (!selectedRoomId) return
+        if (tileRefreshTimerRef.current !== null) window.clearTimeout(tileRefreshTimerRef.current)
+        tileRefreshTimerRef.current = window.setTimeout(() => {
+          tileRefreshTimerRef.current = null
+          void loadRoomTiles(selectedRoomId)
+        }, 150)
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'room_settlement_rules' }, () => {
         if (selectedRoomId) void loadSettlementRules(selectedRoomId)
@@ -634,6 +669,10 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       .subscribe()
 
     return () => {
+      if (tileRefreshTimerRef.current !== null) {
+        window.clearTimeout(tileRefreshTimerRef.current)
+        tileRefreshTimerRef.current = null
+      }
       void client.removeChannel(channel)
     }
   }, [authorized, loadDashboard, loadRoomEvents, loadRoomTiles, loadSettlementRules, selectedRoomId])
@@ -652,17 +691,12 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
 
   useEffect(() => {
     if (!selectedRoom) return
-    setRound1Chance(String(selectedRoom.round1_advance_chance))
-    setRound2Chance(String(selectedRoom.round2_advance_chance))
+    setAdvanceChances(roomAdvanceChances(selectedRoom).map(String))
     setStartingPlayerId(selectedRoom.starting_player_id ?? '')
     setRollsPerTurn(String(selectedRoom.rolls_per_turn))
     setBaseGuarantee(String(selectedRoom.base_guarantee ?? 100))
     setTotalRounds(selectedRoom.total_rounds ?? 3)
-    setRoundSizes([
-      selectedRoom.round1_board_size ?? 8,
-      selectedRoom.round2_board_size ?? 12,
-      selectedRoom.round3_board_size ?? 24,
-    ])
+    setRoundSizes(roomRoundSizes(selectedRoom))
     if (editorRound > (selectedRoom.total_rounds ?? 3)) setEditorRound(1)
   }, [
     selectedRoom?.id,
@@ -675,6 +709,8 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
     selectedRoom?.round1_board_size,
     selectedRoom?.round2_board_size,
     selectedRoom?.round3_board_size,
+    selectedRoom?.round_board_sizes,
+    selectedRoom?.round_advance_chances,
   ])
 
   useEffect(() => {
@@ -758,15 +794,13 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
     if (!selectedRoom) return
     void runAdminAction(async () => {
       if (!supabase) return
-      const first = Number(round1Chance)
-      const second = Number(round2Chance)
-      if (!Number.isInteger(first) || first < 0 || first > 100 || !Number.isInteger(second) || second < 0 || second > 100) {
+      const chances = advanceChances.map(Number)
+      if (chances.slice(0, Math.max(0, totalRounds - 1)).some((chance) => !Number.isInteger(chance) || chance < 0 || chance > 100)) {
         throw new Error('晋级概率必须是 0–100 的整数')
       }
-      const { error: rpcError } = await supabase.rpc('admin_update_round_chances', {
+      const { error: rpcError } = await supabase.rpc('admin_update_round_chances_v2', {
         p_room_id: selectedRoom.id,
-        p_round1_chance: first,
-        p_round2_chance: second,
+        p_round_chances: chances,
       })
       if (rpcError) throw rpcError
       await loadDashboard()
@@ -813,11 +847,11 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
     if (!selectedRoom) return
     void runAdminAction(async () => {
       if (!supabase) return
-      if (!Number.isInteger(totalRounds) || totalRounds < 1 || totalRounds > 3) {
-        throw new Error('轮数必须在 1–3 之间')
+      if (!Number.isInteger(totalRounds) || totalRounds < 1 || totalRounds > MAX_ROUNDS) {
+        throw new Error(`轮数必须在 1–${MAX_ROUNDS} 之间`)
       }
-      if (roundSizes.slice(0, totalRounds).some((size) => !Number.isInteger(size) || size < 8 || size > 32)) {
-        throw new Error('每轮格子数必须在 8–32 之间')
+      if (roundSizes.slice(0, totalRounds).some((size) => !Number.isInteger(size) || size < MIN_BOARD_SIZE || size > MAX_BOARD_SIZE || size % 2 !== 0)) {
+        throw new Error(`每轮格子数必须是 ${MIN_BOARD_SIZE}–${MAX_BOARD_SIZE} 之间的偶数`)
       }
       const { error: rpcError } = await supabase.rpc('admin_update_board_structure', {
         p_room_id: selectedRoom.id,
@@ -830,10 +864,10 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
     })
   }
 
-  function chooseTile(tile: RoomTile) {
+  const chooseTile = useCallback((tile: RoomTile) => {
     setSelectedTileId(tile.id)
     setTileDraft({ ...tile })
-  }
+  }, [])
 
   function saveTile() {
     if (!selectedRoom || !tileDraft) return
@@ -1009,11 +1043,8 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
           rolls_per_turn: room.rolls_per_turn,
           base_guarantee: room.base_guarantee,
           total_rounds: room.total_rounds ?? 3,
-          round_sizes: [
-            room.round1_board_size ?? 8,
-            room.round2_board_size ?? 12,
-            room.round3_board_size ?? 24,
-          ],
+          round_sizes: roomRoundSizes(room),
+          round_advance_chances: roomAdvanceChances(room),
         },
         tiles: tiles.map((tile) => ({
           round_number: tile.round_number,
@@ -1053,10 +1084,10 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       }
       if (!config || typeof config !== 'object') throw new Error('导入文件内容无效')
       const candidate = config as Partial<RoomConfigFile> & { version?: number }
-      if (candidate.format !== ROOM_CONFIG_FORMAT || ![1, ROOM_CONFIG_VERSION].includes(candidate.version ?? 0)) {
+      if (candidate.format !== ROOM_CONFIG_FORMAT || ![1, 2, ROOM_CONFIG_VERSION].includes(candidate.version ?? 0)) {
         throw new Error('不支持的房间设置文件格式或版本')
       }
-      if (!candidate.settings || !Array.isArray(candidate.tiles) || candidate.tiles.length < 8) {
+      if (!candidate.settings || !Array.isArray(candidate.tiles) || candidate.tiles.length < MIN_BOARD_SIZE) {
         throw new Error('导入文件缺少完整的房间设置或棋盘格')
       }
       const { error: rpcError } = await supabase.rpc('admin_import_room_config', {
@@ -1236,7 +1267,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                 const count = players.filter((player) => player.room_id === room.id).length
                 return (
                   <button className={`admin-room-item ${selectedRoomId === room.id ? 'active' : ''}`} key={room.id} onClick={() => setSelectedRoomId(room.id)} type="button">
-                    <span><strong>{room.name}</strong><small>{room.code} · {count}/3 人 · {ROUND_LABELS[room.current_round]}</small></span>
+                    <span><strong>{room.name}</strong><small>{room.code} · {count}/3 人 · {roundLabel(room.current_round)}</small></span>
                     <em className={`room-status status-${room.is_paused ? 'paused' : room.status}`}>{roomStatusLabel(room)}</em>
                   </button>
                 )
@@ -1293,7 +1324,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
 
                 <div className="admin-summary-strip">
                   <span><small>状态</small><strong>{roomStatusLabel(selectedRoom)}</strong></span>
-                  <span><small>当前轮次</small><strong>{ROUND_LABELS[selectedRoom.current_round]} / 共 {selectedRoom.total_rounds ?? 3} 轮</strong></span>
+                  <span><small>当前轮次</small><strong>{roundLabel(selectedRoom.current_round)} / 共 {selectedRoom.total_rounds ?? 3} 轮</strong></span>
                   <span><small>玩家</small><strong>{selectedPlayers.length} / 3</strong></span>
                   <span><small>初始骰子</small><strong>{selectedRoom.rolls_per_turn} 个</strong></span>
                   <span><small>基础保底</small><strong>{selectedRoom.base_guarantee ?? 100} 万</strong></span>
@@ -1327,8 +1358,15 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                   <div className="section-title"><p className="kicker">每次掷骰晋级概率</p><Settings2 size={18} /></div>
                   <p className="probability-note">仅老板可以晋级；老板每轮前 2 次掷骰为保护期，打手不会触发晋级。</p>
                   <div className="probability-grid">
-                    {(selectedRoom.total_rounds ?? 3) >= 2 && <label><span>第一轮 → 第二轮</span><span className="percent-input"><input max="100" min="0" onChange={(event) => setRound1Chance(event.target.value)} type="number" value={round1Chance} /><b>%</b></span></label>}
-                    {(selectedRoom.total_rounds ?? 3) >= 3 && <label><span>第二轮 → 第三轮</span><span className="percent-input"><input max="100" min="0" onChange={(event) => setRound2Chance(event.target.value)} type="number" value={round2Chance} /><b>%</b></span></label>}
+                    {Array.from({ length: Math.max(0, totalRounds - 1) }, (_, index) => (
+                      <label key={index}>
+                        <span>第 {index + 1} 轮 → 第 {index + 2} 轮</span>
+                        <span className="percent-input">
+                          <input max="100" min="0" onChange={(event) => setAdvanceChances((values) => values.map((value, valueIndex) => valueIndex === index ? event.target.value : value))} type="number" value={advanceChances[index]} />
+                          <b>%</b>
+                        </span>
+                      </label>
+                    ))}
                     <button className="button secondary" disabled={busy || selectedRoom.status !== 'lobby'} onClick={saveChances} type="button"><Save size={17} /> 保存概率</button>
                   </div>
                 </section>
@@ -1343,23 +1381,23 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                       <span>轮数</span>
                       <button aria-label="减少轮数" disabled={selectedRoom.status !== 'lobby' || totalRounds <= 1} onClick={() => setTotalRounds((value) => Math.max(1, value - 1))} title="减少轮数" type="button"><Minus size={15} /></button>
                       <strong>{totalRounds}</strong>
-                      <button aria-label="增加轮数" disabled={selectedRoom.status !== 'lobby' || totalRounds >= 3} onClick={() => setTotalRounds((value) => Math.min(3, value + 1))} title="增加轮数" type="button"><Plus size={15} /></button>
+                      <button aria-label="增加轮数" disabled={selectedRoom.status !== 'lobby' || totalRounds >= MAX_ROUNDS} onClick={() => setTotalRounds((value) => Math.min(MAX_ROUNDS, value + 1))} title="增加轮数" type="button"><Plus size={15} /></button>
                     </div>
                     {roundSizes.slice(0, totalRounds).map((size, index) => (
                       <div className="structure-stepper" key={index}>
-                        <span>{ROUND_LABELS[(index + 1) as GameRound]}格子</span>
-                        <button aria-label={`减少${ROUND_LABELS[(index + 1) as GameRound]}格子`} disabled={selectedRoom.status !== 'lobby' || size <= 8} onClick={() => setRoundSizes((values) => values.map((value, valueIndex) => valueIndex === index ? Math.max(8, value - 1) : value) as [number, number, number])} title="减少格子" type="button"><Minus size={15} /></button>
-                        <input aria-label={`${ROUND_LABELS[(index + 1) as GameRound]}格子数`} disabled={selectedRoom.status !== 'lobby'} max="32" min="8" onChange={(event) => setRoundSizes((values) => values.map((value, valueIndex) => valueIndex === index ? Number(event.target.value) : value) as [number, number, number])} type="number" value={size} />
-                        <button aria-label={`增加${ROUND_LABELS[(index + 1) as GameRound]}格子`} disabled={selectedRoom.status !== 'lobby' || size >= 32} onClick={() => setRoundSizes((values) => values.map((value, valueIndex) => valueIndex === index ? Math.min(32, value + 1) : value) as [number, number, number])} title="增加格子" type="button"><Plus size={15} /></button>
+                        <span>{roundLabel(index + 1)}格子</span>
+                        <button aria-label={`减少${roundLabel(index + 1)}格子`} disabled={selectedRoom.status !== 'lobby' || size <= MIN_BOARD_SIZE} onClick={() => setRoundSizes((values) => values.map((value, valueIndex) => valueIndex === index ? Math.max(MIN_BOARD_SIZE, value - 2) : value))} title="减少格子" type="button"><Minus size={15} /></button>
+                        <input aria-label={`${roundLabel(index + 1)}格子数`} disabled={selectedRoom.status !== 'lobby'} max={MAX_BOARD_SIZE} min={MIN_BOARD_SIZE} onChange={(event) => setRoundSizes((values) => values.map((value, valueIndex) => valueIndex === index ? Number(event.target.value) : value))} step="2" type="number" value={size} />
+                        <button aria-label={`增加${roundLabel(index + 1)}格子`} disabled={selectedRoom.status !== 'lobby' || size >= MAX_BOARD_SIZE} onClick={() => setRoundSizes((values) => values.map((value, valueIndex) => valueIndex === index ? Math.min(MAX_BOARD_SIZE, value + 2) : value))} title="增加格子" type="button"><Plus size={15} /></button>
                       </div>
                     ))}
                     <button className="button secondary" disabled={busy || selectedRoom.status !== 'lobby'} onClick={saveBoardStructure} type="button"><Save size={17} /> 保存棋盘结构</button>
                   </div>
                   <p className="probability-note">每轮第 1 格固定为起点。调整某轮格子数时，只会重建该轮棋盘。</p>
                   <div className="round-tabs" role="tablist" aria-label="选择编辑轮次">
-                    {([1, 2, 3] as GameRound[]).slice(0, selectedRoom.total_rounds ?? 3).map((round) => (
+                    {Array.from({ length: selectedRoom.total_rounds ?? 3 }, (_, index) => index + 1).map((round) => (
                       <button aria-selected={editorRound === round} className={editorRound === round ? 'active' : ''} key={round} onClick={() => setEditorRound(round)} role="tab" type="button">
-                        {ROUND_LABELS[round]} <small>{roundBoardSize(selectedRoom, round)} 格</small>
+                        {roundLabel(round)} <small>{roundBoardSize(selectedRoom, round)} 格</small>
                       </button>
                     ))}
                   </div>
@@ -1369,7 +1407,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                         className="admin-board"
                         displayRound={editorRound}
                         onTileSelect={chooseTile}
-                        players={[]}
+                        players={NO_PLAYERS}
                         room={selectedRoom}
                         selectedTileId={selectedTileId}
                         tiles={roomTiles}
@@ -1379,7 +1417,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                       <div className="tile-edit-form">
                         <div className="tile-edit-title">
                           <span>第 {tileDraft.position + 1} 格</span>
-                          <strong>{ROUND_LABELS[tileDraft.round_number]}</strong>
+                          <strong>{roundLabel(tileDraft.round_number)}</strong>
                         </div>
                         <div className="tile-form-grid">
                           <label><span>完整名称</span><input disabled={selectedRoom.status !== 'lobby' || tileDraft.tile_type === 'start'} maxLength={40} onChange={(event) => setTileDraft({ ...tileDraft, name: event.target.value })} value={tileDraft.name} /></label>
@@ -1565,7 +1603,7 @@ function LobbyView({
           <p>房间码 <strong>{snapshot.room.code}</strong></p>
           <div className="lobby-rule-line">
             <span><Flag size={17} /> {snapshot.room.total_rounds ?? 3} 轮推演</span>
-            <span><Dice5 size={17} /> {([1, 2, 3] as GameRound[]).slice(0, snapshot.room.total_rounds ?? 3).map((round) => roundBoardSize(snapshot.room, round)).join(' → ')} 格</span>
+            <span><Dice5 size={17} /> {roomBoardSizeSummary(snapshot.room)}</span>
             <span><Users size={17} /> 最多 3 人</span>
             <span><Radio size={17} /> 初始骰子 {snapshot.room.rolls_per_turn} 个</span>
           </div>
@@ -1647,7 +1685,7 @@ function LobbyView({
   )
 }
 
-function Board({
+const Board = memo(function Board({
   players,
   room,
   tiles: allTiles,
@@ -1669,8 +1707,8 @@ function Board({
 
   return (
     <div
-      aria-label={`${ROUND_LABELS[displayRound]}行动棋盘`}
-      className={`board board-size-${tiles.length} ${className}`.trim()}
+      aria-label={`${roundLabel(displayRound)}行动棋盘`}
+      className={`board board-size-${tiles.length} ${tiles.length > 32 ? 'board-dense' : ''} ${className}`.trim()}
       style={{
         '--board-columns': dimensions.columns,
         '--board-rows': dimensions.rows,
@@ -1718,13 +1756,13 @@ function Board({
         style={{ gridColumn: `2 / ${dimensions.columns}`, gridRow: `2 / ${dimensions.rows}` }}
       >
         <span className="center-mark"><span /></span>
-        <p>{ROUND_LABELS[displayRound]} · {tiles.length} CELLS</p>
+        <p>{roundLabel(displayRound)} · {tiles.length} CELLS</p>
         <strong>护航协议局</strong>
         <small>每个房间使用独立随机棋盘</small>
       </div>
     </div>
   )
-}
+})
 
 function GameView({
   snapshot,
@@ -1763,7 +1801,7 @@ function GameView({
               <span className={`turn-indicator ${isMyTurn && !snapshot.room.is_paused ? 'active' : ''}`} />
               <p>{snapshot.room.is_paused ? '本局已暂停' : snapshot.room.status === 'finished' ? '行动结束' : waitingForDice ? snapshot.isDemo ? '试玩骰子已用完' : '等待管理员补充骰子' : isMyTurn ? '轮到你行动' : `等待 ${currentPlayer?.nickname ?? '队员'}`}</p>
             </div>
-            <span>{ROUND_LABELS[snapshot.room.current_round]} · {snapshot.room.board_size} 格 · 当前骰子 {ownPlayer?.dice_count ?? 0} 个</span>
+            <span>{roundLabel(snapshot.room.current_round)} · {snapshot.room.board_size} 格 · 当前骰子 {ownPlayer?.dice_count ?? 0} 个</span>
           </div>
           <Board players={snapshot.players} room={snapshot.room} tiles={snapshot.tiles} />
         </section>
