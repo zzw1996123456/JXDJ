@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowLeft,
   ArrowRight,
@@ -7,6 +7,7 @@ import {
   Crosshair,
   Crown,
   Dice5,
+  Download,
   Flag,
   LoaderCircle,
   LockKeyhole,
@@ -27,6 +28,7 @@ import {
   Sparkles,
   Swords,
   Trash2,
+  Upload,
   UserPlus,
   Users,
   Wifi,
@@ -52,6 +54,7 @@ import type {
   PlayerRole,
   Room,
   RoomTile,
+  SettlementRule,
   TileEffect,
   TileType,
 } from './types'
@@ -64,6 +67,39 @@ const ROUND_LABELS: Record<GameRound, string> = { 1: '第一轮', 2: '第二轮'
 const TILE_TYPES = Object.keys(TILE_TYPE_LABELS) as TileType[]
 const TILE_EFFECTS = Object.keys(EFFECT_LABELS) as TileEffect[]
 const GUARANTEE_EFFECTS: GuaranteeEffect[] = ['guarantee_add', 'guarantee_subtract', 'guarantee_multiply', 'guarantee_divide']
+const ROOM_CONFIG_FORMAT = 'jingxu-delta-monopoly-room'
+const ROOM_CONFIG_VERSION = 1
+
+interface RoomConfigFile {
+  format: typeof ROOM_CONFIG_FORMAT
+  version: typeof ROOM_CONFIG_VERSION
+  exported_at: string
+  settings: {
+    name: string
+    round1_advance_chance: number
+    round2_advance_chance: number
+    rolls_per_turn: number
+    base_guarantee: number
+  }
+  tiles: Array<Pick<RoomTile, 'round_number' | 'position' | 'name' | 'short_name' | 'tile_type' | 'detail' | 'effect_type' | 'effect_value'>>
+}
+
+function safeFilename(value: string) {
+  const cleaned = value.trim().replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, '_')
+  return cleaned || '趣味房间'
+}
+
+function downloadTextFile(filename: string, content: string, type: string, withBom = false) {
+  const blob = new Blob([withBom ? '\uFEFF' : '', content], { type })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  URL.revokeObjectURL(url)
+}
 
 function isGuaranteeEffect(effect: TileEffect): effect is GuaranteeEffect {
   return GUARANTEE_EFFECTS.includes(effect as GuaranteeEffect)
@@ -430,6 +466,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
   const [newRoomName, setNewRoomName] = useState('')
   const [players, setPlayers] = useState<Player[]>([])
   const [events, setEvents] = useState<GameEvent[]>([])
+  const [settlementRules, setSettlementRules] = useState<SettlementRule[]>([])
   const [roomTiles, setRoomTiles] = useState<RoomTile[]>([])
   const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null)
   const [roomPendingDelete, setRoomPendingDelete] = useState<string | null>(null)
@@ -443,10 +480,16 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
   const [tileDraft, setTileDraft] = useState<RoomTile | null>(null)
   const [diceDrafts, setDiceDrafts] = useState<Record<string, string>>({})
   const [guaranteeDrafts, setGuaranteeDrafts] = useState<Record<string, string>>({})
+  const [suffixDrafts, setSuffixDrafts] = useState<Record<number, string>>({})
+  const [configNotice, setConfigNotice] = useState('')
+  const configInputRef = useRef<HTMLInputElement>(null)
 
   const selectedRoom = rooms.find((room) => room.id === selectedRoomId) ?? null
   const selectedPlayers = players.filter((player) => player.room_id === selectedRoomId)
   const selectedEvents = events.filter((event) => event.room_id === selectedRoomId)
+  const selectedSettlementRules = settlementRules
+    .filter((rule) => rule.room_id === selectedRoomId)
+    .sort((left, right) => left.sequence_number - right.sequence_number)
   const selectedRoundTiles = roomTiles
     .filter((tile) => tile.room_id === selectedRoomId && tile.round_number === editorRound)
     .sort((a, b) => a.position - b.position)
@@ -492,6 +535,17 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
     }
 
     setEvents(allEvents)
+  }, [])
+
+  const loadSettlementRules = useCallback(async (roomId: string) => {
+    if (!supabase) return
+    const { data, error: rulesError } = await supabase
+      .from('room_settlement_rules')
+      .select('*')
+      .eq('room_id', roomId)
+      .order('sequence_number')
+    if (rulesError) throw rulesError
+    setSettlementRules(data as SettlementRule[])
   }, [])
 
   const loadDashboard = useCallback(async () => {
@@ -547,23 +601,27 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'room_tiles' }, () => {
         if (selectedRoomId) void loadRoomTiles(selectedRoomId)
       })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'room_settlement_rules' }, () => {
+        if (selectedRoomId) void loadSettlementRules(selectedRoomId)
+      })
       .subscribe()
 
     return () => {
       void client.removeChannel(channel)
     }
-  }, [authorized, loadDashboard, loadRoomEvents, loadRoomTiles, selectedRoomId])
+  }, [authorized, loadDashboard, loadRoomEvents, loadRoomTiles, loadSettlementRules, selectedRoomId])
 
   useEffect(() => {
     if (!authorized) return
     if (!selectedRoomId) {
       setEvents([])
+      setSettlementRules([])
       setRoomTiles([])
       return
     }
-    void Promise.all([loadRoomEvents(selectedRoomId), loadRoomTiles(selectedRoomId)])
+    void Promise.all([loadRoomEvents(selectedRoomId), loadRoomTiles(selectedRoomId), loadSettlementRules(selectedRoomId)])
       .catch((loadError) => setError(formatError(loadError)))
-  }, [authorized, loadRoomEvents, loadRoomTiles, selectedRoomId])
+  }, [authorized, loadRoomEvents, loadRoomTiles, loadSettlementRules, selectedRoomId])
 
   useEffect(() => {
     if (!selectedRoom) return
@@ -584,8 +642,10 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
   useEffect(() => {
     setRoomPendingDelete(null)
     setCodeCopied(false)
+    setConfigNotice('')
     setDiceDrafts({})
     setGuaranteeDrafts({})
+    setSuffixDrafts({})
   }, [selectedRoomId])
 
   useEffect(() => {
@@ -631,6 +691,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       setRooms([])
       setPlayers([])
       setEvents([])
+      setSettlementRules([])
       setRoomTiles([])
       setSelectedRoomId(null)
     })
@@ -860,6 +921,156 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
     window.setTimeout(() => setCodeCopied(false), 1600)
   }
 
+  function exportRoomConfig() {
+    if (!selectedRoom) return
+    void runAdminAction(async () => {
+      if (!supabase) return
+      const [roomResult, tilesResult] = await Promise.all([
+        supabase.from('rooms').select('*').eq('id', selectedRoom.id).single(),
+        supabase.from('room_tiles').select('*').eq('room_id', selectedRoom.id).order('round_number').order('position'),
+      ])
+      if (roomResult.error) throw roomResult.error
+      if (tilesResult.error) throw tilesResult.error
+      const room = roomResult.data as Room
+      const tiles = tilesResult.data as RoomTile[]
+      if (tiles.length !== 44) throw new Error('当前房间的三轮棋盘不完整，无法导出')
+
+      const config: RoomConfigFile = {
+        format: ROOM_CONFIG_FORMAT,
+        version: ROOM_CONFIG_VERSION,
+        exported_at: new Date().toISOString(),
+        settings: {
+          name: room.name,
+          round1_advance_chance: room.round1_advance_chance,
+          round2_advance_chance: room.round2_advance_chance,
+          rolls_per_turn: room.rolls_per_turn,
+          base_guarantee: room.base_guarantee,
+        },
+        tiles: tiles.map((tile) => ({
+          round_number: tile.round_number,
+          position: tile.position,
+          name: tile.name,
+          short_name: tile.short_name,
+          tile_type: tile.tile_type,
+          detail: tile.detail,
+          effect_type: tile.effect_type,
+          effect_value: Number(tile.effect_value),
+        })),
+      }
+      const date = new Date().toISOString().slice(0, 10)
+      downloadTextFile(`${safeFilename(room.name)}_房间设置_${date}.json`, JSON.stringify(config, null, 2), 'application/json;charset=utf-8')
+      setConfigNotice('房间设置已导出，不包含玩家和摇骰记录')
+    })
+  }
+
+  function importRoomConfig(file: File | undefined) {
+    if (!file || !selectedRoom) return
+    if (selectedRoom.status !== 'lobby') {
+      setError('只能向等待中的房间导入设置')
+      return
+    }
+    if (!window.confirm(`确定用「${file.name}」覆盖当前房间设置和三轮棋盘吗？玩家席位不会被删除。`)) return
+
+    void runAdminAction(async () => {
+      if (!supabase) return
+      const raw = (await file.text()).replace(/^\uFEFF/, '')
+      let config: unknown
+      try {
+        config = JSON.parse(raw)
+      } catch {
+        throw new Error('导入文件不是有效的 JSON')
+      }
+      if (!config || typeof config !== 'object') throw new Error('导入文件内容无效')
+      const candidate = config as Partial<RoomConfigFile>
+      if (candidate.format !== ROOM_CONFIG_FORMAT || candidate.version !== ROOM_CONFIG_VERSION) {
+        throw new Error('不支持的房间设置文件格式或版本')
+      }
+      if (!candidate.settings || !Array.isArray(candidate.tiles) || candidate.tiles.length !== 44) {
+        throw new Error('导入文件缺少完整的房间设置或 44 个棋盘格')
+      }
+      const { error: rpcError } = await supabase.rpc('admin_import_room_config', {
+        p_room_id: selectedRoom.id,
+        p_config: config,
+      })
+      if (rpcError) throw rpcError
+      await Promise.all([loadDashboard(), loadRoomTiles(selectedRoom.id), loadRoomEvents(selectedRoom.id)])
+      setConfigNotice('房间设置已完整导入，玩家席位和记录未变更')
+    })
+  }
+
+  function saveSettlementSuffix(rule: SettlementRule) {
+    if (!selectedRoom) return
+    void runAdminAction(async () => {
+      if (!supabase) return
+      const suffix = (suffixDrafts[rule.id] ?? rule.suffix).trim()
+      if (suffix.length > 200) throw new Error('规则后缀最多 200 个字符')
+      const { error: rpcError } = await supabase.rpc('admin_update_settlement_rule_suffix', {
+        p_rule_id: rule.id,
+        p_suffix: suffix,
+      })
+      if (rpcError) throw rpcError
+      await Promise.all([loadSettlementRules(selectedRoom.id), loadRoomEvents(selectedRoom.id)])
+      setSuffixDrafts((current) => {
+        const next = { ...current }
+        delete next[rule.id]
+        return next
+      })
+    })
+  }
+
+  function exportRollLog() {
+    if (!selectedRoom || selectedRoom.status !== 'finished') return
+    void runAdminAction(async () => {
+      if (!supabase) return
+      const pageSize = 1000
+      const allEvents: GameEvent[] = []
+      for (let from = 0; ; from += pageSize) {
+        const { data, error: eventsError } = await supabase
+          .from('game_events')
+          .select('*')
+          .eq('room_id', selectedRoom.id)
+          .order('created_at', { ascending: true })
+          .range(from, from + pageSize - 1)
+        if (eventsError) throw eventsError
+        const batch = data as GameEvent[]
+        allEvents.push(...batch)
+        if (batch.length < pageSize) break
+      }
+      const { data: rulesData, error: rulesError } = await supabase
+        .from('room_settlement_rules')
+        .select('*')
+        .eq('room_id', selectedRoom.id)
+        .order('sequence_number')
+      if (rulesError) throw rulesError
+      const rules = rulesData as SettlementRule[]
+      const rollEvents = allEvents.filter((event) => event.event_type === 'roll' || event.message.includes('掷出'))
+      const rollLines = rollEvents.map((event, index) => {
+        const metadata = event.metadata ?? {}
+        const timestamp = new Date(event.created_at).toLocaleString('zh-CN', { hour12: false })
+        if (!metadata.player_name || !metadata.dice) return `${index + 1}. [${timestamp}] ${event.message}`
+        const role = metadata.role === 'boss' ? '老板' : '打手'
+        return `${index + 1}. [${timestamp}] ${metadata.player_name}（${role}） · 第${metadata.round}轮 · 掷出 ${metadata.dice} · 落到「${metadata.tile_name}」：${metadata.tile_detail}`
+      })
+      const ruleLines = rules.map((rule) => `${rule.sequence_number}. ${rule.base_text}${rule.suffix ? ` ${rule.suffix}` : ''}`)
+      const content = [
+        '景序电竞三角洲趣味 · 全部摇骰记录',
+        `房间：${selectedRoom.name}`,
+        `房间码：${selectedRoom.code}`,
+        `导出时间：${new Date().toLocaleString('zh-CN', { hour12: false })}`,
+        `摇骰次数：${rollEvents.length}`,
+        '',
+        '=== 全部摇骰记录 ===',
+        ...(rollLines.length ? rollLines : ['本局没有摇骰记录。']),
+        '',
+        '=== 全员骰子归零规则 ===',
+        ...(ruleLines.length ? ruleLines : ['本局没有生成归零规则。']),
+        '',
+      ].join('\r\n')
+      const date = new Date().toISOString().slice(0, 10)
+      downloadTextFile(`${safeFilename(selectedRoom.name)}_全部摇骰记录_${date}.txt`, content, 'text/plain;charset=utf-8', true)
+    })
+  }
+
   function clearCaches() {
     void runAdminAction(async () => {
       if (!supabase) return
@@ -976,6 +1187,20 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                     </button>
                   </div>
                   <div className="admin-room-actions">
+                    <button className="button secondary" disabled={busy} onClick={exportRoomConfig} type="button"><Download size={17} /> 导出设置</button>
+                    <button className="button secondary" disabled={busy || selectedRoom.status !== 'lobby'} onClick={() => configInputRef.current?.click()} type="button"><Upload size={17} /> 导入设置</button>
+                    <input
+                      accept="application/json,.json"
+                      className="visually-hidden"
+                      onChange={(event) => {
+                        const file = event.currentTarget.files?.[0]
+                        event.currentTarget.value = ''
+                        importRoomConfig(file)
+                      }}
+                      ref={configInputRef}
+                      type="file"
+                    />
+                    <button className="button secondary" disabled={busy || selectedRoom.status !== 'finished'} onClick={exportRollLog} title={selectedRoom.status === 'finished' ? '导出全部摇骰记录' : '房间结束后可导出'} type="button"><Download size={17} /> 导出记录</button>
                     <button className="button primary" disabled={busy || !canStart} onClick={startRoom} type="button"><Play size={17} /> 开始房间</button>
                     <button className="button secondary" disabled={busy || selectedRoom.status !== 'playing'} onClick={toggleRoomPause} type="button">
                       {selectedRoom.is_paused ? <Play size={17} /> : <Pause size={17} />}
@@ -992,6 +1217,8 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                     )}
                   </div>
                 </div>
+
+                {configNotice && <p className="admin-operation-notice" role="status"><Check size={15} /> {configNotice}</p>}
 
                 <div className="admin-summary-strip">
                   <span><small>状态</small><strong>{roomStatusLabel(selectedRoom)}</strong></span>
@@ -1148,6 +1375,27 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                       </div>
                     ))}
                     {selectedPlayers.length === 0 && <p className="admin-empty">等待玩家使用房间码加入。</p>}
+                  </div>
+                </section>
+
+                <section className="admin-settlement-panel">
+                  <div className="section-title"><p className="kicker">全员骰子归零规则</p><Clipboard size={18} /></div>
+                  <p className="probability-note">每次全员骰子重新归零时，累计汇总截至当时打手触发的全部遵守规则和老板当前保底。</p>
+                  <div className="admin-settlement-list">
+                    {selectedSettlementRules.map((rule) => (
+                      <article className="admin-settlement-row" key={rule.id}>
+                        <span className="settlement-number">{String(rule.sequence_number).padStart(2, '0')}</span>
+                        <div>
+                          <p>{rule.base_text}</p>
+                          <label>
+                            <span>手动后缀</span>
+                            <input maxLength={200} onChange={(event) => setSuffixDrafts((current) => ({ ...current, [rule.id]: event.target.value }))} placeholder="例如：本条从下一局开始执行" value={suffixDrafts[rule.id] ?? rule.suffix} />
+                          </label>
+                        </div>
+                        <button aria-label={`保存第 ${rule.sequence_number} 条规则后缀`} disabled={busy || (suffixDrafts[rule.id] ?? rule.suffix).trim() === rule.suffix} onClick={() => saveSettlementSuffix(rule)} title="保存后缀" type="button"><Save size={15} /></button>
+                      </article>
+                    ))}
+                    {selectedSettlementRules.length === 0 && <p className="admin-empty">全员骰子第一次归零后，这里会自动生成规则。</p>}
                   </div>
                 </section>
 

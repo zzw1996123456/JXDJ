@@ -63,6 +63,29 @@ export interface GameEvent {
   id: number | string
   room_id: string
   message: string
+  event_type?: 'system' | 'roll' | 'settlement_rule'
+  metadata?: {
+    player_name?: string
+    role?: PlayerRole
+    round?: number
+    dice?: number
+    tile_name?: string
+    tile_detail?: string
+    tile_type?: TileType
+    effect_type?: TileEffect
+    effect_value?: number
+    sequence_number?: number
+  }
+  settlement_rule_id?: number | null
+  created_at: string
+}
+
+export interface SettlementRule {
+  id: number
+  room_id: string
+  sequence_number: number
+  base_text: string
+  suffix: string
   created_at: string
 }
 

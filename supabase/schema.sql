@@ -87,8 +87,38 @@ create table if not exists public.game_events (
   id bigint generated always as identity primary key,
   room_id uuid not null references public.rooms(id) on delete cascade,
   message text not null,
+  event_type text not null default 'system' check (event_type in ('system', 'roll', 'settlement_rule')),
+  metadata jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now()
 );
+
+alter table public.game_events add column if not exists event_type text not null default 'system';
+alter table public.game_events add column if not exists metadata jsonb not null default '{}'::jsonb;
+alter table public.game_events drop constraint if exists game_events_event_type_check;
+alter table public.game_events add constraint game_events_event_type_check
+  check (event_type in ('system', 'roll', 'settlement_rule'));
+
+create table if not exists public.room_settlement_rules (
+  id bigint generated always as identity primary key,
+  room_id uuid not null references public.rooms(id) on delete cascade,
+  sequence_number integer not null check (sequence_number > 0),
+  base_text text not null,
+  suffix text not null default '' check (char_length(suffix) <= 200),
+  created_at timestamptz not null default now(),
+  unique (room_id, sequence_number)
+);
+
+alter table public.game_events add column if not exists settlement_rule_id bigint;
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint where conname = 'game_events_settlement_rule_id_fkey'
+  ) then
+    alter table public.game_events
+      add constraint game_events_settlement_rule_id_fkey
+      foreign key (settlement_rule_id) references public.room_settlement_rules(id) on delete set null;
+  end if;
+end $$;
 
 create table if not exists public.app_admins (
   user_id uuid primary key references auth.users(id) on delete cascade,
@@ -260,11 +290,14 @@ where rt.template_id = t.id
 
 create index if not exists room_players_room_id_idx on public.room_players(room_id);
 create index if not exists game_events_room_id_created_at_idx on public.game_events(room_id, created_at desc);
+create index if not exists game_events_unsettled_roll_idx on public.game_events(room_id, id) where event_type = 'roll' and settlement_rule_id is null;
+create index if not exists room_settlement_rules_room_sequence_idx on public.room_settlement_rules(room_id, sequence_number);
 create index if not exists room_tiles_room_round_idx on public.room_tiles(room_id, round_number, position);
 
 alter table public.rooms enable row level security;
 alter table public.room_players enable row level security;
 alter table public.game_events enable row level security;
+alter table public.room_settlement_rules enable row level security;
 alter table public.app_admins enable row level security;
 alter table public.tile_rule_templates enable row level security;
 alter table public.room_tiles enable row level security;
@@ -302,6 +335,11 @@ drop policy if exists "room members can read events" on public.game_events;
 create policy "room members can read events" on public.game_events for select to authenticated using (public.is_room_member(room_id));
 drop policy if exists "admins can read events" on public.game_events;
 create policy "admins can read events" on public.game_events for select to authenticated using (public.is_admin());
+
+drop policy if exists "room members can read settlement rules" on public.room_settlement_rules;
+create policy "room members can read settlement rules" on public.room_settlement_rules for select to authenticated using (public.is_room_member(room_id));
+drop policy if exists "admins can read settlement rules" on public.room_settlement_rules;
+create policy "admins can read settlement rules" on public.room_settlement_rules for select to authenticated using (public.is_admin());
 
 drop policy if exists "room members can read tiles" on public.room_tiles;
 create policy "room members can read tiles" on public.room_tiles for select to authenticated using (public.is_room_member(room_id));
@@ -460,6 +498,162 @@ begin
 end;
 $$;
 
+create or replace function public.admin_import_room_config(p_room_id uuid, p_config jsonb)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_room public.rooms%rowtype;
+  v_settings jsonb;
+  v_tiles jsonb;
+  v_tile jsonb;
+  v_name text;
+  v_round1_chance integer;
+  v_round2_chance integer;
+  v_rolls_per_turn integer;
+  v_base_guarantee integer;
+  v_round integer;
+  v_position integer;
+  v_tile_name text;
+  v_short_name text;
+  v_tile_type text;
+  v_detail text;
+  v_effect_type text;
+  v_effect_value numeric;
+  v_move_limit integer;
+  v_skip_limit integer;
+begin
+  if not public.is_admin() then raise exception '只有管理员可以导入房间设置'; end if;
+  select * into v_room from public.rooms where id = p_room_id for update;
+  if not found or v_room.status <> 'lobby' then raise exception '只能向等待中的房间导入设置'; end if;
+  if jsonb_typeof(p_config) <> 'object'
+    or p_config ->> 'format' <> 'jingxu-delta-monopoly-room'
+    or (p_config ->> 'version')::integer <> 1
+  then raise exception '房间设置文件格式或版本无效'; end if;
+
+  v_settings := p_config -> 'settings';
+  v_tiles := p_config -> 'tiles';
+  if jsonb_typeof(v_settings) <> 'object' or jsonb_typeof(v_tiles) <> 'array' or jsonb_array_length(v_tiles) <> 44 then
+    raise exception '房间设置文件必须包含完整设置和 44 个棋盘格';
+  end if;
+
+  v_name := trim(v_settings ->> 'name');
+  v_round1_chance := (v_settings ->> 'round1_advance_chance')::integer;
+  v_round2_chance := (v_settings ->> 'round2_advance_chance')::integer;
+  v_rolls_per_turn := (v_settings ->> 'rolls_per_turn')::integer;
+  v_base_guarantee := (v_settings ->> 'base_guarantee')::integer;
+  if char_length(v_name) not between 1 and 24 then raise exception '导入的房间名需要 1 到 24 个字符'; end if;
+  if v_round1_chance not between 0 and 100 or v_round2_chance not between 0 and 100 then raise exception '导入的晋级概率必须在 0 到 100 之间'; end if;
+  if v_rolls_per_turn not between 1 and 5 then raise exception '导入的初始骰子数量必须在 1 到 5 之间'; end if;
+  if v_base_guarantee not between 0 and 10000 then raise exception '导入的基础保底必须在 0 到 10000 万之间'; end if;
+
+  delete from public.room_tiles where room_id = p_room_id;
+  for v_tile in select value from jsonb_array_elements(v_tiles) loop
+    if jsonb_typeof(v_tile) <> 'object' then raise exception '棋盘格数据无效'; end if;
+    v_round := (v_tile ->> 'round_number')::integer;
+    v_position := (v_tile ->> 'position')::integer;
+    v_tile_name := trim(v_tile ->> 'name');
+    v_short_name := trim(v_tile ->> 'short_name');
+    v_tile_type := v_tile ->> 'tile_type';
+    v_detail := trim(v_tile ->> 'detail');
+    v_effect_type := v_tile ->> 'effect_type';
+    v_effect_value := (v_tile ->> 'effect_value')::numeric;
+
+    if v_round not between 1 and 3 then raise exception '棋盘轮次无效'; end if;
+    if v_position not between 0 and (case v_round when 1 then 7 when 2 then 11 else 23 end) then raise exception '棋盘格位置无效'; end if;
+    if char_length(v_tile_name) not between 1 and 40 then raise exception '格子完整名称需要 1 到 40 个字符'; end if;
+    if char_length(v_short_name) not between 1 and 16 then raise exception '格子短名需要 1 到 16 个字符'; end if;
+    if char_length(v_detail) not between 1 and 160 then raise exception '格子说明需要 1 到 160 个字符'; end if;
+    if v_tile_type not in ('shared','boss','runner','empty','move','chance') then raise exception '格子分类无效'; end if;
+    if v_effect_type not in ('none','guarantee_add','guarantee_subtract','guarantee_multiply','guarantee_divide','move','skip','extra_roll','lose_roll','advance_chance','advance_round','finish') then raise exception '格子效果无效'; end if;
+    if v_tile_type = 'empty' and (v_effect_type <> 'none' or v_effect_value <> 0) then raise exception '空格不能附带效果'; end if;
+    if v_effect_type in ('none','advance_chance','advance_round','finish') and v_effect_value <> 0 then raise exception '该效果的数值必须为 0'; end if;
+    if v_effect_type not in ('guarantee_multiply','guarantee_divide') and v_effect_value <> trunc(v_effect_value) then raise exception '该效果数值必须是整数'; end if;
+    if v_effect_type in ('advance_chance','advance_round') and v_round = 3 then raise exception '第三轮不能配置晋级效果'; end if;
+    if v_effect_type = 'finish' and v_round <> 3 then raise exception '结束格只能配置在第三轮'; end if;
+    v_move_limit := case v_round when 1 then 2 when 2 then 3 else 5 end;
+    v_skip_limit := case v_round when 1 then 1 else 2 end;
+    if v_effect_type = 'move' and (v_effect_value = 0 or abs(v_effect_value) > v_move_limit) then raise exception '本轮移动格数超出允许范围'; end if;
+    if v_effect_type = 'skip' and v_effect_value not between 1 and v_skip_limit then raise exception '本轮暂停次数超出允许范围'; end if;
+    if v_effect_type in ('extra_roll','lose_roll') and v_effect_value not between 1 and 2 then raise exception '骰子数量效果必须在 1 到 2 之间'; end if;
+    if v_effect_type in ('guarantee_add','guarantee_subtract') and v_effect_value not between 1 and 100000 then raise exception '老板保底加减必须在 1 到 100000 万之间'; end if;
+    if v_effect_type in ('guarantee_multiply','guarantee_divide') and v_effect_value not between 0 and 10 then raise exception '老板保底乘除倍数必须在 0 到 10 之间'; end if;
+
+    insert into public.room_tiles(
+      room_id, template_id, round_number, position, name, short_name, tile_type, detail, effect_type, effect_value
+    ) values (
+      p_room_id, null, v_round, v_position, v_tile_name, v_short_name, v_tile_type, v_detail, v_effect_type, v_effect_value
+    );
+  end loop;
+
+  if (select count(*) from public.room_tiles where room_id = p_room_id and round_number = 1) <> 8
+    or (select count(*) from public.room_tiles where room_id = p_room_id and round_number = 2) <> 12
+    or (select count(*) from public.room_tiles where room_id = p_room_id and round_number = 3) <> 24
+  then raise exception '导入棋盘必须包含 8、12、24 个三轮格子'; end if;
+  if exists (
+    select 1 from (values (1),(2),(3)) as rounds(round_number)
+    where not exists (
+      select 1 from public.room_tiles t where t.room_id = p_room_id and t.round_number = rounds.round_number and t.tile_type = 'empty'
+    )
+  ) then raise exception '导入棋盘每轮至少需要一个空格'; end if;
+  if not exists (select 1 from public.room_tiles where room_id = p_room_id and round_number = 3 and effect_type = 'finish') then
+    raise exception '导入棋盘第三轮至少需要一个结束格';
+  end if;
+  if exists (
+    select 1
+    from (values (1, 8), (2, 12)) as rounds(round_number, board_size)
+    cross join lateral generate_series(0, rounds.board_size - 1) as positions(position)
+    where not exists (
+      select 1 from public.room_tiles t
+      where t.room_id = p_room_id and t.round_number = rounds.round_number
+        and t.effect_type in ('advance_chance', 'advance_round')
+        and mod(t.position - positions.position + rounds.board_size, rounds.board_size) between 1 and 6
+    ) or not exists (
+      select 1 from public.room_tiles t
+      where t.room_id = p_room_id and t.round_number = rounds.round_number
+        and t.effect_type not in ('advance_chance', 'advance_round')
+        and mod(t.position - positions.position + rounds.board_size, rounds.board_size) between 1 and 6
+    )
+  ) then raise exception '导入棋盘的晋级格布局无效'; end if;
+
+  update public.rooms set
+    name = v_name,
+    round1_advance_chance = v_round1_chance,
+    round2_advance_chance = v_round2_chance,
+    rolls_per_turn = v_rolls_per_turn,
+    rolls_remaining = v_rolls_per_turn,
+    base_guarantee = v_base_guarantee,
+    current_round = 1,
+    board_size = 8
+  where id = p_room_id;
+  update public.room_players set
+    dice_count = v_rolls_per_turn,
+    coins = case when role = 'boss' then v_base_guarantee else 0 end,
+    is_ready = false
+  where room_id = p_room_id;
+  insert into public.game_events(room_id, message)
+  values (p_room_id, '管理员导入房间设置并完整替换三轮棋盘');
+end;
+$$;
+
+create or replace function public.admin_update_settlement_rule_suffix(p_rule_id bigint, p_suffix text)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_rule public.room_settlement_rules%rowtype;
+  v_suffix text := trim(coalesce(p_suffix, ''));
+begin
+  if not public.is_admin() then raise exception '只有管理员可以修改规则后缀'; end if;
+  if char_length(v_suffix) > 200 then raise exception '规则后缀最多 200 个字符'; end if;
+  select * into v_rule from public.room_settlement_rules where id = p_rule_id for update;
+  if not found then raise exception '归零规则不存在'; end if;
+  update public.room_settlement_rules set suffix = v_suffix where id = p_rule_id;
+  update public.game_events set message = v_rule.base_text || case when v_suffix = '' then '' else ' ' || v_suffix end
+  where settlement_rule_id = p_rule_id and event_type = 'settlement_rule';
+end;
+$$;
+
 create or replace function public.join_room(p_code text, p_nickname text, p_role text)
 returns table(room_id uuid, room_code text)
 language plpgsql security definer set search_path = public
@@ -594,6 +788,72 @@ begin
 end;
 $$;
 
+create or replace function public.create_zero_dice_rule_internal(p_room_id uuid)
+returns bigint
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_room public.rooms%rowtype;
+  v_sequence integer;
+  v_runner_rules text;
+  v_boss_guarantee integer;
+  v_base_text text;
+  v_rule_id bigint;
+begin
+  select * into v_room from public.rooms where id = p_room_id for update;
+  if not found or v_room.status <> 'playing' then return null; end if;
+  if exists (select 1 from public.room_players where room_id = p_room_id and dice_count > 0) then return null; end if;
+  if not exists (
+    select 1 from public.game_events
+    where room_id = p_room_id and event_type = 'roll' and settlement_rule_id is null
+  ) then return null; end if;
+
+  select coalesce(max(sequence_number), 0) + 1 into v_sequence
+  from public.room_settlement_rules where room_id = p_room_id;
+  select coalesce(coins, 0) into v_boss_guarantee
+  from public.room_players where room_id = p_room_id and role = 'boss' limit 1;
+  v_boss_guarantee := coalesce(v_boss_guarantee, 0);
+
+  select string_agg('「' || rule_name || '」：' || rule_detail, '；' order by first_event_id)
+  into v_runner_rules
+  from (
+    select
+      metadata ->> 'tile_name' as rule_name,
+      metadata ->> 'tile_detail' as rule_detail,
+      min(id) as first_event_id
+    from public.game_events
+    where room_id = p_room_id
+      and event_type = 'roll'
+      and metadata ->> 'role' = 'runner'
+      and metadata ->> 'effect_type' = 'none'
+      and metadata ->> 'tile_type' <> 'empty'
+    group by metadata ->> 'tile_name', metadata ->> 'tile_detail'
+  ) as runner_rules;
+
+  v_base_text := '第 ' || v_sequence || ' 次全员骰子归零：' ||
+    case when v_runner_rules is null
+      then '本批次打手未触发新的持续遵守规则'
+      else '截至本次，打手需遵守 ' || v_runner_rules
+    end || '；老板当前保底 ' || v_boss_guarantee || ' 万。';
+
+  insert into public.room_settlement_rules(room_id, sequence_number, base_text)
+  values (p_room_id, v_sequence, v_base_text)
+  returning id into v_rule_id;
+
+  update public.game_events set settlement_rule_id = v_rule_id
+  where room_id = p_room_id and event_type = 'roll' and settlement_rule_id is null;
+  insert into public.game_events(room_id, message, event_type, settlement_rule_id, metadata)
+  values (
+    p_room_id, v_base_text, 'settlement_rule', v_rule_id,
+    jsonb_build_object('sequence_number', v_sequence)
+  );
+  return v_rule_id;
+end;
+$$;
+
+revoke all on function public.create_zero_dice_rule_internal(uuid) from public;
+revoke all on function public.create_zero_dice_rule_internal(uuid) from authenticated;
+
 create or replace function public.advance_room_turn_internal(p_room_id uuid, p_after_order integer)
 returns void
 language plpgsql security definer set search_path = public
@@ -640,6 +900,7 @@ begin
       select 1 from public.room_players where room_id = p_room_id and dice_count > 0
     ) then
       update public.rooms set current_turn = null, rolls_remaining = 0 where id = p_room_id;
+      perform public.create_zero_dice_rule_internal(p_room_id);
       insert into public.game_events(room_id, message)
       values (p_room_id, '所有玩家都没有可用骰子，等待管理员补充');
       return;
@@ -647,6 +908,9 @@ begin
   end loop;
 
   update public.rooms set current_turn = null, rolls_remaining = 0 where id = p_room_id;
+  if not exists (select 1 from public.room_players where room_id = p_room_id and dice_count > 0) then
+    perform public.create_zero_dice_rule_internal(p_room_id);
+  end if;
   insert into public.game_events(room_id, message)
   values (p_room_id, '当前没有可行动玩家，等待管理员处理');
 end;
@@ -1083,6 +1347,7 @@ begin
   if not found then raise exception '房间不存在或已被删除'; end if;
 
   delete from public.game_events where room_id = p_room_id;
+  delete from public.room_settlement_rules where room_id = p_room_id;
   delete from public.room_tiles where room_id = p_room_id;
   delete from public.room_players where room_id = p_room_id;
   delete from public.rooms where id = p_room_id;
@@ -1202,8 +1467,25 @@ begin
     skip_turns = v_skip, next_roll_modifier = v_modifier, dice_count = v_remaining,
     round_roll_count = round_roll_count + 1
   where id = v_player.id;
-  insert into public.game_events(room_id, message)
-  values (p_room_id, v_player.nickname || ' 掷出 ' || v_dice || '，落到「' || v_tile.name || '」：' || v_tile.detail);
+  insert into public.game_events(room_id, message, event_type, metadata)
+  values (
+    p_room_id,
+    v_player.nickname || ' 掷出 ' || v_dice || '，落到「' || v_tile.name || '」：' || v_tile.detail,
+    'roll',
+    jsonb_build_object(
+      'player_id', v_player.id,
+      'player_name', v_player.nickname,
+      'role', v_player.role,
+      'round', v_room.current_round,
+      'dice', v_dice,
+      'landed_position', v_landed,
+      'tile_name', v_tile.name,
+      'tile_detail', v_tile.detail,
+      'tile_type', v_tile.tile_type,
+      'effect_type', v_tile.effect_type,
+      'effect_value', v_tile.effect_value
+    )
+  );
   if v_tile.effect_type in ('guarantee_add','guarantee_subtract','guarantee_multiply','guarantee_divide') then
     select coins into v_guarantee_before from public.room_players
     where room_id = p_room_id and role = 'boss' for update;
@@ -1234,6 +1516,9 @@ begin
     values (p_room_id, v_player.nickname || case when v_tile.effect_value > 0 then ' 前进 ' else ' 后退 ' end || abs(v_tile.effect_value) || ' 格，到达第 ' || (v_position + 1) || ' 格');
   end if;
   if v_finished then
+    if not exists (select 1 from public.room_players where room_id = p_room_id and dice_count > 0) then
+      perform public.create_zero_dice_rule_internal(p_room_id);
+    end if;
     update public.rooms set status = 'finished', is_paused = false, winner_id = auth.uid(), current_turn = null, rolls_remaining = 0 where id = p_room_id;
     insert into public.game_events(room_id, message) values (p_room_id, v_player.nickname || ' 完成最终结算，本局结束');
   else
@@ -1260,6 +1545,8 @@ revoke all on function public.admin_create_room() from authenticated;
 revoke all on function public.admin_create_room(text) from public;
 revoke all on function public.admin_clear_cache() from public;
 revoke all on function public.admin_randomize_room_board(uuid) from public;
+revoke all on function public.admin_import_room_config(uuid, jsonb) from public;
+revoke all on function public.admin_update_settlement_rule_suffix(bigint, text) from public;
 revoke all on function public.join_room(text, text, text) from public;
 revoke all on function public.set_ready(uuid, boolean) from public;
 revoke all on function public.update_lobby_player(uuid, text, text) from public;
@@ -1281,6 +1568,8 @@ revoke all on function public.roll_dice(uuid) from public;
 grant execute on function public.admin_create_room(text) to authenticated;
 grant execute on function public.admin_clear_cache() to authenticated;
 grant execute on function public.admin_randomize_room_board(uuid) to authenticated;
+grant execute on function public.admin_import_room_config(uuid, jsonb) to authenticated;
+grant execute on function public.admin_update_settlement_rule_suffix(bigint, text) to authenticated;
 grant execute on function public.join_room(text, text, text) to authenticated;
 grant execute on function public.set_ready(uuid, boolean) to authenticated;
 grant execute on function public.update_lobby_player(uuid, text, text) to authenticated;
@@ -1302,6 +1591,7 @@ grant execute on function public.roll_dice(uuid) to authenticated;
 grant select on public.rooms to authenticated;
 grant select on public.room_players to authenticated;
 grant select on public.game_events to authenticated;
+grant select on public.room_settlement_rules to authenticated;
 grant select on public.app_admins to authenticated;
 grant select on public.room_tiles to authenticated;
 grant select on public.tile_rule_templates to authenticated;
@@ -1320,7 +1610,12 @@ begin
   if not exists (select 1 from pg_publication_tables where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'room_tiles') then
     alter publication supabase_realtime add table public.room_tiles;
   end if;
+  if not exists (select 1 from pg_publication_tables where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'room_settlement_rules') then
+    alter publication supabase_realtime add table public.room_settlement_rules;
+  end if;
 end $$;
+
+select pg_notify('pgrst', 'reload schema');
 
 -- 创建管理员：先在 Authentication > Users 创建邮箱账号，再把邮箱替换为真实值执行。
 -- insert into public.app_admins(user_id)
