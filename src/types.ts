@@ -2,7 +2,8 @@ export type PlayerRole = 'boss' | 'runner'
 export type RoomStatus = 'lobby' | 'playing' | 'finished'
 export type GameRound = 1 | 2 | 3
 export type TileType = 'shared' | 'boss' | 'runner' | 'empty' | 'move' | 'chance'
-export type TileEffect = 'none' | 'coins' | 'move' | 'skip' | 'extra_roll' | 'lose_roll' | 'advance_chance' | 'advance_round' | 'finish'
+export type GuaranteeEffect = 'guarantee_add' | 'guarantee_subtract' | 'guarantee_multiply' | 'guarantee_divide'
+export type TileEffect = 'none' | GuaranteeEffect | 'move' | 'skip' | 'extra_roll' | 'lose_roll' | 'advance_chance' | 'advance_round' | 'finish'
 
 export interface Room {
   id: string

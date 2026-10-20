@@ -40,11 +40,21 @@ const noEffect = resolve('none')
 assert.equal(noEffect.room.current_round, 1)
 assert.equal(noEffect.players[0].coins, 100)
 
-const coins = resolve('coins', 20)
-assert.equal(coins.players[0].coins, 120)
-assert.equal(coins.room.current_round, 1)
+const guaranteeAdded = resolve('guarantee_add', 20)
+assert.equal(guaranteeAdded.players[0].coins, 120)
+assert.equal(guaranteeAdded.room.current_round, 1)
 
-const runnerGuarantee = snapshotFor('coins', 20)
+const guaranteeSubtracted = resolve('guarantee_subtract', 20)
+assert.equal(guaranteeSubtracted.players[0].coins, 80)
+assert.equal(resolve('guarantee_subtract', 200).players[0].coins, 0, '老板保底不得低于 0')
+
+const guaranteeMultiplied = resolve('guarantee_multiply', 3)
+assert.equal(guaranteeMultiplied.players[0].coins, 300)
+
+const guaranteeDivided = resolve('guarantee_divide', 3)
+assert.equal(guaranteeDivided.players[0].coins, 33, '保底除法应向下取整')
+
+const runnerGuarantee = snapshotFor('guarantee_add', 20)
 runnerGuarantee.players = [
   { ...runnerGuarantee.players[0], id: 'guarantee-boss', user_id: 'guarantee-boss-user', nickname: '老板', role: 'boss', turn_order: 0, coins: 100 },
   { ...runnerGuarantee.players[0], id: 'guarantee-runner', user_id: 'guarantee-runner-user', nickname: '打手', role: 'runner', turn_order: 1, coins: 0 },
@@ -162,6 +172,12 @@ for (const round of [1, 2, 3] as const) {
     if (rule.effect_type === 'move') {
       assert.notEqual(rule.effect_value, 0)
       assert.ok(Math.abs(rule.effect_value) <= moveLimit)
+    }
+    if (rule.effect_type === 'guarantee_add' || rule.effect_type === 'guarantee_subtract') {
+      assert.ok(rule.effect_value >= 1 && rule.effect_value <= 1000)
+    }
+    if (rule.effect_type === 'guarantee_multiply' || rule.effect_type === 'guarantee_divide') {
+      assert.ok(rule.effect_value >= 2 && rule.effect_value <= 5)
     }
     if (rule.effect_type === 'skip') assert.ok(rule.effect_value >= 1 && rule.effect_value <= skipLimit)
     if (rule.effect_type === 'extra_roll' || rule.effect_type === 'lose_roll') assert.ok(rule.effect_value >= 1 && rule.effect_value <= 2)

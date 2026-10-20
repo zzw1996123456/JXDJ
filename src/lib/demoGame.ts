@@ -127,7 +127,10 @@ export function resolveDemoDice(snapshot: GameSnapshot, dice: number): { snapsho
   const addedEvents: GameEvent[] = []
 
   switch (tile.effect_type) {
-    case 'coins':
+    case 'guarantee_add':
+    case 'guarantee_subtract':
+    case 'guarantee_multiply':
+    case 'guarantee_divide':
       break
     case 'move':
       position = ((position + tile.effect_value) % tiles.length + tiles.length) % tiles.length
@@ -165,15 +168,29 @@ export function resolveDemoDice(snapshot: GameSnapshot, dice: number): { snapsho
     addedEvents.unshift(event(snapshot.room.id, `${player.nickname} ${tile.effect_value > 0 ? '前进' : '后退'} ${Math.abs(tile.effect_value)} 格，到达第 ${position + 1} 格`))
   }
   let players = snapshot.players.map((item, index) => index === currentIndex ? player : item)
-  if (tile.effect_type === 'coins') {
-    players = players.map((item) => item.role === 'boss'
-      ? { ...item, coins: Math.max(0, item.coins + tile.effect_value) }
-      : { ...item, coins: 0 })
-    const boss = players.find((item) => item.role === 'boss')
-    if (boss && tile.effect_value !== 0) {
+  if (['guarantee_add', 'guarantee_subtract', 'guarantee_multiply', 'guarantee_divide'].includes(tile.effect_type)) {
+    const previousBoss = players.find((item) => item.role === 'boss')
+    if (previousBoss) {
+      const nextGuarantee = tile.effect_type === 'guarantee_add'
+        ? Math.min(1_000_000, previousBoss.coins + tile.effect_value)
+        : tile.effect_type === 'guarantee_subtract'
+          ? Math.max(0, previousBoss.coins - tile.effect_value)
+          : tile.effect_type === 'guarantee_multiply'
+            ? Math.min(1_000_000, previousBoss.coins * tile.effect_value)
+            : Math.floor(previousBoss.coins / tile.effect_value)
+      players = players.map((item) => item.role === 'boss'
+        ? { ...item, coins: nextGuarantee }
+        : { ...item, coins: 0 })
+      const operation = tile.effect_type === 'guarantee_add'
+        ? `增加 ${tile.effect_value} 万`
+        : tile.effect_type === 'guarantee_subtract'
+          ? `减少 ${tile.effect_value} 万`
+          : tile.effect_type === 'guarantee_multiply'
+            ? `乘以 ${tile.effect_value}`
+            : `除以 ${tile.effect_value}`
       addedEvents.unshift(event(
         snapshot.room.id,
-        `老板保底${tile.effect_value > 0 ? '增加' : '减少'} ${Math.abs(tile.effect_value)} 万，当前 ${boss.coins} 万`,
+        `老板保底${operation}：${previousBoss.coins} 万 → ${nextGuarantee} 万`,
       ))
     }
   }

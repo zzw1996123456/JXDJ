@@ -1524,14 +1524,25 @@ button.mode-card {
   flex-direction: column;
 }
 
-.admin-dice-stepper {
+.admin-player-controls {
+  display: grid;
+  gap: 5px;
+}
+
+.admin-dice-stepper,
+.admin-guarantee-stepper {
   display: grid;
   grid-template-columns: 26px 38px 26px;
   align-items: center;
   border: 1px solid #3d4438;
 }
 
-.admin-dice-stepper button {
+.admin-guarantee-stepper {
+  grid-template-columns: 26px minmax(64px, auto) 26px;
+}
+
+.admin-dice-stepper button,
+.admin-guarantee-stepper button {
   width: 26px;
   height: 28px;
   display: grid;
@@ -1542,17 +1553,23 @@ button.mode-card {
   cursor: pointer;
 }
 
-.admin-dice-stepper button:disabled {
+.admin-dice-stepper button:disabled,
+.admin-guarantee-stepper button:disabled {
   cursor: not-allowed;
   color: #535a50;
 }
 
-.admin-dice-stepper strong {
+.admin-dice-stepper strong,
+.admin-guarantee-stepper strong {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 4px;
   color: var(--acid);
+}
+
+.admin-guarantee-stepper strong {
+  color: #ffd166;
 }
 
 .admin-player-row strong {

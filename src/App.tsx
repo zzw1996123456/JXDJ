@@ -48,6 +48,7 @@ import type {
   GameEvent,
   GameRound,
   GameSnapshot,
+  GuaranteeEffect,
   Player,
   PlayerRole,
   Room,
@@ -63,10 +64,51 @@ const MAX_PLAYERS = 3
 const ROUND_LABELS: Record<GameRound, string> = { 1: '第一轮', 2: '第二轮', 3: '第三轮' }
 const TILE_TYPES = Object.keys(TILE_TYPE_LABELS) as TileType[]
 const TILE_EFFECTS = Object.keys(EFFECT_LABELS) as TileEffect[]
+const GUARANTEE_EFFECTS: GuaranteeEffect[] = ['guarantee_add', 'guarantee_subtract', 'guarantee_multiply', 'guarantee_divide']
+const GUARANTEE_AMOUNTS = [5, 10, 15, 20, 25, 30, 40, 50, 100]
+const GUARANTEE_FACTORS = [2, 3, 4, 5]
+
+function isGuaranteeEffect(effect: TileEffect): effect is GuaranteeEffect {
+  return GUARANTEE_EFFECTS.includes(effect as GuaranteeEffect)
+}
+
+function guaranteePresetLabel(effect: GuaranteeEffect, value: number) {
+  if (effect === 'guarantee_add') return `增加 ${value} 万`
+  if (effect === 'guarantee_subtract') return `减少 ${value} 万`
+  if (effect === 'guarantee_multiply') return `乘以 ${value}`
+  return `除以 ${value}（小数向下取整）`
+}
+
+function guaranteePresetValues(effect: GuaranteeEffect, currentValue: number) {
+  const presets = effect === 'guarantee_multiply' || effect === 'guarantee_divide' ? GUARANTEE_FACTORS : GUARANTEE_AMOUNTS
+  return presets.includes(currentValue) ? presets : [...presets, currentValue].sort((left, right) => left - right)
+}
+
+function applyGuaranteePreset(tile: RoomTile, effect: GuaranteeEffect, value: number): RoomTile {
+  const names: Record<GuaranteeEffect, string> = {
+    guarantee_add: '保底加注',
+    guarantee_subtract: '保底扣减',
+    guarantee_multiply: '保底倍增',
+    guarantee_divide: '保底折算',
+  }
+  const symbols: Record<GuaranteeEffect, string> = {
+    guarantee_add: `+${value}万`,
+    guarantee_subtract: `-${value}万`,
+    guarantee_multiply: `×${value}`,
+    guarantee_divide: `÷${value}`,
+  }
+  return {
+    ...tile,
+    name: names[effect],
+    short_name: `保底 ${symbols[effect]}`,
+    detail: `老板当前保底${guaranteePresetLabel(effect, value)}`,
+    effect_type: effect,
+    effect_value: value,
+  }
+}
 
 function effectValueHint(effect: TileEffect, round: GameRound) {
   if (effect === 'move') return `正数前进、负数后退，本轮最多 ${round === 1 ? 2 : round === 2 ? 3 : 5} 格`
-  if (effect === 'coins') return '正数增加老板保底、负数扣减老板保底，单位为万'
   if (effect === 'skip') return `暂停次数，最多 ${round === 1 ? 1 : 2} 次`
   if (effect === 'extra_roll' || effect === 'lose_roll') return '掷骰次数，允许 1–2 次'
   if (effect === 'advance_chance' || effect === 'advance_round') return '只允许第一轮和第二轮使用；是否落到本格由本轮晋级概率控制'
@@ -747,6 +789,20 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
     })
   }
 
+  function adjustBossGuarantee(delta: -10 | 10) {
+    if (!selectedRoom) return
+    void runAdminAction(async () => {
+      if (!supabase) return
+      const { error: rpcError } = await supabase.rpc('admin_adjust_boss_guarantee', {
+        p_room_id: selectedRoom.id,
+        p_delta: delta,
+      })
+      if (rpcError) throw rpcError
+      await loadDashboard()
+      await loadRoomEvents(selectedRoom.id)
+    })
+  }
+
   function deleteRoom() {
     if (!selectedRoom || roomPendingDelete !== selectedRoom.id) return
     const roomId = selectedRoom.id
@@ -988,13 +1044,30 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                             <select disabled={selectedRoom.status !== 'lobby' || tileDraft.tile_type === 'empty'} onChange={(event) => {
                               const effectType = event.target.value as TileEffect
                               const needsZero = ['none', 'advance_chance', 'advance_round', 'finish'].includes(effectType)
-                              setTileDraft({ ...tileDraft, effect_type: effectType, effect_value: needsZero ? 0 : Math.max(1, Math.abs(tileDraft.effect_value)) })
+                              const effectValue = needsZero ? 0 : isGuaranteeEffect(effectType)
+                                ? effectType === 'guarantee_multiply' || effectType === 'guarantee_divide' ? 2 : 10
+                                : Math.max(1, Math.abs(tileDraft.effect_value))
+                              const nextTile = { ...tileDraft, effect_type: effectType, effect_value: effectValue }
+                              setTileDraft(isGuaranteeEffect(effectType) ? applyGuaranteePreset(nextTile, effectType, effectValue) : nextTile)
                             }} value={tileDraft.effect_type}>
                               {availableEffects(tileDraft.round_number).map((effect) => <option key={effect} value={effect}>{EFFECT_LABELS[effect]}</option>)}
                             </select>
                           </label>
                           <label className="tile-detail-field"><span>落格说明</span><textarea disabled={selectedRoom.status !== 'lobby'} maxLength={160} onChange={(event) => setTileDraft({ ...tileDraft, detail: event.target.value })} rows={3} value={tileDraft.detail} /></label>
-                          <label><span>效果数值</span><input disabled={selectedRoom.status !== 'lobby' || ['none', 'advance_chance', 'advance_round', 'finish'].includes(tileDraft.effect_type)} onChange={(event) => setTileDraft({ ...tileDraft, effect_value: Number(event.target.value) })} type="number" value={tileDraft.effect_value} /><small>{effectValueHint(tileDraft.effect_type, tileDraft.round_number)}</small></label>
+                          {isGuaranteeEffect(tileDraft.effect_type) ? (
+                            <label>
+                              <span>保底变化</span>
+                              <select disabled={selectedRoom.status !== 'lobby'} onChange={(event) => {
+                                setTileDraft(applyGuaranteePreset(tileDraft, tileDraft.effect_type as GuaranteeEffect, Number(event.target.value)))
+                              }} value={tileDraft.effect_value}>
+                                {guaranteePresetValues(tileDraft.effect_type as GuaranteeEffect, tileDraft.effect_value)
+                                  .map((value) => <option key={value} value={value}>{guaranteePresetLabel(tileDraft.effect_type as GuaranteeEffect, value)}</option>)}
+                              </select>
+                              <small>选择后会自动更新格子名称和落格说明</small>
+                            </label>
+                          ) : (
+                            <label><span>效果数值</span><input disabled={selectedRoom.status !== 'lobby' || ['none', 'advance_chance', 'advance_round', 'finish'].includes(tileDraft.effect_type)} onChange={(event) => setTileDraft({ ...tileDraft, effect_value: Number(event.target.value) })} type="number" value={tileDraft.effect_value} /><small>{effectValueHint(tileDraft.effect_type, tileDraft.round_number)}</small></label>
+                          )}
                         </div>
                         <button className="button primary full" disabled={busy || selectedRoom.status !== 'lobby'} onClick={saveTile} type="button"><Save size={17} /> 保存这个格子</button>
                       </div>
@@ -1008,11 +1081,20 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                     {selectedPlayers.map((player, index) => (
                       <div className="admin-player-row" key={player.id}>
                         <PlayerAvatar index={index} player={player} />
-                        <span><strong>{player.nickname}</strong><small>{player.role === 'boss' ? `老板 · 保底 ${player.coins} 万` : '打手'}{player.user_id === selectedRoom.starting_player_id ? ' · 先手' : ''} · {player.is_ready ? '已准备' : '未准备'}</small></span>
-                        <div className="admin-dice-stepper">
-                          <button aria-label={`减少 ${player.nickname} 的骰子`} disabled={busy || selectedRoom.status === 'finished' || player.dice_count <= 0} onClick={() => adjustPlayerDice(player.id, -1)} title="减少 1 个骰子" type="button"><Minus size={14} /></button>
-                          <strong><Dice5 size={13} /> {player.dice_count}</strong>
-                          <button aria-label={`增加 ${player.nickname} 的骰子`} disabled={busy || selectedRoom.status === 'finished' || player.dice_count >= 20} onClick={() => adjustPlayerDice(player.id, 1)} title="增加 1 个骰子" type="button"><Plus size={14} /></button>
+                        <span><strong>{player.nickname}</strong><small>{player.role === 'boss' ? '老板' : '打手'}{player.user_id === selectedRoom.starting_player_id ? ' · 先手' : ''} · {player.is_ready ? '已准备' : '未准备'}</small></span>
+                        <div className="admin-player-controls">
+                          {player.role === 'boss' && (
+                            <div className="admin-guarantee-stepper">
+                              <button aria-label="减少老板保底" disabled={busy || selectedRoom.status === 'finished' || player.coins <= 0} onClick={() => adjustBossGuarantee(-10)} title="减少 10 万保底" type="button"><Minus size={14} /></button>
+                              <strong><Shield size={13} /> {player.coins} 万</strong>
+                              <button aria-label="增加老板保底" disabled={busy || selectedRoom.status === 'finished' || player.coins >= (selectedRoom.status === 'lobby' ? 10000 : 1000000)} onClick={() => adjustBossGuarantee(10)} title="增加 10 万保底" type="button"><Plus size={14} /></button>
+                            </div>
+                          )}
+                          <div className="admin-dice-stepper">
+                            <button aria-label={`减少 ${player.nickname} 的骰子`} disabled={busy || selectedRoom.status === 'finished' || player.dice_count <= 0} onClick={() => adjustPlayerDice(player.id, -1)} title="减少 1 个骰子" type="button"><Minus size={14} /></button>
+                            <strong><Dice5 size={13} /> {player.dice_count}</strong>
+                            <button aria-label={`增加 ${player.nickname} 的骰子`} disabled={busy || selectedRoom.status === 'finished' || player.dice_count >= 20} onClick={() => adjustPlayerDice(player.id, 1)} title="增加 1 个骰子" type="button"><Plus size={14} /></button>
+                          </div>
                         </div>
                       </div>
                     ))}
