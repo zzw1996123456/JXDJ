@@ -10,6 +10,7 @@ export interface Room {
   code: string
   host_user_id: string
   status: RoomStatus
+  is_paused: boolean
   current_turn: string | null
   winner_id: string | null
   board_size: number

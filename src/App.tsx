@@ -12,6 +12,7 @@ import {
   LockKeyhole,
   LogIn,
   LogOut,
+  Pause,
   Play,
   Plus,
   Radio,
@@ -83,6 +84,13 @@ function formatError(error: unknown) {
   if (error instanceof Error) return error.message
   if (typeof error === 'object' && error && 'message' in error) return String(error.message)
   return '操作失败，请稍后重试'
+}
+
+function roomStatusLabel(room: Room) {
+  if (room.is_paused) return '已暂停'
+  if (room.status === 'lobby') return '等待玩家'
+  if (room.status === 'playing') return '进行中'
+  return '已结束'
 }
 
 async function ensureOnlineUser() {
@@ -697,6 +705,19 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
     })
   }
 
+  function toggleRoomPause() {
+    if (!selectedRoom || selectedRoom.status !== 'playing') return
+    void runAdminAction(async () => {
+      if (!supabase) return
+      const { error: rpcError } = await supabase.rpc('admin_set_room_paused', {
+        p_room_id: selectedRoom.id,
+        p_paused: !selectedRoom.is_paused,
+      })
+      if (rpcError) throw rpcError
+      await loadDashboard()
+    })
+  }
+
   function deleteRoom() {
     if (!selectedRoom || roomPendingDelete !== selectedRoom.id) return
     const roomId = selectedRoom.id
@@ -776,7 +797,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                 return (
                   <button className={`admin-room-item ${selectedRoomId === room.id ? 'active' : ''}`} key={room.id} onClick={() => setSelectedRoomId(room.id)} type="button">
                     <span><strong>{room.name}</strong><small>{room.code} · {count}/3 人 · {ROUND_LABELS[room.current_round]}</small></span>
-                    <em className={`room-status status-${room.status}`}>{room.status === 'lobby' ? '等待' : room.status === 'playing' ? '进行中' : '已结束'}</em>
+                    <em className={`room-status status-${room.is_paused ? 'paused' : room.status}`}>{roomStatusLabel(room)}</em>
                   </button>
                 )
               })}
@@ -796,6 +817,10 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                   </div>
                   <div className="admin-room-actions">
                     <button className="button primary" disabled={busy || !canStart} onClick={startRoom} type="button"><Play size={17} /> 开始房间</button>
+                    <button className="button secondary" disabled={busy || selectedRoom.status !== 'playing'} onClick={toggleRoomPause} type="button">
+                      {selectedRoom.is_paused ? <Play size={17} /> : <Pause size={17} />}
+                      {selectedRoom.is_paused ? '继续本局' : '暂停本局'}
+                    </button>
                     <button className="button secondary" disabled={busy || selectedRoom.status !== 'playing'} onClick={finishRoom} type="button"><Flag size={17} /> 结束本局</button>
                     {roomPendingDelete === selectedRoom.id ? (
                       <>
@@ -809,7 +834,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                 </div>
 
                 <div className="admin-summary-strip">
-                  <span><small>状态</small><strong>{selectedRoom.status === 'lobby' ? '等待玩家' : selectedRoom.status === 'playing' ? '进行中' : '已结束'}</strong></span>
+                  <span><small>状态</small><strong>{roomStatusLabel(selectedRoom)}</strong></span>
                   <span><small>当前轮次</small><strong>{ROUND_LABELS[selectedRoom.current_round]}</strong></span>
                   <span><small>玩家</small><strong>{selectedPlayers.length} / 3</strong></span>
                   <span><small>每回合掷骰</small><strong>{selectedRoom.rolls_per_turn} 次</strong></span>
@@ -1114,8 +1139,8 @@ function GameView({
         <section className="board-section">
           <div className="turn-strip">
             <div>
-              <span className={`turn-indicator ${isMyTurn ? 'active' : ''}`} />
-              <p>{snapshot.room.status === 'finished' ? '行动结束' : isMyTurn ? '轮到你行动' : `等待 ${currentPlayer?.nickname ?? '队员'}`}</p>
+              <span className={`turn-indicator ${isMyTurn && !snapshot.room.is_paused ? 'active' : ''}`} />
+              <p>{snapshot.room.is_paused ? '本局已暂停' : snapshot.room.status === 'finished' ? '行动结束' : isMyTurn ? '轮到你行动' : `等待 ${currentPlayer?.nickname ?? '队员'}`}</p>
             </div>
             <span>{ROUND_LABELS[snapshot.room.current_round]} · {snapshot.room.board_size} 格 · 当前剩余 {snapshot.room.rolls_remaining} 次</span>
           </div>
@@ -1127,9 +1152,9 @@ function GameView({
             <div className={`dice-face ${busy ? 'rolling' : ''}`} aria-label={dice ? `骰子点数 ${dice}` : '等待掷骰'}>
               {dice ?? <Dice5 size={34} />}
             </div>
-            <button className="button primary roll-button" disabled={busy || !isMyTurn || snapshot.room.status !== 'playing'} onClick={onRoll} type="button">
+            <button className="button primary roll-button" disabled={busy || snapshot.room.is_paused || !isMyTurn || snapshot.room.status !== 'playing'} onClick={onRoll} type="button">
               {busy ? <LoaderCircle className="spin" size={19} /> : <Dice5 size={19} />}
-              {isMyTurn ? `掷骰行动 · 剩余 ${snapshot.room.rolls_remaining}` : '等待回合'}
+              {snapshot.room.is_paused ? '等待管理员继续' : isMyTurn ? `掷骰行动 · 剩余 ${snapshot.room.rolls_remaining}` : '等待回合'}
             </button>
           </section>
 
@@ -1207,6 +1232,17 @@ export default function App() {
   const refreshRoom = useCallback(async (roomId: string, userId: string) => {
     try {
       const next = await fetchSnapshot(roomId, userId)
+      localStorage.setItem(LAST_ROOM_CODE_KEY, next.room.code)
+      const ownPlayer = next.players.find((player) => player.user_id === userId)
+      if (ownPlayer) localStorage.setItem(NICKNAME_KEY, ownPlayer.nickname)
+      if (next.room.is_paused) {
+        localStorage.removeItem(ACTIVE_ROOM_KEY)
+        setSelectedMode('monopoly')
+        setSnapshot(null)
+        setDice(null)
+        setError('本局已被管理员暂停，继续后可使用原行动代号重新进入')
+        return
+      }
       setSnapshot(next)
     } catch (refreshError) {
       const message = formatError(refreshError)
@@ -1291,7 +1327,12 @@ export default function App() {
       if (!result?.room_id) throw new Error('未找到该房间')
       localStorage.setItem(ACTIVE_ROOM_KEY, result.room_id)
       localStorage.setItem(LAST_ROOM_CODE_KEY, result.room_code ?? code)
-      setSnapshot(await fetchSnapshot(result.room_id, user.id))
+      const next = await fetchSnapshot(result.room_id, user.id)
+      if (next.room.is_paused) {
+        localStorage.removeItem(ACTIVE_ROOM_KEY)
+        throw new Error('本局已被管理员暂停，暂时无法进入')
+      }
+      setSnapshot(next)
     })
   }
 

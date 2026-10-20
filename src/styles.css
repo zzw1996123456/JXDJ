@@ -1126,6 +1126,11 @@ button.mode-card {
   color: var(--acid);
 }
 
+.room-status.status-paused {
+  background: #452716;
+  color: #ffad66;
+}
+
 .room-status.status-finished {
   background: #2c2e2a;
   color: #747b70;

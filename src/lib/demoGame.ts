@@ -13,7 +13,7 @@ function event(roomId: string, message: string): GameEvent {
 
 export function createDemoRoom(nickname: string, role: PlayerRole): GameSnapshot {
   const room: Room = {
-    id: 'demo-room', name: '本机试玩房', code: 'DEMO88', host_user_id: DEMO_USER_ID, status: 'lobby',
+    id: 'demo-room', name: '本机试玩房', code: 'DEMO88', host_user_id: DEMO_USER_ID, status: 'lobby', is_paused: false,
     current_turn: null, winner_id: null, board_size: 8, target_laps: 3, current_round: 1,
     round1_advance_chance: 35, round2_advance_chance: 30, starting_player_id: DEMO_USER_ID,
     rolls_per_turn: 2, rolls_remaining: 2, created_at: now(),

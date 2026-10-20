@@ -9,6 +9,7 @@ create table if not exists public.rooms (
   code text not null unique check (char_length(code) = 6),
   host_user_id uuid not null,
   status text not null default 'lobby' check (status in ('lobby', 'playing', 'finished')),
+  is_paused boolean not null default false,
   current_turn uuid,
   winner_id uuid,
   board_size integer not null default 8,
@@ -23,6 +24,7 @@ create table if not exists public.rooms (
 );
 
 alter table public.rooms add column if not exists name text not null default '趣味房间';
+alter table public.rooms add column if not exists is_paused boolean not null default false;
 alter table public.rooms add column if not exists current_round integer not null default 1;
 alter table public.rooms add column if not exists round1_advance_chance integer not null default 35;
 alter table public.rooms add column if not exists round2_advance_chance integer not null default 30;
@@ -408,6 +410,7 @@ begin
   if p_role not in ('boss', 'runner') then raise exception '玩家身份无效'; end if;
   select * into v_room from public.rooms where code = upper(trim(p_code)) for update;
   if not found then raise exception '房间不存在，请检查房间码'; end if;
+  if v_room.is_paused then raise exception '本局已被管理员暂停，暂时无法进入'; end if;
 
   -- The current browser may already own a seat. Require its original codename
   -- instead of allowing the seat identity to be renamed during reconnection.
@@ -465,7 +468,7 @@ returns void
 language plpgsql security definer set search_path = public
 as $$
 begin
-  if not exists (select 1 from public.rooms where id = p_room_id and status = 'lobby') then raise exception '当前不能修改准备状态'; end if;
+  if not exists (select 1 from public.rooms where id = p_room_id and status = 'lobby' and not is_paused) then raise exception '当前不能修改准备状态'; end if;
   update public.room_players set is_ready = p_ready where room_id = p_room_id and user_id = auth.uid();
   if not found then raise exception '你不在该房间中'; end if;
 end;
@@ -592,7 +595,7 @@ begin
     where room_id = p_room_id order by turn_order limit 1;
   end if;
   select rolls_per_turn into v_rolls from public.rooms where id = p_room_id;
-  update public.rooms set status = 'playing', current_turn = v_first_user, current_round = 1,
+  update public.rooms set status = 'playing', is_paused = false, current_turn = v_first_user, current_round = 1,
     board_size = 8, winner_id = null, rolls_remaining = v_rolls where id = p_room_id;
   update public.room_players set position = 0, distance = 0, coins = 100, skip_turns = 0, next_roll_modifier = 0
   where room_id = p_room_id;
@@ -607,10 +610,28 @@ language plpgsql security definer set search_path = public
 as $$
 begin
   if not public.is_admin() then raise exception '只有管理员可以结束房间'; end if;
-  update public.rooms set status = 'finished', current_turn = null, rolls_remaining = 0
+  update public.rooms set status = 'finished', is_paused = false, current_turn = null, rolls_remaining = 0
   where id = p_room_id and status = 'playing';
   if not found then raise exception '该房间当前不在进行中'; end if;
   insert into public.game_events(room_id, message) values (p_room_id, '管理员手动结束了本局');
+end;
+$$;
+
+create or replace function public.admin_set_room_paused(p_room_id uuid, p_paused boolean)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_room public.rooms%rowtype;
+begin
+  if not public.is_admin() then raise exception '只有管理员可以暂停或继续本局'; end if;
+  if p_paused is null then raise exception '暂停状态无效'; end if;
+  select * into v_room from public.rooms where id = p_room_id for update;
+  if not found or v_room.status <> 'playing' then raise exception '只有进行中的房间可以暂停或继续'; end if;
+  if v_room.is_paused = p_paused then return; end if;
+  update public.rooms set is_paused = p_paused where id = p_room_id;
+  insert into public.game_events(room_id, message)
+  values (p_room_id, case when p_paused then '管理员暂停了本局，所有行动已锁定' else '管理员继续了本局，行动恢复' end);
 end;
 $$;
 
@@ -670,6 +691,7 @@ declare
 begin
   select * into v_room from public.rooms where id = p_room_id for update;
   if not found or v_room.status <> 'playing' then raise exception '当前没有进行中的行动'; end if;
+  if v_room.is_paused then raise exception '本局已被管理员暂停，暂时不能掷骰'; end if;
   if v_room.current_turn <> auth.uid() then raise exception '还没有轮到你'; end if;
   if v_room.rolls_remaining <= 0 then raise exception '当前没有剩余掷骰次数'; end if;
   select * into v_player from public.room_players where room_id = p_room_id and user_id = auth.uid() for update;
@@ -726,7 +748,7 @@ begin
   end if;
 
   if v_finished then
-    update public.rooms set status = 'finished', winner_id = auth.uid(), current_turn = null, rolls_remaining = 0 where id = p_room_id;
+    update public.rooms set status = 'finished', is_paused = false, winner_id = auth.uid(), current_turn = null, rolls_remaining = 0 where id = p_room_id;
     insert into public.game_events(room_id, message) values (p_room_id, v_player.nickname || ' 完成最终结算，本局结束');
   else
     if v_advanced then
@@ -781,6 +803,7 @@ revoke all on function public.admin_update_room_settings(uuid, uuid, integer) fr
 revoke all on function public.admin_update_room_tile(uuid, text, text, text, text, text, integer) from public;
 revoke all on function public.admin_start_game(uuid) from public;
 revoke all on function public.admin_finish_room(uuid) from public;
+revoke all on function public.admin_set_room_paused(uuid, boolean) from public;
 revoke all on function public.admin_delete_room(uuid) from public;
 revoke all on function public.leave_room(uuid) from public;
 revoke all on function public.roll_dice(uuid) from public;
@@ -794,6 +817,7 @@ grant execute on function public.admin_update_room_settings(uuid, uuid, integer)
 grant execute on function public.admin_update_room_tile(uuid, text, text, text, text, text, integer) to authenticated;
 grant execute on function public.admin_start_game(uuid) to authenticated;
 grant execute on function public.admin_finish_room(uuid) to authenticated;
+grant execute on function public.admin_set_room_paused(uuid, boolean) to authenticated;
 grant execute on function public.admin_delete_room(uuid) to authenticated;
 grant execute on function public.leave_room(uuid) to authenticated;
 grant execute on function public.roll_dice(uuid) to authenticated;
