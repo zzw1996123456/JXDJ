@@ -6,6 +6,7 @@ export type TileEffect = 'none' | 'coins' | 'move' | 'skip' | 'extra_roll' | 'lo
 
 export interface Room {
   id: string
+  name: string
   code: string
   host_user_id: string
   status: RoomStatus

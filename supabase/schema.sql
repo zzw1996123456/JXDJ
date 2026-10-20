@@ -5,6 +5,7 @@ create extension if not exists pgcrypto;
 
 create table if not exists public.rooms (
   id uuid primary key default gen_random_uuid(),
+  name text not null default '趣味房间' check (char_length(trim(name)) between 1 and 24),
   code text not null unique check (char_length(code) = 6),
   host_user_id uuid not null,
   status text not null default 'lobby' check (status in ('lobby', 'playing', 'finished')),
@@ -21,6 +22,7 @@ create table if not exists public.rooms (
   created_at timestamptz not null default now()
 );
 
+alter table public.rooms add column if not exists name text not null default '趣味房间';
 alter table public.rooms add column if not exists current_round integer not null default 1;
 alter table public.rooms add column if not exists round1_advance_chance integer not null default 35;
 alter table public.rooms add column if not exists round2_advance_chance integer not null default 30;
@@ -320,7 +322,17 @@ end $$;
 drop function if exists public.create_room(text, text);
 drop function if exists public.start_game(uuid);
 
+-- 保留旧签名作为禁用入口，避免升级时删除函数造成缓存冲突。
 create or replace function public.admin_create_room()
+returns table(room_id uuid, room_code text)
+language plpgsql security definer set search_path = public
+as $$
+begin
+  raise exception '请先输入房间名称';
+end;
+$$;
+
+create or replace function public.admin_create_room(p_room_name text)
 returns table(room_id uuid, room_code text)
 language plpgsql security definer set search_path = public
 as $$
@@ -330,14 +342,18 @@ declare
   v_code text;
 begin
   if v_user_id is null or not public.is_admin() then raise exception '只有管理员可以创建房间'; end if;
+  if p_room_name is null or char_length(trim(p_room_name)) not between 1 and 24 then
+    raise exception '房间名需要 1 到 24 个字符';
+  end if;
   loop
     v_code := upper(substr(replace(gen_random_uuid()::text, '-', ''), 1, 6));
     exit when not exists (select 1 from public.rooms where code = v_code);
   end loop;
-  insert into public.rooms(code, host_user_id, board_size, target_laps, current_round)
-  values (v_code, v_user_id, 8, 3, 1) returning id into v_room_id;
+  insert into public.rooms(name, code, host_user_id, board_size, target_laps, current_round)
+  values (trim(p_room_name), v_code, v_user_id, 8, 3, 1) returning id into v_room_id;
   perform public.generate_room_board_internal(v_room_id);
-  insert into public.game_events(room_id, message) values (v_room_id, '管理员创建房间并生成了三轮随机棋盘');
+  insert into public.game_events(room_id, message)
+  values (v_room_id, '管理员创建「' || trim(p_room_name) || '」并生成了三轮随机棋盘');
   return query select v_room_id, v_code;
 end;
 $$;
@@ -371,24 +387,25 @@ begin
   if not found then raise exception '房间不存在，请检查房间码'; end if;
   if v_room.status <> 'lobby' then raise exception '该房间已经开始行动'; end if;
 
-  if exists (select 1 from public.room_players where room_id = v_room.id and user_id = v_user_id) then
+  if exists (select 1 from public.room_players rp where rp.room_id = v_room.id and rp.user_id = v_user_id) then
     if p_role = 'boss' and exists (
-      select 1 from public.room_players where room_id = v_room.id and role = 'boss' and user_id <> v_user_id
+      select 1 from public.room_players rp where rp.room_id = v_room.id and rp.role = 'boss' and rp.user_id <> v_user_id
     ) then raise exception '老板席已经有人了'; end if;
     if p_role = 'runner' and (
-      select count(*) from public.room_players where room_id = v_room.id and role = 'runner' and user_id <> v_user_id
+      select count(*) from public.room_players rp where rp.room_id = v_room.id and rp.role = 'runner' and rp.user_id <> v_user_id
     ) >= 2 then raise exception '两个打手席已经满了'; end if;
-    update public.room_players set nickname = trim(p_nickname), role = p_role
-    where room_id = v_room.id and user_id = v_user_id;
+    update public.room_players as rp set nickname = trim(p_nickname), role = p_role
+    where rp.room_id = v_room.id and rp.user_id = v_user_id;
   else
-    if (select count(*) from public.room_players where room_id = v_room.id) >= 3 then raise exception '房间人数已满'; end if;
+    if (select count(*) from public.room_players rp where rp.room_id = v_room.id) >= 3 then raise exception '房间人数已满'; end if;
     if p_role = 'boss' and exists (
-      select 1 from public.room_players where room_id = v_room.id and role = 'boss'
+      select 1 from public.room_players rp where rp.room_id = v_room.id and rp.role = 'boss'
     ) then raise exception '老板席已经有人了'; end if;
     if p_role = 'runner' and (
-      select count(*) from public.room_players where room_id = v_room.id and role = 'runner'
+      select count(*) from public.room_players rp where rp.room_id = v_room.id and rp.role = 'runner'
     ) >= 2 then raise exception '两个打手席已经满了'; end if;
-    select coalesce(max(turn_order), -1) + 1 into v_turn_order from public.room_players where room_id = v_room.id;
+    select coalesce(max(rp.turn_order), -1) + 1 into v_turn_order
+    from public.room_players rp where rp.room_id = v_room.id;
     insert into public.room_players(room_id, user_id, nickname, role, turn_order, coins)
     values (v_room.id, v_user_id, trim(p_nickname), p_role, v_turn_order, 100);
     insert into public.game_events(room_id, message)
@@ -703,6 +720,8 @@ end;
 $$;
 
 revoke all on function public.admin_create_room() from public;
+revoke all on function public.admin_create_room() from authenticated;
+revoke all on function public.admin_create_room(text) from public;
 revoke all on function public.admin_randomize_room_board(uuid) from public;
 revoke all on function public.join_room(text, text, text) from public;
 revoke all on function public.set_ready(uuid, boolean) from public;
@@ -714,7 +733,7 @@ revoke all on function public.admin_finish_room(uuid) from public;
 revoke all on function public.leave_room(uuid) from public;
 revoke all on function public.roll_dice(uuid) from public;
 
-grant execute on function public.admin_create_room() to authenticated;
+grant execute on function public.admin_create_room(text) to authenticated;
 grant execute on function public.admin_randomize_room_board(uuid) to authenticated;
 grant execute on function public.join_room(text, text, text) to authenticated;
 grant execute on function public.set_ready(uuid, boolean) to authenticated;

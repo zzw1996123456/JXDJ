@@ -358,7 +358,7 @@ function RoomHeader({ snapshot, onExit }: { snapshot: GameSnapshot; onExit: () =
       <div className="room-actions">
         <StatusPill online={!snapshot.isDemo} />
         <button className="room-code" onClick={copyCode} title="复制房间码" type="button">
-          <span>房间</span>
+          <span title={snapshot.room.name}>{snapshot.room.name}</span>
           <strong>{snapshot.room.code}</strong>
           {copied ? <Check size={16} /> : <Clipboard size={16} />}
         </button>
@@ -378,6 +378,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [rooms, setRooms] = useState<Room[]>([])
+  const [newRoomName, setNewRoomName] = useState('')
   const [players, setPlayers] = useState<Player[]>([])
   const [events, setEvents] = useState<GameEvent[]>([])
   const [roomTiles, setRoomTiles] = useState<RoomTile[]>([])
@@ -576,11 +577,14 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
   function createRoom() {
     void runAdminAction(async () => {
       if (!supabase) return
-      const { data, error: rpcError } = await supabase.rpc('admin_create_room')
+      const roomName = newRoomName.trim()
+      if (roomName.length < 1 || roomName.length > 24) throw new Error('房间名需要 1–24 个字符')
+      const { data, error: rpcError } = await supabase.rpc('admin_create_room', { p_room_name: roomName })
       if (rpcError) throw rpcError
       const result = Array.isArray(data) ? data[0] : data
       await loadDashboard()
       if (result?.room_id) setSelectedRoomId(result.room_id)
+      setNewRoomName('')
     })
   }
 
@@ -728,15 +732,27 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
           <aside className="admin-room-list">
             <div className="admin-section-heading">
               <div><p className="kicker">ROOMS</p><h1>房间管理</h1></div>
-              <button aria-label="创建房间" className="icon-button admin-add" disabled={busy} onClick={createRoom} title="创建房间" type="button"><Plus size={19} /></button>
             </div>
-            <button className="button primary full" disabled={busy} onClick={createRoom} type="button"><UserPlus size={18} /> 创建新房间</button>
+            <div className="admin-create-room">
+              <label htmlFor="new-room-name">房间名称</label>
+              <div>
+                <input
+                  id="new-room-name"
+                  maxLength={24}
+                  onChange={(event) => setNewRoomName(event.target.value)}
+                  onKeyDown={(event) => event.key === 'Enter' && !busy && newRoomName.trim() && createRoom()}
+                  placeholder="例如：周末护航局"
+                  value={newRoomName}
+                />
+                <button aria-label="创建房间" className="button primary" disabled={busy || !newRoomName.trim()} onClick={createRoom} title="创建房间" type="button"><Plus size={18} /> 创建</button>
+              </div>
+            </div>
             <div className="admin-room-items">
               {rooms.map((room) => {
                 const count = players.filter((player) => player.room_id === room.id).length
                 return (
                   <button className={`admin-room-item ${selectedRoomId === room.id ? 'active' : ''}`} key={room.id} onClick={() => setSelectedRoomId(room.id)} type="button">
-                    <span><strong>{room.code}</strong><small>{count}/3 人 · {ROUND_LABELS[room.current_round]}</small></span>
+                    <span><strong>{room.name}</strong><small>{room.code} · {count}/3 人 · {ROUND_LABELS[room.current_round]}</small></span>
                     <em className={`room-status status-${room.status}`}>{room.status === 'lobby' ? '等待' : room.status === 'playing' ? '进行中' : '已结束'}</em>
                   </button>
                 )
@@ -752,6 +768,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                 <div className="admin-detail-header">
                   <div>
                     <p className="kicker">SELECTED ROOM</p>
+                    <h2 className="admin-room-title">{selectedRoom.name}</h2>
                     <button className="admin-code" onClick={copyRoomCode} title="复制房间码" type="button">{selectedRoom.code} <Clipboard size={17} /></button>
                   </div>
                   <div className="admin-room-actions">
