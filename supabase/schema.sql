@@ -69,12 +69,12 @@ create table if not exists public.app_admins (
 create table if not exists public.tile_rule_templates (
   id bigint generated always as identity primary key,
   round_number integer not null check (round_number between 1 and 3),
-  rule_group text not null check (rule_group in ('empty', 'contract', 'movement', 'turn', 'dice', 'advance', 'finish')),
+  rule_group text not null check (rule_group in ('empty', 'contract', 'movement', 'turn', 'dice', 'advance_chance', 'advance', 'finish')),
   name text not null,
   short_name text not null,
   tile_type text not null check (tile_type in ('shared', 'boss', 'runner', 'empty', 'move', 'chance')),
   detail text not null,
-  effect_type text not null check (effect_type in ('none', 'coins', 'move', 'skip', 'extra_roll', 'lose_roll', 'advance_round', 'finish')),
+  effect_type text not null check (effect_type in ('none', 'coins', 'move', 'skip', 'extra_roll', 'lose_roll', 'advance_chance', 'advance_round', 'finish')),
   effect_value integer not null default 0,
   enabled boolean not null default true,
   unique (round_number, name)
@@ -90,11 +90,22 @@ create table if not exists public.room_tiles (
   short_name text not null,
   tile_type text not null check (tile_type in ('shared', 'boss', 'runner', 'empty', 'move', 'chance')),
   detail text not null,
-  effect_type text not null check (effect_type in ('none', 'coins', 'move', 'skip', 'extra_roll', 'lose_roll', 'advance_round', 'finish')),
+  effect_type text not null check (effect_type in ('none', 'coins', 'move', 'skip', 'extra_roll', 'lose_roll', 'advance_chance', 'advance_round', 'finish')),
   effect_value integer not null default 0,
   created_at timestamptz not null default now(),
   unique (room_id, round_number, position)
 );
+
+-- 升级旧项目的规则约束，允许概率晋级作为独立效果。
+alter table public.tile_rule_templates drop constraint if exists tile_rule_templates_rule_group_check;
+alter table public.tile_rule_templates add constraint tile_rule_templates_rule_group_check
+  check (rule_group in ('empty', 'contract', 'movement', 'turn', 'dice', 'advance_chance', 'advance', 'finish'));
+alter table public.tile_rule_templates drop constraint if exists tile_rule_templates_effect_type_check;
+alter table public.tile_rule_templates add constraint tile_rule_templates_effect_type_check
+  check (effect_type in ('none', 'coins', 'move', 'skip', 'extra_roll', 'lose_roll', 'advance_chance', 'advance_round', 'finish'));
+alter table public.room_tiles drop constraint if exists room_tiles_effect_type_check;
+alter table public.room_tiles add constraint room_tiles_effect_type_check
+  check (effect_type in ('none', 'coins', 'move', 'skip', 'extra_roll', 'lose_roll', 'advance_chance', 'advance_round', 'finish'));
 
 -- 每轮拥有独立规则池；创建房间时只会从对应轮次抽取。
 insert into public.tile_rule_templates
@@ -116,7 +127,7 @@ values
   (1,'dice','乘胜追击','额外 1 次','chance','本回合立即增加 1 次掷骰机会','extra_roll',1),
   (1,'dice','弹药清点','少摇 1 次','chance','下个自己的回合减少 1 次掷骰','lose_roll',1),
   (1,'advance','快速通关','直达二轮','chance','触发快速通关，队伍直接进入第二轮','advance_round',0),
-  (1,'advance','紧急转场','紧急晋级','shared','收到紧急转场指令，队伍直接进入第二轮','advance_round',0),
+  (1,'advance_chance','紧急转场','晋级判定','shared','触发转场判定，成功后队伍进入第二轮','advance_chance',0),
 
   (2,'empty','空格','空格','empty','平安经过，本格不触发额外效果','none',0),
   (2,'contract','红品加码','红品加码','boss','带出红色物资时保障值增加 30','coins',30),
@@ -140,7 +151,7 @@ values
   (2,'dice','双线行动','额外 2 次','chance','本回合立即增加 2 次掷骰机会','extra_roll',2),
   (2,'dice','负重整理','少摇 1 次','chance','下个自己的回合减少 1 次掷骰','lose_roll',1),
   (2,'dice','通讯干扰','少摇 2 次','chance','下个自己的回合减少 2 次掷骰','lose_roll',2),
-  (2,'advance','核心情报','直达三轮','chance','取得核心情报，队伍直接进入第三轮','advance_round',0),
+  (2,'advance_chance','核心情报','晋级判定','chance','取得核心情报后进行晋级判定，成功后进入第三轮','advance_chance',0),
   (2,'advance','提前撤转','提前晋级','shared','满足撤转条件，队伍直接进入第三轮','advance_round',0),
   (2,'advance','任务跳级','任务跳级','boss','完成隐藏目标，队伍直接进入第三轮','advance_round',0),
 
@@ -185,6 +196,15 @@ on conflict (round_number, name) do update set
   effect_type = excluded.effect_type,
   effect_value = excluded.effect_value,
   enabled = true;
+
+-- 未开局房间跟随规则池升级；进行中的房间保持已生成棋盘不变。
+update public.room_tiles rt
+set short_name = t.short_name, detail = t.detail, effect_type = t.effect_type, effect_value = t.effect_value
+from public.tile_rule_templates t, public.rooms r
+where rt.template_id = t.id
+  and rt.room_id = r.id
+  and r.status = 'lobby'
+  and t.effect_type = 'advance_chance';
 
 create index if not exists room_players_room_id_idx on public.room_players(room_id);
 create index if not exists game_events_room_id_created_at_idx on public.game_events(room_id, created_at desc);
@@ -256,8 +276,8 @@ begin
 
   for v_round in 1..3 loop
     v_groups := case v_round
-      when 1 then array['empty','empty','contract','movement','movement','turn','dice','advance']
-      when 2 then array['empty','empty','contract','contract','movement','movement','movement','turn','turn','dice','dice','advance']
+      when 1 then array['empty','contract','movement','movement','turn','dice','advance_chance','advance']
+      when 2 then array['empty','empty','contract','contract','movement','movement','turn','turn','dice','dice','advance_chance','advance']
       else array['empty','empty','empty','empty','contract','contract','contract','contract','contract','movement','movement','movement','movement','movement','movement','turn','turn','turn','dice','dice','dice','dice','dice']
     end;
     v_position := 0;
@@ -482,10 +502,10 @@ begin
   if char_length(trim(p_short_name)) not between 1 and 16 then raise exception '棋盘短名需要 1 到 16 个字符'; end if;
   if char_length(trim(p_detail)) not between 1 and 160 then raise exception '落格说明需要 1 到 160 个字符'; end if;
   if p_tile_type not in ('shared','boss','runner','empty','move','chance') then raise exception '格子分类无效'; end if;
-  if p_effect_type not in ('none','coins','move','skip','extra_roll','lose_roll','advance_round','finish') then raise exception '格子效果无效'; end if;
+  if p_effect_type not in ('none','coins','move','skip','extra_roll','lose_roll','advance_chance','advance_round','finish') then raise exception '格子效果无效'; end if;
   if p_tile_type = 'empty' and (p_effect_type <> 'none' or p_effect_value <> 0) then raise exception '空格不能附带效果'; end if;
-  if p_effect_type in ('none','advance_round','finish') and p_effect_value <> 0 then raise exception '该效果的数值必须为 0'; end if;
-  if p_effect_type = 'advance_round' and v_tile.round_number = 3 then raise exception '第三轮不能配置直接晋级'; end if;
+  if p_effect_type in ('none','advance_chance','advance_round','finish') and p_effect_value <> 0 then raise exception '该效果的数值必须为 0'; end if;
+  if p_effect_type in ('advance_chance','advance_round') and v_tile.round_number = 3 then raise exception '第三轮不能配置晋级效果'; end if;
   if p_effect_type = 'finish' and v_tile.round_number <> 3 then raise exception '结束本局只能配置在第三轮'; end if;
   v_move_limit := case v_tile.round_number when 1 then 2 when 2 then 3 else 5 end;
   v_skip_limit := case v_tile.round_number when 1 then 1 else 2 end;
@@ -589,6 +609,10 @@ declare
   v_player public.room_players%rowtype;
   v_next public.room_players%rowtype;
   v_next_rolls integer;
+  v_player_count integer;
+  v_order integer;
+  v_step integer;
+  v_next_found boolean := false;
 begin
   select * into v_room from public.rooms where id = p_room_id for update;
   if not found then return; end if;
@@ -599,14 +623,31 @@ begin
     update public.rooms set starting_player_id = null where id = p_room_id;
   end if;
   if v_room.status = 'playing' and v_room.current_turn = auth.uid() then
-    select * into v_next from public.room_players where room_id = p_room_id and turn_order > v_player.turn_order order by turn_order limit 1;
-    if not found then select * into v_next from public.room_players where room_id = p_room_id order by turn_order limit 1; end if;
-    if v_next.id is null then
+    select count(*) into v_player_count from public.room_players where room_id = p_room_id;
+    if v_player_count = 0 then
       update public.rooms set status = 'finished', current_turn = null, rolls_remaining = 0 where id = p_room_id;
     else
-      v_next_rolls := greatest(1, least(6, v_room.rolls_per_turn + v_next.next_roll_modifier));
-      update public.room_players set next_roll_modifier = 0 where id = v_next.id;
-      update public.rooms set current_turn = v_next.user_id, rolls_remaining = v_next_rolls where id = p_room_id;
+      v_order := v_player.turn_order;
+      for v_step in 1..greatest(v_player_count * 4, 4) loop
+        select * into v_next from public.room_players
+        where room_id = p_room_id and turn_order > v_order order by turn_order limit 1;
+        if not found then
+          select * into v_next from public.room_players where room_id = p_room_id order by turn_order limit 1;
+        end if;
+        if v_next.id is null then exit; end if;
+        if v_next.skip_turns > 0 then
+          update public.room_players set skip_turns = skip_turns - 1 where id = v_next.id;
+          insert into public.game_events(room_id, message) values (p_room_id, v_next.nickname || ' 跳过 1 次行动');
+          v_order := v_next.turn_order;
+        else
+          v_next_rolls := greatest(1, least(6, v_room.rolls_per_turn + v_next.next_roll_modifier));
+          update public.room_players set next_roll_modifier = 0 where id = v_next.id;
+          update public.rooms set current_turn = v_next.user_id, rolls_remaining = v_next_rolls where id = p_room_id;
+          v_next_found := true;
+          exit;
+        end if;
+      end loop;
+      if not v_next_found then raise exception '无法确定下一位行动玩家'; end if;
     end if;
   end if;
   insert into public.game_events(room_id, message) values (p_room_id, v_player.nickname || ' 离开了房间');
@@ -659,16 +700,30 @@ begin
   where room_id = p_room_id and round_number = v_room.current_round and position = v_landed;
   if not found then raise exception '当前棋盘配置不完整'; end if;
 
-  if v_tile.effect_type = 'coins' then v_change := v_tile.effect_value; end if;
-  if v_tile.effect_type = 'move' then
-    v_position := mod(mod(v_position + v_tile.effect_value, v_room.board_size) + v_room.board_size, v_room.board_size);
-    v_distance := greatest(0, v_distance + v_tile.effect_value);
-  end if;
-  if v_tile.effect_type = 'skip' then v_skip := least(3, v_skip + v_tile.effect_value); end if;
-  if v_tile.effect_type = 'extra_roll' then v_remaining := least(6, v_remaining + v_tile.effect_value); end if;
-  if v_tile.effect_type = 'lose_roll' then v_modifier := greatest(-4, v_modifier - v_tile.effect_value); end if;
-  if v_tile.effect_type = 'advance_round' and v_room.current_round < 3 then v_advanced := true; end if;
-  if v_tile.effect_type = 'finish' and v_room.current_round = 3 then v_finished := true; end if;
+  case v_tile.effect_type
+    when 'coins' then
+      v_change := v_tile.effect_value;
+    when 'move' then
+      v_position := mod(mod(v_position + v_tile.effect_value, v_room.board_size) + v_room.board_size, v_room.board_size);
+      v_distance := greatest(0, v_distance + v_tile.effect_value);
+    when 'skip' then
+      v_skip := least(3, v_skip + v_tile.effect_value);
+    when 'extra_roll' then
+      v_remaining := least(6, v_remaining + v_tile.effect_value);
+    when 'lose_roll' then
+      v_modifier := greatest(-4, v_modifier - v_tile.effect_value);
+    when 'advance_chance' then
+      if v_room.current_round < 3 then
+        v_chance := case when v_room.current_round = 1 then v_room.round1_advance_chance else v_room.round2_advance_chance end;
+        v_advanced := floor(random() * 100)::integer < v_chance;
+      end if;
+    when 'advance_round' then
+      v_advanced := v_room.current_round < 3;
+    when 'finish' then
+      v_finished := v_room.current_round = 3;
+    else
+      null;
+  end case;
 
   update public.room_players set position = v_position, distance = v_distance,
     coins = greatest(0, coins + v_change), skip_turns = v_skip, next_roll_modifier = v_modifier
@@ -679,10 +734,9 @@ begin
     insert into public.game_events(room_id, message)
     values (p_room_id, v_player.nickname || case when v_tile.effect_value > 0 then ' 前进 ' else ' 后退 ' end || abs(v_tile.effect_value) || ' 格，到达第 ' || (v_position + 1) || ' 格');
   end if;
-
-  if not v_advanced and v_room.current_round < 3 then
-    v_chance := case when v_room.current_round = 1 then v_room.round1_advance_chance else v_room.round2_advance_chance end;
-    v_advanced := floor(random() * 100)::integer < v_chance;
+  if v_tile.effect_type = 'advance_chance' then
+    insert into public.game_events(room_id, message)
+    values (p_room_id, case when v_advanced then '晋级判定成功' else '晋级判定未通过，继续本轮' end);
   end if;
 
   if v_finished then

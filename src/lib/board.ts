@@ -22,8 +22,8 @@ export const RULE_TEMPLATES: Record<GameRound, TileDefinition[]> = {
     { name: '临时整备', short_name: '整备 1 次', tile_type: 'shared', detail: '留在原地完成整备，跳过下一次行动', effect_type: 'skip', effect_value: 1, group: 'turn' },
     { name: '乘胜追击', short_name: '额外 1 次', tile_type: 'chance', detail: '本回合立即增加 1 次掷骰机会', effect_type: 'extra_roll', effect_value: 1, group: 'dice' },
     { name: '弹药清点', short_name: '少摇 1 次', tile_type: 'chance', detail: '下个自己的回合减少 1 次掷骰', effect_type: 'lose_roll', effect_value: 1, group: 'dice' },
-    { name: '快速通关', short_name: '直达二轮', tile_type: 'chance', detail: '触发快速通关，队伍直接进入第二轮', effect_type: 'advance_round', effect_value: 1, group: 'advance' },
-    { name: '紧急转场', short_name: '紧急晋级', tile_type: 'shared', detail: '收到紧急转场指令，队伍直接进入第二轮', effect_type: 'advance_round', effect_value: 1, group: 'advance' },
+    { name: '快速通关', short_name: '直达二轮', tile_type: 'chance', detail: '触发快速通关，队伍直接进入第二轮', effect_type: 'advance_round', effect_value: 0, group: 'advance' },
+    { name: '紧急转场', short_name: '晋级判定', tile_type: 'shared', detail: '触发转场判定，成功后队伍进入第二轮', effect_type: 'advance_chance', effect_value: 0, group: 'advance_chance' },
   ],
   2: [
     emptyRule,
@@ -48,9 +48,9 @@ export const RULE_TEMPLATES: Record<GameRound, TileDefinition[]> = {
     { name: '双线行动', short_name: '额外 2 次', tile_type: 'chance', detail: '本回合立即增加 2 次掷骰机会', effect_type: 'extra_roll', effect_value: 2, group: 'dice' },
     { name: '负重整理', short_name: '少摇 1 次', tile_type: 'chance', detail: '下个自己的回合减少 1 次掷骰', effect_type: 'lose_roll', effect_value: 1, group: 'dice' },
     { name: '通讯干扰', short_name: '少摇 2 次', tile_type: 'chance', detail: '下个自己的回合减少 2 次掷骰', effect_type: 'lose_roll', effect_value: 2, group: 'dice' },
-    { name: '核心情报', short_name: '直达三轮', tile_type: 'chance', detail: '取得核心情报，队伍直接进入第三轮', effect_type: 'advance_round', effect_value: 1, group: 'advance' },
-    { name: '提前撤转', short_name: '提前晋级', tile_type: 'shared', detail: '满足撤转条件，队伍直接进入第三轮', effect_type: 'advance_round', effect_value: 1, group: 'advance' },
-    { name: '任务跳级', short_name: '任务跳级', tile_type: 'boss', detail: '完成隐藏目标，队伍直接进入第三轮', effect_type: 'advance_round', effect_value: 1, group: 'advance' },
+    { name: '核心情报', short_name: '晋级判定', tile_type: 'chance', detail: '取得核心情报后进行晋级判定，成功后进入第三轮', effect_type: 'advance_chance', effect_value: 0, group: 'advance_chance' },
+    { name: '提前撤转', short_name: '提前晋级', tile_type: 'shared', detail: '满足撤转条件，队伍直接进入第三轮', effect_type: 'advance_round', effect_value: 0, group: 'advance' },
+    { name: '任务跳级', short_name: '任务跳级', tile_type: 'boss', detail: '完成隐藏目标，队伍直接进入第三轮', effect_type: 'advance_round', effect_value: 0, group: 'advance' },
   ],
   3: [
     emptyRule,
@@ -90,8 +90,8 @@ export const RULE_TEMPLATES: Record<GameRound, TileDefinition[]> = {
 }
 
 const ROUND_GROUPS: Record<GameRound, TileDefinition['group'][]> = {
-  1: ['empty', 'empty', 'contract', 'movement', 'movement', 'turn', 'dice', 'advance'],
-  2: ['empty', 'empty', 'contract', 'contract', 'movement', 'movement', 'movement', 'turn', 'turn', 'dice', 'dice', 'advance'],
+  1: ['empty', 'contract', 'movement', 'movement', 'turn', 'dice', 'advance_chance', 'advance'],
+  2: ['empty', 'empty', 'contract', 'contract', 'movement', 'movement', 'turn', 'turn', 'dice', 'dice', 'advance_chance', 'advance'],
   3: ['empty', 'empty', 'empty', 'empty', 'contract', 'contract', 'contract', 'contract', 'contract', 'movement', 'movement', 'movement', 'movement', 'movement', 'movement', 'turn', 'turn', 'turn', 'dice', 'dice', 'dice', 'dice', 'dice'],
 }
 
@@ -104,7 +104,7 @@ export const TILE_TYPE_LABELS: Record<TileType, string> = {
 export const EFFECT_LABELS: Record<TileEffect, string> = {
   none: '仅显示规则', coins: '修改保障值', move: '前进 / 后退', skip: '暂停行动',
   extra_roll: '本回合增加掷骰', lose_roll: '下回合减少掷骰',
-  advance_round: '直接进入下一轮', finish: '结束本局',
+  advance_chance: '按概率进入下一轮', advance_round: '直接进入下一轮', finish: '结束本局',
 }
 
 function shuffled<T>(items: T[]) {

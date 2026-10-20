@@ -66,13 +66,16 @@ function effectValueHint(effect: TileEffect, round: GameRound) {
   if (effect === 'coins') return '正数增加保障，负数扣减保障'
   if (effect === 'skip') return `暂停次数，最多 ${round === 1 ? 1 : 2} 次`
   if (effect === 'extra_roll' || effect === 'lose_roll') return '掷骰次数，允许 1–2 次'
+  if (effect === 'advance_chance') return '使用本轮的管理员晋级概率'
   if (effect === 'advance_round') return '只允许第一轮和第二轮使用'
   if (effect === 'finish') return '只允许第三轮使用'
   return '此效果不需要填写数值'
 }
 
 function availableEffects(round: GameRound) {
-  return TILE_EFFECTS.filter((effect) => effect !== (round === 3 ? 'advance_round' : 'finish'))
+  return TILE_EFFECTS.filter((effect) => round === 3
+    ? effect !== 'advance_chance' && effect !== 'advance_round'
+    : effect !== 'finish')
 }
 
 function formatError(error: unknown) {
@@ -884,14 +887,14 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                             <span>实际效果</span>
                             <select disabled={selectedRoom.status !== 'lobby' || tileDraft.tile_type === 'empty'} onChange={(event) => {
                               const effectType = event.target.value as TileEffect
-                              const needsZero = effectType === 'none' || effectType === 'advance_round' || effectType === 'finish'
+                              const needsZero = ['none', 'advance_chance', 'advance_round', 'finish'].includes(effectType)
                               setTileDraft({ ...tileDraft, effect_type: effectType, effect_value: needsZero ? 0 : Math.max(1, Math.abs(tileDraft.effect_value)) })
                             }} value={tileDraft.effect_type}>
                               {availableEffects(tileDraft.round_number).map((effect) => <option key={effect} value={effect}>{EFFECT_LABELS[effect]}</option>)}
                             </select>
                           </label>
                           <label className="tile-detail-field"><span>落格说明</span><textarea disabled={selectedRoom.status !== 'lobby'} maxLength={160} onChange={(event) => setTileDraft({ ...tileDraft, detail: event.target.value })} rows={3} value={tileDraft.detail} /></label>
-                          <label><span>效果数值</span><input disabled={selectedRoom.status !== 'lobby' || ['none', 'advance_round', 'finish'].includes(tileDraft.effect_type)} onChange={(event) => setTileDraft({ ...tileDraft, effect_value: Number(event.target.value) })} type="number" value={tileDraft.effect_value} /><small>{effectValueHint(tileDraft.effect_type, tileDraft.round_number)}</small></label>
+                          <label><span>效果数值</span><input disabled={selectedRoom.status !== 'lobby' || ['none', 'advance_chance', 'advance_round', 'finish'].includes(tileDraft.effect_type)} onChange={(event) => setTileDraft({ ...tileDraft, effect_value: Number(event.target.value) })} type="number" value={tileDraft.effect_value} /><small>{effectValueHint(tileDraft.effect_type, tileDraft.round_number)}</small></label>
                         </div>
                         <button className="button primary full" disabled={busy || selectedRoom.status !== 'lobby'} onClick={saveTile} type="button"><Save size={17} /> 保存这个格子</button>
                       </div>
