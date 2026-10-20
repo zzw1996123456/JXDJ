@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createRandomRoomTiles, RULE_TEMPLATES } from '../src/lib/board'
-import { createDemoRoom, resolveDemoDice, startDemoGame } from '../src/lib/demoGame'
+import { chooseDemoDice, createDemoRoom, resolveDemoDice, startDemoGame } from '../src/lib/demoGame'
 import type { GameRound, RoomTile, TileEffect } from '../src/types'
 
 function snapshotFor(effect: TileEffect, value = 0, round: GameRound = 1) {
@@ -32,8 +32,8 @@ function snapshotFor(effect: TileEffect, value = 0, round: GameRound = 1) {
   return { ...snapshot, tiles }
 }
 
-function resolve(effect: TileEffect, value = 0, round: GameRound = 1, advanceRoll = 99) {
-  return resolveDemoDice(snapshotFor(effect, value, round), 1, advanceRoll).snapshot
+function resolve(effect: TileEffect, value = 0, round: GameRound = 1) {
+  return resolveDemoDice(snapshotFor(effect, value, round), 1).snapshot
 }
 
 const noEffect = resolve('none')
@@ -52,7 +52,7 @@ const moveBack = resolve('move', -2)
 assert.equal(moveBack.players[0].position, 7)
 assert.equal(moveBack.room.current_round, 1)
 
-const skipped = resolve('skip', 1, 1, 0)
+const skipped = resolve('skip', 1, 1)
 assert.equal(skipped.players[0].skip_turns, 1)
 assert.equal(skipped.room.current_round, 1, '暂停格不得附带晋级')
 
@@ -66,18 +66,15 @@ assert.equal(loseRoll.room.current_round, 1)
 
 const penaltyTurnStart = snapshotFor('lose_roll', 1)
 penaltyTurnStart.room.rolls_remaining = 1
+penaltyTurnStart.players[0].dice_count = 1
 const penaltyTurn = resolveDemoDice(penaltyTurnStart, 1).snapshot
 assert.equal(penaltyTurn.room.rolls_remaining, 1)
 assert.equal(penaltyTurn.players[0].next_roll_modifier, 0)
 
-const failedAdvance = resolve('advance_chance', 0, 1, 99)
-assert.equal(failedAdvance.room.current_round, 1)
-assert.match(failedAdvance.events[0].message, /未通过/)
-
-const successfulAdvance = resolve('advance_chance', 0, 1, 0)
+const successfulAdvance = resolve('advance_chance', 0, 1)
 assert.equal(successfulAdvance.room.current_round, 2)
 
-const successfulRoundTwoAdvance = resolve('advance_chance', 0, 2, 0)
+const successfulRoundTwoAdvance = resolve('advance_chance', 0, 2)
 assert.equal(successfulRoundTwoAdvance.room.current_round, 3)
 
 const directAdvance = resolve('advance_round')
@@ -123,8 +120,27 @@ for (let index = 0; index < 50; index += 1) {
     const roundTiles = tiles.filter((tile) => tile.round_number === round)
     assert.equal(roundTiles.filter((tile) => tile.effect_type === 'advance_chance').length, 1)
     assert.equal(roundTiles.filter((tile) => tile.effect_type === 'advance_round').length, 1)
+    for (let position = 0; position < roundTiles.length; position += 1) {
+      const reachable = [1, 2, 3, 4, 5, 6].map((dice) => roundTiles[(position + dice) % roundTiles.length])
+      assert.ok(reachable.some((tile) => tile.effect_type === 'advance_chance' || tile.effect_type === 'advance_round'))
+      assert.ok(reachable.some((tile) => tile.effect_type !== 'advance_chance' && tile.effect_type !== 'advance_round'))
+    }
   }
   assert.equal(tiles.filter((tile) => tile.round_number === 3 && tile.effect_type === 'finish').length, 1)
 }
+
+const weighted = startDemoGame(createDemoRoom('概率测试', 'runner'))
+weighted.room.round1_advance_chance = 0
+const zeroChanceDice = chooseDemoDice(weighted, 0, 0)
+const zeroChanceTile = weighted.tiles.find((tile) => tile.round_number === 1 && tile.position === zeroChanceDice)
+assert.ok(zeroChanceTile?.effect_type !== 'advance_chance' && zeroChanceTile?.effect_type !== 'advance_round', '0% 不得落到晋级格')
+
+weighted.room.round1_advance_chance = 10
+const successfulChanceDice = chooseDemoDice(weighted, 9, 0)
+const successfulChanceTile = weighted.tiles.find((tile) => tile.round_number === 1 && tile.position === successfulChanceDice)
+assert.ok(successfulChanceTile?.effect_type === 'advance_chance' || successfulChanceTile?.effect_type === 'advance_round', '10% 命中时必须落到晋级格')
+const failedChanceDice = chooseDemoDice(weighted, 10, 0)
+const failedChanceTile = weighted.tiles.find((tile) => tile.round_number === 1 && tile.position === failedChanceDice)
+assert.ok(failedChanceTile?.effect_type !== 'advance_chance' && failedChanceTile?.effect_type !== 'advance_round', '10% 未命中时不得落到晋级格')
 
 console.log('效果回归测试通过：全部落格效果、分轮规则与 50 组三轮随机棋盘')

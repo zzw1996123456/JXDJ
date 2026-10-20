@@ -22,7 +22,7 @@ export function createDemoRoom(nickname: string, role: PlayerRole): GameSnapshot
   const player: Player = {
     id: 'demo-player-record', room_id: room.id, user_id: DEMO_USER_ID, nickname, role,
     position: 0, distance: 0, coins: 100, is_ready: true, turn_order: 0,
-    skip_turns: 0, next_roll_modifier: 0, created_at: now(),
+    skip_turns: 0, next_roll_modifier: 0, dice_count: room.rolls_per_turn, created_at: now(),
   }
 
   return {
@@ -45,11 +45,12 @@ export function startDemoGame(snapshot: GameSnapshot): GameSnapshot {
       current_turn: player.user_id,
       rolls_remaining: snapshot.room.rolls_per_turn,
     },
+    players: snapshot.players.map((item) => ({ ...item, dice_count: snapshot.room.rolls_per_turn })),
     events: [event(snapshot.room.id, `试玩开始，${player.nickname} 先行动，每回合可掷 ${snapshot.room.rolls_per_turn} 次`), ...snapshot.events],
   }
 }
 
-export function resolveDemoDice(snapshot: GameSnapshot, dice: number, advanceRoll = Math.random() * 100): { snapshot: GameSnapshot; dice: number } {
+export function resolveDemoDice(snapshot: GameSnapshot, dice: number): { snapshot: GameSnapshot; dice: number } {
   if (!Number.isInteger(dice) || dice < 1 || dice > 6) throw new Error('骰子点数必须是 1–6')
   const current = snapshot.players[0]
   const round = snapshot.room.current_round
@@ -61,10 +62,9 @@ export function resolveDemoDice(snapshot: GameSnapshot, dice: number, advanceRol
   let coins = current.coins
   let skipTurns = current.skip_turns
   let nextRollModifier = current.next_roll_modifier
-  let rollsRemaining = Math.max(0, snapshot.room.rolls_remaining - 1)
+  let rollsRemaining = Math.max(0, current.dice_count - 1)
   let advanced = false
   let finished = false
-  let chanceResult: boolean | null = null
   const addedEvents: GameEvent[] = []
 
   switch (tile.effect_type) {
@@ -79,17 +79,12 @@ export function resolveDemoDice(snapshot: GameSnapshot, dice: number, advanceRol
       skipTurns = Math.min(3, skipTurns + tile.effect_value)
       break
     case 'extra_roll':
-      rollsRemaining = Math.min(6, rollsRemaining + tile.effect_value)
+      rollsRemaining = Math.min(20, rollsRemaining + tile.effect_value)
       break
     case 'lose_roll':
       nextRollModifier = Math.max(-4, nextRollModifier - tile.effect_value)
       break
-    case 'advance_chance': {
-      const chance = round === 1 ? snapshot.room.round1_advance_chance : snapshot.room.round2_advance_chance
-      chanceResult = round < 3 && advanceRoll < chance
-      advanced = chanceResult
-      break
-    }
+    case 'advance_chance':
     case 'advance_round':
       advanced = round < 3
       break
@@ -98,15 +93,11 @@ export function resolveDemoDice(snapshot: GameSnapshot, dice: number, advanceRol
       break
   }
 
-  let player: Player = { ...current, position, distance, coins, skip_turns: skipTurns, next_roll_modifier: nextRollModifier }
+  let player: Player = { ...current, position, distance, coins, skip_turns: skipTurns, next_roll_modifier: nextRollModifier, dice_count: rollsRemaining }
   addedEvents.push(event(snapshot.room.id, `${player.nickname} 掷出 ${dice}，落到「${tile.name}」：${tile.detail}`))
   if (tile.effect_type === 'move') {
     addedEvents.unshift(event(snapshot.room.id, `${player.nickname} ${tile.effect_value > 0 ? '前进' : '后退'} ${Math.abs(tile.effect_value)} 格，到达第 ${position + 1} 格`))
   }
-  if (chanceResult !== null) {
-    addedEvents.unshift(event(snapshot.room.id, chanceResult ? '晋级判定成功' : '晋级判定未通过，继续本轮'))
-  }
-
   let room = { ...snapshot.room, rolls_remaining: rollsRemaining }
   if (advanced) {
     const nextRound = (round + 1) as 2 | 3
@@ -124,8 +115,8 @@ export function resolveDemoDice(snapshot: GameSnapshot, dice: number, advanceRol
       player = { ...player, skip_turns: player.skip_turns - 1 }
       addedEvents.unshift(event(room.id, `${player.nickname} 跳过 1 次行动`))
     }
-    const nextRolls = Math.max(1, room.rolls_per_turn + player.next_roll_modifier)
-    player = { ...player, next_roll_modifier: 0 }
+    const nextRolls = Math.max(1, Math.min(20, room.rolls_per_turn + player.next_roll_modifier))
+    player = { ...player, next_roll_modifier: 0, dice_count: nextRolls }
     room = { ...room, current_turn: player.user_id, rolls_remaining: nextRolls }
   }
 
@@ -140,6 +131,21 @@ export function resolveDemoDice(snapshot: GameSnapshot, dice: number, advanceRol
   }
 }
 
+export function chooseDemoDice(snapshot: GameSnapshot, chanceRoll = Math.random() * 100, choiceRoll = Math.random()) {
+  const round = snapshot.room.current_round
+  const tiles = getRoundTiles(snapshot.tiles, round)
+  const player = snapshot.players[0]
+  const advanceChance = round === 1 ? snapshot.room.round1_advance_chance : snapshot.room.round2_advance_chance
+  const shouldAdvance = round < 3 && chanceRoll < advanceChance
+  const candidates = [1, 2, 3, 4, 5, 6].filter((dice) => {
+    const tile = tiles[(player.position + dice) % tiles.length]
+    const isAdvance = tile.effect_type === 'advance_chance' || tile.effect_type === 'advance_round'
+    return isAdvance === shouldAdvance
+  })
+  if (candidates.length === 0) throw new Error('当前棋盘的晋级格布局无效，请重新随机棋盘')
+  return candidates[Math.min(candidates.length - 1, Math.floor(choiceRoll * candidates.length))]
+}
+
 export function rollDemoDice(snapshot: GameSnapshot): { snapshot: GameSnapshot; dice: number } {
-  return resolveDemoDice(snapshot, Math.floor(Math.random() * 6) + 1)
+  return resolveDemoDice(snapshot, chooseDemoDice(snapshot))
 }

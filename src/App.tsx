@@ -12,6 +12,7 @@ import {
   LockKeyhole,
   LogIn,
   LogOut,
+  Minus,
   Pause,
   Play,
   Plus,
@@ -68,8 +69,7 @@ function effectValueHint(effect: TileEffect, round: GameRound) {
   if (effect === 'coins') return '正数增加保障，负数扣减保障'
   if (effect === 'skip') return `暂停次数，最多 ${round === 1 ? 1 : 2} 次`
   if (effect === 'extra_roll' || effect === 'lose_roll') return '掷骰次数，允许 1–2 次'
-  if (effect === 'advance_chance') return '使用本轮的管理员晋级概率'
-  if (effect === 'advance_round') return '只允许第一轮和第二轮使用'
+  if (effect === 'advance_chance' || effect === 'advance_round') return '只允许第一轮和第二轮使用；是否落到本格由本轮晋级概率控制'
   if (effect === 'finish') return '只允许第三轮使用'
   return '此效果不需要填写数值'
 }
@@ -375,6 +375,7 @@ function RoomHeader({ snapshot, onExit }: { snapshot: GameSnapshot; onExit: () =
           <span title={snapshot.room.name}>{snapshot.room.name}</span>
           <strong>{snapshot.room.code}</strong>
           {copied ? <Check size={16} /> : <Clipboard size={16} />}
+          {copied && <small className="copy-confirmation">已复制</small>}
         </button>
         <button aria-label="暂离房间" className="icon-button" onClick={onExit} title="暂离房间（保留席位）" type="button">
           <ArrowLeft size={19} />
@@ -390,6 +391,8 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
   const [authorized, setAuthorized] = useState(false)
   const [checking, setChecking] = useState(true)
   const [busy, setBusy] = useState(false)
+  const [creating, setCreating] = useState(false)
+  const [codeCopied, setCodeCopied] = useState(false)
   const [error, setError] = useState('')
   const [rooms, setRooms] = useState<Room[]>([])
   const [newRoomName, setNewRoomName] = useState('')
@@ -543,6 +546,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
 
   useEffect(() => {
     setRoomPendingDelete(null)
+    setCodeCopied(false)
   }, [selectedRoomId])
 
   useEffect(() => {
@@ -594,16 +598,21 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
   }
 
   function createRoom() {
+    setCreating(true)
     void runAdminAction(async () => {
-      if (!supabase) return
-      const roomName = newRoomName.trim()
-      if (roomName.length < 1 || roomName.length > 24) throw new Error('房间名需要 1–24 个字符')
-      const { data, error: rpcError } = await supabase.rpc('admin_create_room', { p_room_name: roomName })
-      if (rpcError) throw rpcError
-      const result = Array.isArray(data) ? data[0] : data
-      await loadDashboard()
-      if (result?.room_id) setSelectedRoomId(result.room_id)
-      setNewRoomName('')
+      try {
+        if (!supabase) return
+        const roomName = newRoomName.trim()
+        if (roomName.length < 1 || roomName.length > 24) throw new Error('房间名需要 1–24 个字符')
+        const { data, error: rpcError } = await supabase.rpc('admin_create_room', { p_room_name: roomName })
+        if (rpcError) throw rpcError
+        const result = Array.isArray(data) ? data[0] : data
+        await loadDashboard()
+        if (result?.room_id) setSelectedRoomId(result.room_id)
+        setNewRoomName('')
+      } finally {
+        setCreating(false)
+      }
     })
   }
 
@@ -718,6 +727,20 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
     })
   }
 
+  function adjustPlayerDice(playerId: string, delta: -1 | 1) {
+    if (!selectedRoom) return
+    void runAdminAction(async () => {
+      if (!supabase) return
+      const { error: rpcError } = await supabase.rpc('admin_adjust_player_dice', {
+        p_room_id: selectedRoom.id,
+        p_player_id: playerId,
+        p_delta: delta,
+      })
+      if (rpcError) throw rpcError
+      await loadDashboard()
+    })
+  }
+
   function deleteRoom() {
     if (!selectedRoom || roomPendingDelete !== selectedRoom.id) return
     const roomId = selectedRoom.id
@@ -731,7 +754,10 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
   }
 
   async function copyRoomCode() {
-    if (selectedRoom) await navigator.clipboard.writeText(selectedRoom.code)
+    if (!selectedRoom) return
+    await navigator.clipboard.writeText(selectedRoom.code)
+    setCodeCopied(true)
+    window.setTimeout(() => setCodeCopied(false), 1600)
   }
 
   if (checking) {
@@ -788,8 +814,12 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                   placeholder="例如：周末护航局"
                   value={newRoomName}
                 />
-                <button aria-label="创建房间" className="button primary" disabled={busy || !newRoomName.trim()} onClick={createRoom} title="创建房间" type="button"><Plus size={18} /> 创建</button>
+                <button aria-label="创建房间" className="button primary" disabled={busy || !newRoomName.trim()} onClick={createRoom} title="创建房间" type="button">
+                  {creating ? <LoaderCircle className="spin" size={18} /> : <Plus size={18} />}
+                  {creating ? '创建中' : '创建'}
+                </button>
               </div>
+              {creating && <div className="creation-progress" role="status"><span /><p>正在创建房间并生成三轮随机棋盘...</p></div>}
             </div>
             <div className="admin-room-items">
               {rooms.map((room) => {
@@ -813,7 +843,9 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                   <div>
                     <p className="kicker">SELECTED ROOM</p>
                     <h2 className="admin-room-title">{selectedRoom.name}</h2>
-                    <button className="admin-code" onClick={copyRoomCode} title="复制房间码" type="button">{selectedRoom.code} <Clipboard size={17} /></button>
+                    <button className="admin-code" onClick={copyRoomCode} title="复制房间码" type="button">
+                      {selectedRoom.code} {codeCopied ? <><Check size={17} /><small>已复制</small></> : <Clipboard size={17} />}
+                    </button>
                   </div>
                   <div className="admin-room-actions">
                     <button className="button primary" disabled={busy || !canStart} onClick={startRoom} type="button"><Play size={17} /> 开始房间</button>
@@ -861,7 +893,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                 </section>
 
                 <section className="admin-probability-panel">
-                  <div className="section-title"><p className="kicker">晋级概率</p><Settings2 size={18} /></div>
+                  <div className="section-title"><p className="kicker">每次掷骰晋级概率</p><Settings2 size={18} /></div>
                   <div className="probability-grid">
                     <label><span>第一轮 → 第二轮</span><span className="percent-input"><input max="100" min="0" onChange={(event) => setRound1Chance(event.target.value)} type="number" value={round1Chance} /><b>%</b></span></label>
                     <label><span>第二轮 → 第三轮</span><span className="percent-input"><input max="100" min="0" onChange={(event) => setRound2Chance(event.target.value)} type="number" value={round2Chance} /><b>%</b></span></label>
@@ -934,8 +966,12 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                     {selectedPlayers.map((player, index) => (
                       <div className="admin-player-row" key={player.id}>
                         <PlayerAvatar index={index} player={player} />
-                        <span><strong>{player.nickname}</strong><small>{player.role === 'boss' ? '老板' : '打手'}{player.user_id === selectedRoom.starting_player_id ? ' · 先手' : ''}</small></span>
-                        <em>{player.is_ready ? '已准备' : '未准备'}</em>
+                        <span><strong>{player.nickname}</strong><small>{player.role === 'boss' ? '老板' : '打手'}{player.user_id === selectedRoom.starting_player_id ? ' · 先手' : ''} · {player.is_ready ? '已准备' : '未准备'}</small></span>
+                        <div className="admin-dice-stepper">
+                          <button aria-label={`减少 ${player.nickname} 的骰子`} disabled={busy || selectedRoom.status === 'finished' || player.dice_count <= 1} onClick={() => adjustPlayerDice(player.id, -1)} title="减少 1 个骰子" type="button"><Minus size={14} /></button>
+                          <strong><Dice5 size={13} /> {player.dice_count}</strong>
+                          <button aria-label={`增加 ${player.nickname} 的骰子`} disabled={busy || selectedRoom.status === 'finished' || player.dice_count >= 20} onClick={() => adjustPlayerDice(player.id, 1)} title="增加 1 个骰子" type="button"><Plus size={14} /></button>
+                        </div>
                       </div>
                     ))}
                     {selectedPlayers.length === 0 && <p className="admin-empty">等待玩家使用房间码加入。</p>}
@@ -1024,7 +1060,7 @@ function LobbyView({
                   <div className="player-info">
                     <strong>{slot.player?.nickname ?? `等待${slot.label}`}</strong>
                     <span>
-                      {slot.label}
+                      {slot.label}{slot.player ? ` · ${slot.player.dice_count} 个骰子` : ''}
                       {slot.player?.user_id === snapshot.room.starting_player_id ? ' · 先手' : ''}
                       {slot.player?.user_id === snapshot.room.host_user_id ? ' · 房主' : ''}
                     </span>
@@ -1142,7 +1178,7 @@ function GameView({
               <span className={`turn-indicator ${isMyTurn && !snapshot.room.is_paused ? 'active' : ''}`} />
               <p>{snapshot.room.is_paused ? '本局已暂停' : snapshot.room.status === 'finished' ? '行动结束' : isMyTurn ? '轮到你行动' : `等待 ${currentPlayer?.nickname ?? '队员'}`}</p>
             </div>
-            <span>{ROUND_LABELS[snapshot.room.current_round]} · {snapshot.room.board_size} 格 · 当前剩余 {snapshot.room.rolls_remaining} 次</span>
+            <span>{ROUND_LABELS[snapshot.room.current_round]} · {snapshot.room.board_size} 格 · 当前骰子 {ownPlayer?.dice_count ?? 0} 个</span>
           </div>
           <Board players={snapshot.players} room={snapshot.room} tiles={snapshot.tiles} />
         </section>
@@ -1154,7 +1190,7 @@ function GameView({
             </div>
             <button className="button primary roll-button" disabled={busy || snapshot.room.is_paused || !isMyTurn || snapshot.room.status !== 'playing'} onClick={onRoll} type="button">
               {busy ? <LoaderCircle className="spin" size={19} /> : <Dice5 size={19} />}
-              {snapshot.room.is_paused ? '等待管理员继续' : isMyTurn ? `掷骰行动 · 剩余 ${snapshot.room.rolls_remaining}` : '等待回合'}
+              {snapshot.room.is_paused ? '等待管理员继续' : isMyTurn ? `掷骰行动 · 剩余 ${ownPlayer?.dice_count ?? 0}` : '等待回合'}
             </button>
           </section>
 
@@ -1178,7 +1214,10 @@ function GameView({
                         {player.next_roll_modifier < 0 ? ` · 下回合少摇 ${Math.abs(player.next_roll_modifier)} 次` : ''}
                       </small>
                     </div>
-                    <span className="guarantee-score"><small>保障</small>{player.coins}</span>
+                    <div className="player-resources">
+                      <span className="dice-count"><small>骰子</small>{player.dice_count}</span>
+                      <span className="guarantee-score"><small>保障</small>{player.coins}</span>
+                    </div>
                   </div>
                 )
               })}

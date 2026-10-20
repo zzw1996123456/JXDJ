@@ -773,6 +773,12 @@ button.mode-card {
   font-size: 16px;
 }
 
+.room-code .copy-confirmation {
+  color: var(--acid);
+  font-size: 9px;
+  white-space: nowrap;
+}
+
 .icon-button {
   width: 38px;
   height: 38px;
@@ -1061,6 +1067,35 @@ button.mode-card {
   padding-inline: 12px;
 }
 
+.creation-progress {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.creation-progress > span {
+  height: 3px;
+  overflow: hidden;
+  position: relative;
+  background: #30352d;
+}
+
+.creation-progress > span::after {
+  width: 45%;
+  height: 100%;
+  position: absolute;
+  inset: 0 auto 0 -45%;
+  background: var(--acid);
+  content: '';
+  animation: creation-progress 1s ease-in-out infinite;
+}
+
+.creation-progress p {
+  margin: 0;
+  color: #929a8c;
+  font-size: 9px;
+}
+
 .admin-room-items {
   flex: 1;
   min-height: 0;
@@ -1163,6 +1198,13 @@ button.mode-card {
   font-family: 'Barlow Condensed', sans-serif;
   font-size: 28px;
   font-weight: 800;
+}
+
+.admin-code small {
+  color: var(--ink);
+  font-family: 'Noto Sans SC', sans-serif;
+  font-size: 10px;
+  font-weight: 600;
 }
 
 .admin-room-title {
@@ -1473,7 +1515,8 @@ button.mode-card {
 
 .admin-player-row {
   min-height: 58px;
-  display: flex;
+  display: grid;
+  grid-template-columns: 29px minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
   border: 1px solid #343a31;
@@ -1483,8 +1526,38 @@ button.mode-card {
 .admin-player-row > span {
   min-width: 0;
   display: flex;
-  flex: 1;
   flex-direction: column;
+}
+
+.admin-dice-stepper {
+  display: grid;
+  grid-template-columns: 26px 38px 26px;
+  align-items: center;
+  border: 1px solid #3d4438;
+}
+
+.admin-dice-stepper button {
+  width: 26px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  background: #242a20;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.admin-dice-stepper button:disabled {
+  cursor: not-allowed;
+  color: #535a50;
+}
+
+.admin-dice-stepper strong {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  color: var(--acid);
 }
 
 .admin-player-row strong {
@@ -1942,6 +2015,30 @@ button.mode-card {
   font-weight: 500;
 }
 
+.player-resources {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center;
+  gap: 10px;
+}
+
+.dice-count {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  color: var(--cyan);
+  font-family: 'Barlow Condensed', sans-serif;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.dice-count small {
+  color: #777e71;
+  font-family: 'Noto Sans SC', sans-serif;
+  font-size: 8px;
+  font-weight: 500;
+}
+
 .event-list {
   overflow-y: auto;
   max-height: 100%;
@@ -2070,6 +2167,10 @@ button.mode-card {
 @keyframes dice-shake {
   25% { transform: translateX(2px) rotate(3deg); }
   75% { transform: translateX(-2px) rotate(-3deg); }
+}
+
+@keyframes creation-progress {
+  to { transform: translateX(322%); }
 }
 
 @media (max-width: 980px) {

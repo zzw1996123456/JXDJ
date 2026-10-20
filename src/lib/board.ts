@@ -23,7 +23,7 @@ export const RULE_TEMPLATES: Record<GameRound, TileDefinition[]> = {
     { name: '乘胜追击', short_name: '额外 1 次', tile_type: 'chance', detail: '本回合立即增加 1 次掷骰机会', effect_type: 'extra_roll', effect_value: 1, group: 'dice' },
     { name: '弹药清点', short_name: '少摇 1 次', tile_type: 'chance', detail: '下个自己的回合减少 1 次掷骰', effect_type: 'lose_roll', effect_value: 1, group: 'dice' },
     { name: '快速通关', short_name: '直达二轮', tile_type: 'chance', detail: '触发快速通关，队伍直接进入第二轮', effect_type: 'advance_round', effect_value: 0, group: 'advance' },
-    { name: '紧急转场', short_name: '晋级判定', tile_type: 'shared', detail: '触发转场判定，成功后队伍进入第二轮', effect_type: 'advance_chance', effect_value: 0, group: 'advance_chance' },
+    { name: '紧急转场', short_name: '进入二轮', tile_type: 'shared', detail: '到达本格后，队伍进入第二轮', effect_type: 'advance_chance', effect_value: 0, group: 'advance_chance' },
   ],
   2: [
     emptyRule,
@@ -48,7 +48,7 @@ export const RULE_TEMPLATES: Record<GameRound, TileDefinition[]> = {
     { name: '双线行动', short_name: '额外 2 次', tile_type: 'chance', detail: '本回合立即增加 2 次掷骰机会', effect_type: 'extra_roll', effect_value: 2, group: 'dice' },
     { name: '负重整理', short_name: '少摇 1 次', tile_type: 'chance', detail: '下个自己的回合减少 1 次掷骰', effect_type: 'lose_roll', effect_value: 1, group: 'dice' },
     { name: '通讯干扰', short_name: '少摇 2 次', tile_type: 'chance', detail: '下个自己的回合减少 2 次掷骰', effect_type: 'lose_roll', effect_value: 2, group: 'dice' },
-    { name: '核心情报', short_name: '晋级判定', tile_type: 'chance', detail: '取得核心情报后进行晋级判定，成功后进入第三轮', effect_type: 'advance_chance', effect_value: 0, group: 'advance_chance' },
+    { name: '核心情报', short_name: '进入三轮', tile_type: 'chance', detail: '到达本格后，队伍进入第三轮', effect_type: 'advance_chance', effect_value: 0, group: 'advance_chance' },
     { name: '提前撤转', short_name: '提前晋级', tile_type: 'shared', detail: '满足撤转条件，队伍直接进入第三轮', effect_type: 'advance_round', effect_value: 0, group: 'advance' },
     { name: '任务跳级', short_name: '任务跳级', tile_type: 'boss', detail: '完成隐藏目标，队伍直接进入第三轮', effect_type: 'advance_round', effect_value: 0, group: 'advance' },
   ],
@@ -104,7 +104,7 @@ export const TILE_TYPE_LABELS: Record<TileType, string> = {
 export const EFFECT_LABELS: Record<TileEffect, string> = {
   none: '仅显示规则', coins: '修改保障值', move: '前进 / 后退', skip: '暂停行动',
   extra_roll: '本回合增加掷骰', lose_roll: '下回合减少掷骰',
-  advance_chance: '按概率进入下一轮', advance_round: '直接进入下一轮', finish: '结束本局',
+  advance_chance: '进入下一轮', advance_round: '进入下一轮', finish: '结束本局',
 }
 
 function shuffled<T>(items: T[]) {
@@ -123,6 +123,15 @@ export function createRandomRoomTiles(roomId: string): RoomTile[] {
   for (const round of [1, 2, 3] as GameRound[]) {
     const usedNames = new Set<string>()
     const groups = shuffled(ROUND_GROUPS[round])
+    if (round < 3) {
+      const firstAdvancePosition = Math.floor(Math.random() * (groups.length / 2))
+      const advancePositions = [firstAdvancePosition, firstAdvancePosition + groups.length / 2]
+      ;(['advance_chance', 'advance'] as TileDefinition['group'][]).forEach((group, index) => {
+        const currentPosition = groups.indexOf(group)
+        const targetPosition = advancePositions[index]
+        ;[groups[currentPosition], groups[targetPosition]] = [groups[targetPosition], groups[currentPosition]]
+      })
+    }
     if (round === 3) groups.push('finish')
 
     groups.forEach((group, position) => {
