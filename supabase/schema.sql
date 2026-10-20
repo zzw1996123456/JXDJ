@@ -20,6 +20,7 @@ create table if not exists public.rooms (
   starting_player_id uuid,
   rolls_per_turn integer not null default 1 check (rolls_per_turn between 1 and 5),
   rolls_remaining integer not null default 1 check (rolls_remaining between 0 and 20),
+  base_guarantee integer not null default 100 check (base_guarantee between 0 and 10000),
   created_at timestamptz not null default now()
 );
 
@@ -31,8 +32,11 @@ alter table public.rooms add column if not exists round2_advance_chance integer 
 alter table public.rooms add column if not exists starting_player_id uuid;
 alter table public.rooms add column if not exists rolls_per_turn integer not null default 1;
 alter table public.rooms add column if not exists rolls_remaining integer not null default 1;
+alter table public.rooms add column if not exists base_guarantee integer not null default 100;
 alter table public.rooms drop constraint if exists rooms_rolls_remaining_check;
 alter table public.rooms add constraint rooms_rolls_remaining_check check (rolls_remaining between 0 and 20);
+alter table public.rooms drop constraint if exists rooms_base_guarantee_check;
+alter table public.rooms add constraint rooms_base_guarantee_check check (base_guarantee between 0 and 10000);
 alter table public.rooms alter column board_size set default 8;
 alter table public.rooms alter column target_laps set default 3;
 
@@ -44,7 +48,7 @@ create table if not exists public.room_players (
   role text not null check (role in ('boss', 'runner')),
   position integer not null default 0,
   distance integer not null default 0,
-  coins integer not null default 100,
+  coins integer not null default 0,
   is_ready boolean not null default false,
   turn_order integer not null,
   skip_turns integer not null default 0,
@@ -76,7 +80,8 @@ alter table public.room_players drop constraint if exists room_players_dice_coun
 alter table public.room_players add constraint room_players_dice_count_check check (dice_count between 0 and 20);
 alter table public.room_players drop constraint if exists room_players_round_roll_count_check;
 alter table public.room_players add constraint room_players_round_roll_count_check check (round_roll_count >= 0);
-alter table public.room_players alter column coins set default 100;
+alter table public.room_players alter column coins set default 0;
+update public.room_players set coins = 0 where role = 'runner' and coins <> 0;
 
 create table if not exists public.game_events (
   id bigint generated always as identity primary key,
@@ -136,12 +141,12 @@ insert into public.tile_rule_templates
   (round_number, rule_group, name, short_name, tile_type, detail, effect_type, effect_value)
 values
   (1,'empty','空格','空格','empty','平安经过，本格不触发额外效果','none',0),
-  (1,'contract','基础保底','基础保底','boss','本单保障值增加 20','coins',20),
+  (1,'contract','基础保底','基础保底','boss','老板保底增加 20 万','coins',20),
   (1,'contract','轻装试跑','轻装试跑','runner','下一局采用轻装稳健路线','none',0),
   (1,'contract','物资口令','物资口令','boss','老板指定一类优先搜索物资','none',0),
-  (1,'contract','全队整备','全队整备','shared','确认预算和禁用项，保障值增加 5','coins',5),
-  (1,'contract','补给优惠','补给优惠','runner','基础装备预算获得补贴，保障值增加 10','coins',10),
-  (1,'contract','风险加注','风险加注','boss','本轮提高任务要求，保障值减少 10','coins',-10),
+  (1,'contract','全队整备','全队整备','shared','确认预算和禁用项，老板保底增加 5 万','coins',5),
+  (1,'contract','补给优惠','补给优惠','runner','基础装备预算获得补贴，老板保底增加 10 万','coins',10),
+  (1,'contract','风险加注','风险加注','boss','本轮提高任务要求，老板保底减少 10 万','coins',-10),
   (1,'movement','抢占先机','前进 1 格','move','抢先完成准备，立即前进 1 格','move',1),
   (1,'movement','安全捷径','前进 2 格','move','发现安全捷径，立即前进 2 格','move',2),
   (1,'movement','路口折返','后退 1 格','chance','路线判断失误，立即后退 1 格','move',-1),
@@ -154,14 +159,14 @@ values
   (1,'advance_chance','紧急转场','进入二轮','shared','到达本格后，队伍进入第二轮','advance_chance',0),
 
   (2,'empty','空格','空格','empty','平安经过，本格不触发额外效果','none',0),
-  (2,'contract','红品加码','红品加码','boss','带出红色物资时保障值增加 30','coins',30),
-  (2,'contract','携行保障','携行保障','boss','为老板预留携行空间，保障值增加 15','coins',15),
+  (2,'contract','红品加码','红品加码','boss','带出红色物资时老板保底增加 30 万','coins',30),
+  (2,'contract','携行保障','携行保障','boss','为老板预留携行空间，老板保底增加 15 万','coins',15),
   (2,'contract','稳健打法','稳健打法','runner','本局不主动追击非任务目标','none',0),
   (2,'contract','遭遇绕行','遭遇绕行','runner','允许避开一次高风险交战','none',0),
   (2,'contract','路线改判','路线改判','shared','全队可改判一次已确定的路线','none',0),
-  (2,'contract','超时补偿','超时补偿','runner','行动超时后保障值增加 15','coins',15),
+  (2,'contract','超时补偿','超时补偿','runner','行动超时后老板保底增加 15 万','coins',15),
   (2,'contract','交战限制','交战限制','runner','禁用一种高风险打法','none',0),
-  (2,'contract','预算升级','预算升级','boss','装备预算升级，保障值增加 25','coins',25),
+  (2,'contract','预算升级','预算升级','boss','装备预算升级，老板保底增加 25 万','coins',25),
   (2,'movement','线索捷径','前进 1 格','move','发现可靠线索，立即前进 1 格','move',1),
   (2,'movement','快速搜点','前进 2 格','move','搜索效率提升，立即前进 2 格','move',2),
   (2,'movement','秘密通道','前进 3 格','move','发现秘密通道，立即前进 3 格','move',3),
@@ -180,17 +185,17 @@ values
   (2,'advance','任务跳级','任务跳级','boss','完成隐藏目标，队伍直接进入第三轮','advance_round',0),
 
   (3,'empty','空格','空格','empty','平安经过，本格不触发额外效果','none',0),
-  (3,'contract','终局保底','终局保底','boss','最终阶段保障值增加 40','coins',40),
-  (3,'contract','安全撤离','安全撤离','boss','老板安全撤离时保障值增加 25','coins',25),
+  (3,'contract','终局保底','终局保底','boss','最终阶段老板保底增加 40 万','coins',40),
+  (3,'contract','安全撤离','安全撤离','boss','老板安全撤离时保底增加 25 万','coins',25),
   (3,'contract','核心搜索','核心搜索','boss','完成两个核心区域搜索点','none',0),
   (3,'contract','物资优先','物资优先','boss','目标物资优先完成交付','none',0),
   (3,'contract','战术改判','战术改判','runner','打手可改判一次路线或打法','none',0),
-  (3,'contract','连败补偿','连败补偿','runner','连续失败后保障值增加 30','coins',30),
+  (3,'contract','连败补偿','连败补偿','runner','连续失败后老板保底增加 30 万','coins',30),
   (3,'contract','强制撤离','强制撤离','shared','出现安全窗口后全队必须转点撤离','none',0),
   (3,'contract','禁用清单','禁用清单','shared','本局追加一项高风险行为禁令','none',0),
-  (3,'contract','高额悬赏','高额悬赏','boss','完成追加目标，保障值增加 50','coins',50),
-  (3,'contract','装备损耗','装备损耗','chance','装备损耗导致保障值减少 20','coins',-20),
-  (3,'contract','保险生效','保险生效','shared','护航保险生效，保障值增加 20','coins',20),
+  (3,'contract','高额悬赏','高额悬赏','boss','完成追加目标，老板保底增加 50 万','coins',50),
+  (3,'contract','装备损耗','装备损耗','chance','装备损耗导致老板保底减少 20 万','coins',-20),
+  (3,'contract','保险生效','保险生效','shared','护航保险生效，老板保底增加 20 万','coins',20),
   (3,'movement','近路突进','前进 1 格','move','抓住空档，立即前进 1 格','move',1),
   (3,'movement','载具接应','前进 2 格','move','获得载具接应，立即前进 2 格','move',2),
   (3,'movement','密道穿行','前进 3 格','move','穿过密道，立即前进 3 格','move',3),
@@ -220,6 +225,11 @@ on conflict (round_number, name) do update set
   effect_type = excluded.effect_type,
   effect_value = excluded.effect_value,
   enabled = true;
+
+-- 统一旧房间中保底格的显示用语，不改变自定义数值或实际效果。
+update public.room_tiles
+set detail = replace(detail, '保障值', '老板保底') || case when detail like '%万%' then '' else ' 万' end
+where effect_type = 'coins' and detail like '%保障值%';
 
 -- 未开局房间跟随规则池升级；进行中的房间保持已生成棋盘不变。
 update public.room_tiles rt
@@ -495,7 +505,11 @@ begin
   select coalesce(max(rp.turn_order), -1) + 1 into v_turn_order
   from public.room_players rp where rp.room_id = v_room.id;
   insert into public.room_players(room_id, user_id, nickname, role, turn_order, coins, dice_count)
-  values (v_room.id, v_user_id, trim(p_nickname), p_role, v_turn_order, 100, v_room.rolls_per_turn);
+  values (
+    v_room.id, v_user_id, trim(p_nickname), p_role, v_turn_order,
+    case when p_role = 'boss' then v_room.base_guarantee else 0 end,
+    v_room.rolls_per_turn
+  );
   insert into public.game_events(room_id, message)
   values (v_room.id, trim(p_nickname) || ' 以' || case when p_role = 'boss' then '老板' else '打手' end || '身份加入房间');
   return query select v_room.id, v_room.code;
@@ -600,8 +614,10 @@ begin
 end;
 $$;
 
+drop function if exists public.admin_update_room_settings(uuid, uuid, integer);
+
 create or replace function public.admin_update_room_settings(
-  p_room_id uuid, p_starting_player_id uuid, p_rolls_per_turn integer
+  p_room_id uuid, p_starting_player_id uuid, p_rolls_per_turn integer, p_base_guarantee integer
 )
 returns void
 language plpgsql security definer set search_path = public
@@ -609,15 +625,20 @@ as $$
 begin
   if not public.is_admin() then raise exception '只有管理员可以修改回合设置'; end if;
   if p_rolls_per_turn not between 1 and 5 then raise exception '初始骰子数量必须在 1 到 5 之间'; end if;
+  if p_base_guarantee not between 0 and 10000 then raise exception '基础保底必须在 0 到 10000 万之间'; end if;
   if p_starting_player_id is not null and not exists (
     select 1 from public.room_players where room_id = p_room_id and user_id = p_starting_player_id
   ) then raise exception '首位玩家不在当前房间'; end if;
   update public.rooms set starting_player_id = p_starting_player_id, rolls_per_turn = p_rolls_per_turn,
-    rolls_remaining = p_rolls_per_turn
+    rolls_remaining = p_rolls_per_turn, base_guarantee = p_base_guarantee
   where id = p_room_id and status = 'lobby';
   if not found then raise exception '只能在开局前修改回合设置'; end if;
-  update public.room_players set dice_count = p_rolls_per_turn where room_id = p_room_id;
-  insert into public.game_events(room_id, message) values (p_room_id, '管理员更新了首位玩家和初始骰子数量');
+  update public.room_players set
+    dice_count = p_rolls_per_turn,
+    coins = case when role = 'boss' then p_base_guarantee else 0 end
+  where room_id = p_room_id;
+  insert into public.game_events(room_id, message)
+  values (p_room_id, '管理员更新了首位玩家、初始骰子和老板基础保底 ' || p_base_guarantee || ' 万');
 end;
 $$;
 
@@ -686,7 +707,7 @@ begin
   if p_effect_type = 'move' and (p_effect_value = 0 or abs(p_effect_value) > v_move_limit) then raise exception '本轮移动格数超出允许范围'; end if;
   if p_effect_type = 'skip' and p_effect_value not between 1 and v_skip_limit then raise exception '本轮暂停次数超出允许范围'; end if;
   if p_effect_type in ('extra_roll','lose_roll') and p_effect_value not between 1 and 2 then raise exception '掷骰次数效果必须在 1 到 2 之间'; end if;
-  if p_effect_type = 'coins' and p_effect_value not between -100 and 100 then raise exception '保障值变化必须在 -100 到 100 之间'; end if;
+  if p_effect_type = 'coins' and p_effect_value not between -100 and 100 then raise exception '老板保底变化必须在 -100 到 100 万之间'; end if;
   if v_tile.tile_type = 'empty' and p_tile_type <> 'empty' and (
     select count(*) from public.room_tiles where room_id = v_tile.room_id and round_number = v_tile.round_number and tile_type = 'empty'
   ) <= 1 then raise exception '每轮至少保留一个空格'; end if;
@@ -779,9 +800,10 @@ begin
   end if;
   update public.rooms set status = 'playing', is_paused = false, current_turn = null, current_round = 1,
     board_size = 8, winner_id = null, rolls_remaining = 0 where id = p_room_id;
-  update public.room_players set position = 0, distance = 0, coins = 100, skip_turns = 0,
-    next_roll_modifier = 0, round_roll_count = 0
-  where room_id = p_room_id;
+  update public.room_players p set position = 0, distance = 0,
+    coins = case when p.role = 'boss' then r.base_guarantee else 0 end,
+    skip_turns = 0, next_roll_modifier = 0, round_roll_count = 0
+  from public.rooms r where p.room_id = p_room_id and r.id = p_room_id;
   perform public.advance_room_turn_internal(p_room_id, v_first_order - 1);
   select p.user_id, p.nickname, r.rolls_remaining into v_first_user, v_first_name, v_rolls
   from public.rooms r join public.room_players p on p.room_id = r.id and p.user_id = r.current_turn
@@ -871,6 +893,7 @@ declare
   v_finished boolean := false;
   v_next_round integer;
   v_next_size integer;
+  v_guarantee integer;
 begin
   select * into v_room from public.rooms where id = p_room_id for update;
   if not found or v_room.status <> 'playing' then raise exception '当前没有进行中的行动'; end if;
@@ -935,12 +958,22 @@ begin
   end case;
 
   update public.room_players set position = v_position, distance = v_distance,
-    coins = greatest(0, coins + v_change), skip_turns = v_skip,
-    next_roll_modifier = v_modifier, dice_count = v_remaining,
+    skip_turns = v_skip, next_roll_modifier = v_modifier, dice_count = v_remaining,
     round_roll_count = round_roll_count + 1
   where id = v_player.id;
   insert into public.game_events(room_id, message)
   values (p_room_id, v_player.nickname || ' 掷出 ' || v_dice || '，落到「' || v_tile.name || '」：' || v_tile.detail);
+  if v_change <> 0 then
+    update public.room_players set coins = greatest(0, coins + v_change)
+    where room_id = p_room_id and role = 'boss'
+    returning coins into v_guarantee;
+    if not found then raise exception '当前房间没有老板，无法结算保底'; end if;
+    insert into public.game_events(room_id, message)
+    values (
+      p_room_id,
+      '老板保底' || case when v_change > 0 then '增加 ' else '减少 ' end || abs(v_change) || ' 万，当前 ' || v_guarantee || ' 万'
+    );
+  end if;
   if v_tile.effect_type = 'move' then
     insert into public.game_events(room_id, message)
     values (p_room_id, v_player.nickname || case when v_tile.effect_value > 0 then ' 前进 ' else ' 后退 ' end || abs(v_tile.effect_value) || ' 格，到达第 ' || (v_position + 1) || ' 格');
@@ -975,7 +1008,7 @@ revoke all on function public.admin_randomize_room_board(uuid) from public;
 revoke all on function public.join_room(text, text, text) from public;
 revoke all on function public.set_ready(uuid, boolean) from public;
 revoke all on function public.admin_update_round_chances(uuid, integer, integer) from public;
-revoke all on function public.admin_update_room_settings(uuid, uuid, integer) from public;
+revoke all on function public.admin_update_room_settings(uuid, uuid, integer, integer) from public;
 revoke all on function public.admin_adjust_player_dice(uuid, uuid, integer) from public;
 revoke all on function public.admin_update_room_tile(uuid, text, text, text, text, text, integer) from public;
 revoke all on function public.admin_start_game(uuid) from public;
@@ -991,7 +1024,7 @@ grant execute on function public.admin_randomize_room_board(uuid) to authenticat
 grant execute on function public.join_room(text, text, text) to authenticated;
 grant execute on function public.set_ready(uuid, boolean) to authenticated;
 grant execute on function public.admin_update_round_chances(uuid, integer, integer) to authenticated;
-grant execute on function public.admin_update_room_settings(uuid, uuid, integer) to authenticated;
+grant execute on function public.admin_update_room_settings(uuid, uuid, integer, integer) to authenticated;
 grant execute on function public.admin_adjust_player_dice(uuid, uuid, integer) to authenticated;
 grant execute on function public.admin_update_room_tile(uuid, text, text, text, text, text, integer) to authenticated;
 grant execute on function public.admin_start_game(uuid) to authenticated;

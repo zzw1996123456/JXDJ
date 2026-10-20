@@ -16,19 +16,22 @@ export function createDemoRoom(nickname: string, role: PlayerRole): GameSnapshot
     id: 'demo-room', name: '本机试玩房', code: 'DEMO88', host_user_id: DEMO_USER_ID, status: 'lobby', is_paused: false,
     current_turn: null, winner_id: null, board_size: 8, target_laps: 3, current_round: 1,
     round1_advance_chance: 35, round2_advance_chance: 30, starting_player_id: DEMO_USER_ID,
-    rolls_per_turn: 2, rolls_remaining: 2, created_at: now(),
+    rolls_per_turn: 2, rolls_remaining: 2, base_guarantee: 100, created_at: now(),
   }
 
   const player: Player = {
     id: 'demo-player-record', room_id: room.id, user_id: DEMO_USER_ID, nickname, role,
-    position: 0, distance: 0, coins: 100, is_ready: true, turn_order: 0,
+    position: 0, distance: 0, coins: role === 'boss' ? room.base_guarantee : 0, is_ready: true, turn_order: 0,
     skip_turns: 0, next_roll_modifier: 0, dice_count: room.rolls_per_turn, round_roll_count: 0, created_at: now(),
   }
+  const entryMessage = role === 'boss'
+    ? `${nickname} 进入随机规则试玩房，基础保底 ${room.base_guarantee} 万`
+    : `${nickname} 进入随机规则试玩房，打手不设保底`
 
   return {
     room,
     players: [player],
-    events: [event(room.id, `${nickname} 进入随机规则试玩房，基础保障 100`)],
+    events: [event(room.id, entryMessage)],
     tiles: createRandomRoomTiles(room.id),
     userId: DEMO_USER_ID,
     isDemo: true,
@@ -45,7 +48,12 @@ export function startDemoGame(snapshot: GameSnapshot): GameSnapshot {
       current_turn: player.user_id,
       rolls_remaining: snapshot.room.rolls_per_turn,
     },
-    players: snapshot.players.map((item) => ({ ...item, dice_count: snapshot.room.rolls_per_turn, round_roll_count: 0 })),
+    players: snapshot.players.map((item) => ({
+      ...item,
+      coins: item.role === 'boss' ? snapshot.room.base_guarantee : 0,
+      dice_count: snapshot.room.rolls_per_turn,
+      round_roll_count: 0,
+    })),
     events: [event(snapshot.room.id, `试玩开始，${player.nickname} 先行动，初始有 ${snapshot.room.rolls_per_turn} 个骰子`), ...snapshot.events],
   }
 }
@@ -111,7 +119,6 @@ export function resolveDemoDice(snapshot: GameSnapshot, dice: number): { snapsho
   const tile = tiles[landedPosition]
   let position = landedPosition
   let distance = current.distance + dice
-  let coins = current.coins
   let skipTurns = current.skip_turns
   let nextRollModifier = current.next_roll_modifier
   let rollsRemaining = Math.max(0, current.dice_count - 1)
@@ -121,7 +128,6 @@ export function resolveDemoDice(snapshot: GameSnapshot, dice: number): { snapsho
 
   switch (tile.effect_type) {
     case 'coins':
-      coins = Math.max(0, coins + tile.effect_value)
       break
     case 'move':
       position = ((position + tile.effect_value) % tiles.length + tiles.length) % tiles.length
@@ -149,7 +155,6 @@ export function resolveDemoDice(snapshot: GameSnapshot, dice: number): { snapsho
     ...current,
     position,
     distance,
-    coins,
     skip_turns: skipTurns,
     next_roll_modifier: nextRollModifier,
     dice_count: rollsRemaining,
@@ -160,6 +165,18 @@ export function resolveDemoDice(snapshot: GameSnapshot, dice: number): { snapsho
     addedEvents.unshift(event(snapshot.room.id, `${player.nickname} ${tile.effect_value > 0 ? '前进' : '后退'} ${Math.abs(tile.effect_value)} 格，到达第 ${position + 1} 格`))
   }
   let players = snapshot.players.map((item, index) => index === currentIndex ? player : item)
+  if (tile.effect_type === 'coins') {
+    players = players.map((item) => item.role === 'boss'
+      ? { ...item, coins: Math.max(0, item.coins + tile.effect_value) }
+      : { ...item, coins: 0 })
+    const boss = players.find((item) => item.role === 'boss')
+    if (boss && tile.effect_value !== 0) {
+      addedEvents.unshift(event(
+        snapshot.room.id,
+        `老板保底${tile.effect_value > 0 ? '增加' : '减少'} ${Math.abs(tile.effect_value)} 万，当前 ${boss.coins} 万`,
+      ))
+    }
+  }
   let room = { ...snapshot.room, rolls_remaining: rollsRemaining }
   if (advanced) {
     const nextRound = (round + 1) as 2 | 3

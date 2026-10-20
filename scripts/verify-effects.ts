@@ -44,6 +44,17 @@ const coins = resolve('coins', 20)
 assert.equal(coins.players[0].coins, 120)
 assert.equal(coins.room.current_round, 1)
 
+const runnerGuarantee = snapshotFor('coins', 20)
+runnerGuarantee.players = [
+  { ...runnerGuarantee.players[0], id: 'guarantee-boss', user_id: 'guarantee-boss-user', nickname: '老板', role: 'boss', turn_order: 0, coins: 100 },
+  { ...runnerGuarantee.players[0], id: 'guarantee-runner', user_id: 'guarantee-runner-user', nickname: '打手', role: 'runner', turn_order: 1, coins: 0 },
+]
+runnerGuarantee.room.current_turn = 'guarantee-runner-user'
+const runnerTriggeredGuarantee = resolveDemoDice(runnerGuarantee, 1).snapshot
+assert.equal(runnerTriggeredGuarantee.players[0].coins, 120, '打手触发保底格时应结算到老板')
+assert.equal(runnerTriggeredGuarantee.players[1].coins, 0, '打手始终不拥有保底')
+assert.equal(createDemoRoom('试玩打手', 'runner').players[0].coins, 0, '打手初始保底必须为 0')
+
 const moveForward = resolve('move', 2)
 assert.equal(moveForward.players[0].position, 3)
 assert.equal(moveForward.room.current_round, 1)

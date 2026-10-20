@@ -66,7 +66,7 @@ const TILE_EFFECTS = Object.keys(EFFECT_LABELS) as TileEffect[]
 
 function effectValueHint(effect: TileEffect, round: GameRound) {
   if (effect === 'move') return `正数前进、负数后退，本轮最多 ${round === 1 ? 2 : round === 2 ? 3 : 5} 格`
-  if (effect === 'coins') return '正数增加保障，负数扣减保障'
+  if (effect === 'coins') return '正数增加老板保底、负数扣减老板保底，单位为万'
   if (effect === 'skip') return `暂停次数，最多 ${round === 1 ? 1 : 2} 次`
   if (effect === 'extra_roll' || effect === 'lose_roll') return '掷骰次数，允许 1–2 次'
   if (effect === 'advance_chance' || effect === 'advance_round') return '只允许第一轮和第二轮使用；是否落到本格由本轮晋级概率控制'
@@ -403,6 +403,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
   const [round2Chance, setRound2Chance] = useState('30')
   const [startingPlayerId, setStartingPlayerId] = useState('')
   const [rollsPerTurn, setRollsPerTurn] = useState('1')
+  const [baseGuarantee, setBaseGuarantee] = useState('100')
   const [editorRound, setEditorRound] = useState<GameRound>(1)
   const [selectedTileId, setSelectedTileId] = useState<string | null>(null)
   const [tileDraft, setTileDraft] = useState<RoomTile | null>(null)
@@ -534,11 +535,13 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
     setRound2Chance(String(selectedRoom.round2_advance_chance))
     setStartingPlayerId(selectedRoom.starting_player_id ?? '')
     setRollsPerTurn(String(selectedRoom.rolls_per_turn))
+    setBaseGuarantee(String(selectedRoom.base_guarantee ?? 100))
   }, [
     selectedRoom?.id,
     selectedRoom?.round1_advance_chance,
     selectedRoom?.round2_advance_chance,
     selectedRoom?.rolls_per_turn,
+    selectedRoom?.base_guarantee,
     selectedRoom?.starting_player_id,
   ])
 
@@ -638,8 +641,12 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
     void runAdminAction(async () => {
       if (!supabase) return
       const rollCount = Number(rollsPerTurn)
+      const guarantee = Number(baseGuarantee)
       if (!Number.isInteger(rollCount) || rollCount < 1 || rollCount > 5) {
         throw new Error('初始骰子数量必须是 1–5 的整数')
+      }
+      if (!Number.isInteger(guarantee) || guarantee < 0 || guarantee > 10000) {
+        throw new Error('基础保底必须是 0–10000 万的整数')
       }
       if (startingPlayerId && !selectedPlayers.some((player) => player.user_id === startingPlayerId)) {
         throw new Error('首位玩家必须在当前房间中')
@@ -648,6 +655,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
         p_room_id: selectedRoom.id,
         p_starting_player_id: startingPlayerId || null,
         p_rolls_per_turn: rollCount,
+        p_base_guarantee: guarantee,
       })
       if (rpcError) throw rpcError
       await loadDashboard()
@@ -896,10 +904,11 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                   <span><small>当前轮次</small><strong>{ROUND_LABELS[selectedRoom.current_round]}</strong></span>
                   <span><small>玩家</small><strong>{selectedPlayers.length} / 3</strong></span>
                   <span><small>初始骰子</small><strong>{selectedRoom.rolls_per_turn} 个</strong></span>
+                  <span><small>基础保底</small><strong>{selectedRoom.base_guarantee ?? 100} 万</strong></span>
                 </div>
 
                 <section className="admin-turn-panel">
-                  <div className="section-title"><p className="kicker">回合设置</p><SlidersHorizontal size={18} /></div>
+                  <div className="section-title"><p className="kicker">开局设置</p><SlidersHorizontal size={18} /></div>
                   <div className="turn-settings-grid">
                     <label>
                       <span>谁先掷骰</span>
@@ -914,7 +923,11 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                       <span>每位玩家初始骰子数量</span>
                       <input disabled={selectedRoom.status !== 'lobby'} max="5" min="1" onChange={(event) => setRollsPerTurn(event.target.value)} type="number" value={rollsPerTurn} />
                     </label>
-                    <button className="button secondary" disabled={busy || selectedRoom.status !== 'lobby'} onClick={saveRoomSettings} type="button"><Save size={17} /> 保存回合设置</button>
+                    <label>
+                      <span>老板基础保底（万）</span>
+                      <input disabled={selectedRoom.status !== 'lobby'} max="10000" min="0" onChange={(event) => setBaseGuarantee(event.target.value)} type="number" value={baseGuarantee} />
+                    </label>
+                    <button className="button secondary" disabled={busy || selectedRoom.status !== 'lobby'} onClick={saveRoomSettings} type="button"><Save size={17} /> 保存开局设置</button>
                   </div>
                 </section>
 
@@ -995,7 +1008,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                     {selectedPlayers.map((player, index) => (
                       <div className="admin-player-row" key={player.id}>
                         <PlayerAvatar index={index} player={player} />
-                        <span><strong>{player.nickname}</strong><small>{player.role === 'boss' ? '老板' : '打手'}{player.user_id === selectedRoom.starting_player_id ? ' · 先手' : ''} · {player.is_ready ? '已准备' : '未准备'}</small></span>
+                        <span><strong>{player.nickname}</strong><small>{player.role === 'boss' ? `老板 · 保底 ${player.coins} 万` : '打手'}{player.user_id === selectedRoom.starting_player_id ? ' · 先手' : ''} · {player.is_ready ? '已准备' : '未准备'}</small></span>
                         <div className="admin-dice-stepper">
                           <button aria-label={`减少 ${player.nickname} 的骰子`} disabled={busy || selectedRoom.status === 'finished' || player.dice_count <= 0} onClick={() => adjustPlayerDice(player.id, -1)} title="减少 1 个骰子" type="button"><Minus size={14} /></button>
                           <strong><Dice5 size={13} /> {player.dice_count}</strong>
@@ -1228,7 +1241,7 @@ function GameView({
   const isMyTurn = snapshot.room.current_turn === snapshot.userId
   const waitingForDice = snapshot.room.status === 'playing' && snapshot.room.current_turn === null
   const sortedPlayers = useMemo(
-    () => [...snapshot.players].sort((a, b) => b.distance - a.distance || b.coins - a.coins),
+    () => [...snapshot.players].sort((a, b) => b.distance - a.distance || a.turn_order - b.turn_order),
     [snapshot.players],
   )
 
@@ -1283,7 +1296,7 @@ function GameView({
                     </div>
                     <div className="player-resources">
                       <span className="dice-count"><small>骰子</small>{player.dice_count}</span>
-                      <span className="guarantee-score"><small>保障</small>{player.coins}</span>
+                      {player.role === 'boss' && <span className="guarantee-score"><small>保底</small><span>{player.coins}<em>万</em></span></span>}
                     </div>
                   </div>
                 )

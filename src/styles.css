@@ -1233,7 +1233,7 @@ button.mode-card {
 
 .admin-summary-strip {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   border-bottom: 1px solid var(--line);
 }
 
@@ -1275,6 +1275,10 @@ button.mode-card {
   grid-template-columns: 1fr 1fr auto;
   gap: 10px;
   align-items: end;
+}
+
+.turn-settings-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
 }
 
 .turn-settings-grid label,
@@ -2003,6 +2007,19 @@ button.mode-card {
   color: #777e71;
   font-family: 'Noto Sans SC', sans-serif;
   font-size: 8px;
+  font-weight: 500;
+}
+
+.guarantee-score > span {
+  display: flex;
+  align-items: baseline;
+}
+
+.guarantee-score em {
+  margin-left: 2px;
+  font-family: 'Noto Sans SC', sans-serif;
+  font-size: 8px;
+  font-style: normal;
   font-weight: 500;
 }
 

@@ -21,6 +21,7 @@ export interface Room {
   starting_player_id: string | null
   rolls_per_turn: number
   rolls_remaining: number
+  base_guarantee: number
   created_at: string
 }
 
