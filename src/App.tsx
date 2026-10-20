@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   ArrowLeft,
+  ArrowRight,
   Check,
   CircleDollarSign,
   Clipboard,
+  Crosshair,
   Crown,
   Dice5,
   Flag,
@@ -11,8 +13,10 @@ import {
   LogIn,
   Play,
   Radio,
+  Route,
   RotateCcw,
   Shield,
+  Sparkles,
   Swords,
   UserPlus,
   Users,
@@ -67,13 +71,13 @@ async function fetchSnapshot(roomId: string, userId: string): Promise<GameSnapsh
 
 function Logo() {
   return (
-    <div className="brand" aria-label="三角洲趣味单">
+    <div className="brand" aria-label="景序电竞三角洲趣味">
       <span className="brand-mark" aria-hidden="true">
         <span />
       </span>
       <span className="brand-copy">
-        <strong>三角洲趣味单</strong>
-        <small>MONOPOLY OPS</small>
+        <strong>景序电竞三角洲趣味</strong>
+        <small>JINGXU ESPORTS</small>
       </span>
     </div>
   )
@@ -88,16 +92,86 @@ function StatusPill({ online }: { online: boolean }) {
   )
 }
 
-function HomeView({
+function ModeHub({ onSelect }: { onSelect: () => void }) {
+  return (
+    <div className="portal-page">
+      <header className="portal-header">
+        <Logo />
+        <span className="portal-channel"><Sparkles size={15} /> 趣味大厅</span>
+      </header>
+
+      <main className="mode-hub">
+        <section className="mode-intro">
+          <p className="eyebrow"><Radio size={14} /> 景序电竞 · 三角洲行动</p>
+          <h1>选择你的<br /><span>趣味行动。</span></h1>
+          <p>每一种玩法都是独立趣味单。选定模式后，再创建房间邀请队友加入。</p>
+        </section>
+
+        <section className="mode-catalog" aria-labelledby="mode-title">
+          <div className="catalog-heading">
+            <div>
+              <p className="kicker">FUN MISSIONS</p>
+              <h2 id="mode-title">趣味单库</h2>
+            </div>
+            <span>01 个可用</span>
+          </div>
+
+          <div className="mode-grid">
+            <button className="mode-card featured" onClick={onSelect} type="button">
+              <span className="mode-status live"><Radio size={13} /> 可创建房间</span>
+              <span className="mode-preview monopoly-preview" aria-hidden="true">
+                {Array.from({ length: 16 }, (_, index) => <i key={index} />)}
+                <b><Dice5 size={34} /></b>
+              </span>
+              <span className="mode-card-copy">
+                <small>趣味单 01</small>
+                <strong>大富翁</strong>
+                <span>掷骰穿越战区，在事件格中争夺金币，率先完成两圈。</span>
+              </span>
+              <span className="mode-card-footer">
+                <span>2–6 人 · 实时联机</span>
+                <span className="enter-mode">进入 <ArrowRight size={17} /></span>
+              </span>
+            </button>
+
+            <article className="mode-card upcoming">
+              <span className="mode-status">筹备中</span>
+              <span className="upcoming-icon" aria-hidden="true"><Crosshair size={30} /></span>
+              <span className="mode-card-copy">
+                <small>趣味单 02</small>
+                <strong>武器轮盘</strong>
+                <span>随机武器与限制条件组成每一轮挑战。</span>
+              </span>
+            </article>
+
+            <article className="mode-card upcoming">
+              <span className="mode-status">筹备中</span>
+              <span className="upcoming-icon route-icon" aria-hidden="true"><Route size={30} /></span>
+              <span className="mode-card-copy">
+                <small>趣味单 03</small>
+                <strong>撤离挑战</strong>
+                <span>用特殊路线与撤离条件完成小队行动。</span>
+              </span>
+            </article>
+          </div>
+        </section>
+      </main>
+    </div>
+  )
+}
+
+function MonopolyEntry({
   busy,
   onCreate,
   onJoin,
   onDemo,
+  onBack,
 }: {
   busy: boolean
   onCreate: (nickname: string, role: PlayerRole) => void
   onJoin: (nickname: string, role: PlayerRole, code: string) => void
   onDemo: (nickname: string, role: PlayerRole) => void
+  onBack: () => void
 }) {
   const [nickname, setNickname] = useState(() => localStorage.getItem(NICKNAME_KEY) ?? '')
   const [role, setRole] = useState<PlayerRole>('runner')
@@ -137,23 +211,28 @@ function HomeView({
   }
 
   return (
-    <main className="home-shell">
-      <section className="hero-copy">
-        <p className="eyebrow"><Radio size={14} /> 行动频道已开启</p>
-        <h1>掷骰，接单，<br /><span>拿下这场行动。</span></h1>
-        <p className="hero-subtitle">创建一间行动房，和队友在战区棋盘上争夺金币与排名。</p>
-        <div className="mission-stats" aria-label="游戏规则概览">
-          <span><strong>24</strong> 战区格</span>
-          <span><strong>2</strong> 圈决胜</span>
-          <span><strong>6</strong> 人房间</span>
-        </div>
-      </section>
+    <div className="entry-page">
+      <header className="portal-header">
+        <Logo />
+        <button className="back-link" onClick={onBack} type="button"><ArrowLeft size={17} /> 趣味大厅</button>
+      </header>
+      <main className="home-shell">
+        <section className="hero-copy">
+          <p className="eyebrow"><Dice5 size={14} /> 趣味单 01 · 大富翁</p>
+          <h1>大富翁<br /><span>战区争夺战。</span></h1>
+          <p className="hero-subtitle">创建一间行动房，和队友在战区棋盘上争夺金币与排名。</p>
+          <div className="mission-stats" aria-label="游戏规则概览">
+            <span><strong>24</strong> 战区格</span>
+            <span><strong>2</strong> 圈决胜</span>
+            <span><strong>6</strong> 人房间</span>
+          </div>
+        </section>
 
-      <section className="entry-panel" aria-labelledby="entry-title">
+        <section className="entry-panel" aria-labelledby="entry-title">
         <div className="panel-heading">
           <div>
             <p className="kicker">新行动</p>
-            <h2 id="entry-title">进入战区</h2>
+            <h2 id="entry-title">创建或加入房间</h2>
           </div>
           <StatusPill online={isSupabaseConfigured} />
         </div>
@@ -209,8 +288,9 @@ function HomeView({
         {!isSupabaseConfigured && (
           <p className="config-note">在线功能尚未配置，部署教程见项目 README。</p>
         )}
-      </section>
-    </main>
+        </section>
+      </main>
+    </div>
   )
 }
 
@@ -453,7 +533,7 @@ function GameView({
             <p>率先完成两圈，带着 {winner?.coins ?? 0} 金币成功撤离。</p>
             <div className="winner-actions">
               {snapshot.isDemo && <button className="button primary" onClick={onRestart} type="button"><RotateCcw size={18} /> 再来一局</button>}
-              <button className="button secondary" onClick={onExit} type="button"><ArrowLeft size={18} /> 返回首页</button>
+              <button className="button secondary" onClick={onExit} type="button"><ArrowLeft size={18} /> 返回房间入口</button>
             </div>
           </section>
         </div>
@@ -463,6 +543,7 @@ function GameView({
 }
 
 export default function App() {
+  const [selectedMode, setSelectedMode] = useState<'monopoly' | null>(null)
   const [snapshot, setSnapshot] = useState<GameSnapshot | null>(null)
   const [busy, setBusy] = useState(false)
   const [loading, setLoading] = useState(true)
@@ -497,6 +578,7 @@ export default function App() {
           localStorage.removeItem(ACTIVE_ROOM_KEY)
           return
         }
+        setSelectedMode('monopoly')
         await refreshRoom(roomId, data.session.user.id)
       } finally {
         setLoading(false)
@@ -653,7 +735,16 @@ export default function App() {
 
   return (
     <>
-      {!snapshot && <HomeView busy={busy} onCreate={createOnline} onDemo={createDemo} onJoin={joinOnline} />}
+      {!snapshot && !selectedMode && <ModeHub onSelect={() => setSelectedMode('monopoly')} />}
+      {!snapshot && selectedMode === 'monopoly' && (
+        <MonopolyEntry
+          busy={busy}
+          onBack={() => setSelectedMode(null)}
+          onCreate={createOnline}
+          onDemo={createDemo}
+          onJoin={joinOnline}
+        />
+      )}
       {snapshot?.room.status === 'lobby' && (
         <LobbyView busy={busy} onExit={exitRoom} onReady={toggleReady} onStart={startGame} snapshot={snapshot} />
       )}
