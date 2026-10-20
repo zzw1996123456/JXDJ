@@ -12,7 +12,6 @@ import {
   LockKeyhole,
   LogIn,
   LogOut,
-  Minus,
   Pause,
   Play,
   Plus,
@@ -354,7 +353,7 @@ function MonopolyEntry({
               <Crown size={17} /> 老板
             </button>
           </div>
-          <p className="role-help">首次加入时选择席位；重新进入时自动恢复原身份。</p>
+          <p className="role-help">加入后可在开局前修改行动代号和身份。</p>
         </fieldset>
 
         {formError && <p className="form-error" role="alert">{formError}</p>}
@@ -449,6 +448,8 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
   const [editorRound, setEditorRound] = useState<GameRound>(1)
   const [selectedTileId, setSelectedTileId] = useState<string | null>(null)
   const [tileDraft, setTileDraft] = useState<RoomTile | null>(null)
+  const [diceDrafts, setDiceDrafts] = useState<Record<string, string>>({})
+  const [guaranteeDrafts, setGuaranteeDrafts] = useState<Record<string, string>>({})
 
   const selectedRoom = rooms.find((room) => room.id === selectedRoomId) ?? null
   const selectedPlayers = players.filter((player) => player.room_id === selectedRoomId)
@@ -590,6 +591,8 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
   useEffect(() => {
     setRoomPendingDelete(null)
     setCodeCopied(false)
+    setDiceDrafts({})
+    setGuaranteeDrafts({})
   }, [selectedRoomId])
 
   useEffect(() => {
@@ -775,27 +778,61 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
     })
   }
 
-  function adjustPlayerDice(playerId: string, delta: -1 | 1) {
+  function savePlayerDice(player: Player) {
     if (!selectedRoom) return
     void runAdminAction(async () => {
       if (!supabase) return
-      const { error: rpcError } = await supabase.rpc('admin_adjust_player_dice', {
+      const diceCount = Number(diceDrafts[player.id] ?? player.dice_count)
+      if (!Number.isInteger(diceCount) || diceCount < 0 || diceCount > 20) {
+        throw new Error('骰子数量必须是 0–20 的整数')
+      }
+      const { error: rpcError } = await supabase.rpc('admin_set_player_dice', {
         p_room_id: selectedRoom.id,
-        p_player_id: playerId,
-        p_delta: delta,
+        p_player_id: player.id,
+        p_dice_count: diceCount,
       })
       if (rpcError) throw rpcError
       await loadDashboard()
+      setDiceDrafts((current) => {
+        const next = { ...current }
+        delete next[player.id]
+        return next
+      })
     })
   }
 
-  function adjustBossGuarantee(delta: -10 | 10) {
+  function saveBossGuarantee(player: Player) {
     if (!selectedRoom) return
     void runAdminAction(async () => {
       if (!supabase) return
-      const { error: rpcError } = await supabase.rpc('admin_adjust_boss_guarantee', {
+      const guarantee = Number(guaranteeDrafts[player.id] ?? player.coins)
+      const maximum = selectedRoom.status === 'lobby' ? 10000 : 1000000
+      if (!Number.isInteger(guarantee) || guarantee < 0 || guarantee > maximum) {
+        throw new Error(`老板保底必须是 0–${maximum} 万的整数`)
+      }
+      const { error: rpcError } = await supabase.rpc('admin_set_boss_guarantee', {
         p_room_id: selectedRoom.id,
-        p_delta: delta,
+        p_guarantee: guarantee,
+      })
+      if (rpcError) throw rpcError
+      await loadDashboard()
+      await loadRoomEvents(selectedRoom.id)
+      setGuaranteeDrafts((current) => {
+        const next = { ...current }
+        delete next[player.id]
+        return next
+      })
+    })
+  }
+
+  function updatePlayerRole(player: Player, role: PlayerRole) {
+    if (!selectedRoom || player.role === role) return
+    void runAdminAction(async () => {
+      if (!supabase) return
+      const { error: rpcError } = await supabase.rpc('admin_update_player_role', {
+        p_room_id: selectedRoom.id,
+        p_player_id: player.id,
+        p_role: role,
       })
       if (rpcError) throw rpcError
       await loadDashboard()
@@ -1083,17 +1120,23 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                         <PlayerAvatar index={index} player={player} />
                         <span><strong>{player.nickname}</strong><small>{player.role === 'boss' ? '老板' : '打手'}{player.user_id === selectedRoom.starting_player_id ? ' · 先手' : ''} · {player.is_ready ? '已准备' : '未准备'}</small></span>
                         <div className="admin-player-controls">
+                          <select aria-label={`修改 ${player.nickname} 的身份`} className="admin-role-select" disabled={busy || selectedRoom.status === 'finished'} onChange={(event) => updatePlayerRole(player, event.target.value as PlayerRole)} value={player.role}>
+                            <option value="boss">老板</option>
+                            <option value="runner">打手</option>
+                          </select>
                           {player.role === 'boss' && (
-                            <div className="admin-guarantee-stepper">
-                              <button aria-label="减少老板保底" disabled={busy || selectedRoom.status === 'finished' || player.coins <= 0} onClick={() => adjustBossGuarantee(-10)} title="减少 10 万保底" type="button"><Minus size={14} /></button>
-                              <strong><Shield size={13} /> {player.coins} 万</strong>
-                              <button aria-label="增加老板保底" disabled={busy || selectedRoom.status === 'finished' || player.coins >= (selectedRoom.status === 'lobby' ? 10000 : 1000000)} onClick={() => adjustBossGuarantee(10)} title="增加 10 万保底" type="button"><Plus size={14} /></button>
+                            <div className="admin-resource-editor">
+                              <Shield size={13} />
+                              <input aria-label="老板保底数值" disabled={busy || selectedRoom.status === 'finished'} max={selectedRoom.status === 'lobby' ? 10000 : 1000000} min="0" onChange={(event) => setGuaranteeDrafts((current) => ({ ...current, [player.id]: event.target.value }))} type="number" value={guaranteeDrafts[player.id] ?? String(player.coins)} />
+                              <small>万</small>
+                              <button aria-label="保存老板保底" disabled={busy || selectedRoom.status === 'finished'} onClick={() => saveBossGuarantee(player)} title="保存保底" type="button"><Save size={14} /></button>
                             </div>
                           )}
-                          <div className="admin-dice-stepper">
-                            <button aria-label={`减少 ${player.nickname} 的骰子`} disabled={busy || selectedRoom.status === 'finished' || player.dice_count <= 0} onClick={() => adjustPlayerDice(player.id, -1)} title="减少 1 个骰子" type="button"><Minus size={14} /></button>
-                            <strong><Dice5 size={13} /> {player.dice_count}</strong>
-                            <button aria-label={`增加 ${player.nickname} 的骰子`} disabled={busy || selectedRoom.status === 'finished' || player.dice_count >= 20} onClick={() => adjustPlayerDice(player.id, 1)} title="增加 1 个骰子" type="button"><Plus size={14} /></button>
+                          <div className="admin-resource-editor">
+                            <Dice5 size={13} />
+                            <input aria-label={`${player.nickname} 的骰子数量`} disabled={busy || selectedRoom.status === 'finished'} max="20" min="0" onChange={(event) => setDiceDrafts((current) => ({ ...current, [player.id]: event.target.value }))} type="number" value={diceDrafts[player.id] ?? String(player.dice_count)} />
+                            <small>个</small>
+                            <button aria-label={`保存 ${player.nickname} 的骰子数量`} disabled={busy || selectedRoom.status === 'finished'} onClick={() => savePlayerDice(player)} title="保存骰子数量" type="button"><Save size={14} /></button>
                           </div>
                         </div>
                       </div>
@@ -1129,14 +1172,18 @@ function LobbyView({
   snapshot,
   busy,
   onReady,
+  onProfileUpdate,
   onStart,
 }: {
   snapshot: GameSnapshot
   busy: boolean
   onReady: () => void
+  onProfileUpdate: (nickname: string, role: PlayerRole) => void
   onStart: () => void
 }) {
   const currentPlayer = snapshot.players.find((player) => player.user_id === snapshot.userId)
+  const [nicknameDraft, setNicknameDraft] = useState(currentPlayer?.nickname ?? '')
+  const [roleDraft, setRoleDraft] = useState<PlayerRole>(currentPlayer?.role ?? 'runner')
   const boss = snapshot.players.find((player) => player.role === 'boss')
   const runners = snapshot.players.filter((player) => player.role === 'runner')
   const validLineup = Boolean(boss) && runners.length >= 1 && runners.length <= 2 && snapshot.players.length <= MAX_PLAYERS
@@ -1145,6 +1192,11 @@ function LobbyView({
     { key: 'runner-1', label: '打手席 A', player: runners[0] },
     { key: 'runner-2', label: '打手席 B', player: runners[1] },
   ]
+
+  useEffect(() => {
+    setNicknameDraft(currentPlayer?.nickname ?? '')
+    setRoleDraft(currentPlayer?.role ?? 'runner')
+  }, [currentPlayer?.nickname, currentPlayer?.role])
 
   return (
     <div className="app-shell">
@@ -1198,6 +1250,23 @@ function LobbyView({
               )
             })}
           </div>
+
+          {currentPlayer && (
+            <div className="lobby-profile-editor">
+              <label className="field">
+                <span>行动代号</span>
+                <input disabled={busy} maxLength={12} onChange={(event) => setNicknameDraft(event.target.value)} value={nicknameDraft} />
+              </label>
+              <fieldset className="role-field">
+                <legend>开局身份</legend>
+                <div className="segmented">
+                  <button className={roleDraft === 'runner' ? 'active' : ''} disabled={busy} onClick={() => setRoleDraft('runner')} type="button"><Swords size={16} /> 打手</button>
+                  <button className={roleDraft === 'boss' ? 'active' : ''} disabled={busy} onClick={() => setRoleDraft('boss')} type="button"><Crown size={16} /> 老板</button>
+                </div>
+              </fieldset>
+              <button className="button secondary" disabled={busy || nicknameDraft.trim().length < 2 || nicknameDraft.trim().length > 12 || (nicknameDraft.trim() === currentPlayer.nickname && roleDraft === currentPlayer.role)} onClick={() => onProfileUpdate(nicknameDraft.trim(), roleDraft)} type="button"><Save size={17} /> 保存信息</button>
+            </div>
+          )}
 
           <div className="lobby-controls">
             <button className={`button ${currentPlayer?.is_ready ? 'secondary' : 'primary'}`} disabled={busy || snapshot.isDemo} onClick={onReady} type="button">
@@ -1551,6 +1620,39 @@ export default function App() {
     })
   }
 
+  function updateLobbyProfile(nickname: string, role: PlayerRole) {
+    if (!snapshot || snapshot.room.status !== 'lobby') return
+    if (nickname.length < 2 || nickname.length > 12) {
+      setError('行动代号需要 2–12 个字符')
+      return
+    }
+    if (snapshot.isDemo) {
+      setSnapshot((current) => {
+        if (!current || current.room.status !== 'lobby') return current
+        return {
+          ...current,
+          players: current.players.map((player) => player.user_id === current.userId
+            ? { ...player, nickname, role, coins: role === 'boss' ? current.room.base_guarantee : 0 }
+            : player),
+        }
+      })
+      localStorage.setItem(NICKNAME_KEY, nickname)
+      return
+    }
+    if (!supabase) return
+    const client = supabase
+    void runAction(async () => {
+      const { error: rpcError } = await client.rpc('update_lobby_player', {
+        p_room_id: snapshot.room.id,
+        p_nickname: nickname,
+        p_role: role,
+      })
+      if (rpcError) throw rpcError
+      localStorage.setItem(NICKNAME_KEY, nickname)
+      await refreshRoom(snapshot.room.id, snapshot.userId)
+    })
+  }
+
   function startGame() {
     if (snapshot?.isDemo) setSnapshot(startDemoGame(snapshot))
   }
@@ -1637,7 +1739,7 @@ export default function App() {
         />
       )}
       {snapshot?.room.status === 'lobby' && (
-        <LobbyView busy={busy} onReady={toggleReady} onStart={startGame} snapshot={snapshot} />
+        <LobbyView busy={busy} onProfileUpdate={updateLobbyProfile} onReady={toggleReady} onStart={startGame} snapshot={snapshot} />
       )}
       {snapshot && snapshot.room.status !== 'lobby' && (
         <GameView busy={busy} dice={dice} onAddDemoDice={addDemoDice} onExit={exitRoom} onRestart={restartDemo} onRoll={rollDice} snapshot={snapshot} />

@@ -541,6 +541,55 @@ begin
 end;
 $$;
 
+create or replace function public.update_lobby_player(p_room_id uuid, p_nickname text, p_role text)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_room public.rooms%rowtype;
+  v_player public.room_players%rowtype;
+  v_replacement public.room_players%rowtype;
+begin
+  if auth.uid() is null then raise exception '请先建立玩家身份'; end if;
+  if char_length(trim(p_nickname)) not between 2 and 12 then raise exception '行动代号需要 2 到 12 个字符'; end if;
+  if p_role not in ('boss', 'runner') then raise exception '玩家身份无效'; end if;
+
+  select * into v_room from public.rooms where id = p_room_id for update;
+  if not found or v_room.status <> 'lobby' or v_room.is_paused then raise exception '只能在开始房间前修改玩家信息'; end if;
+  select * into v_player from public.room_players
+  where room_id = p_room_id and user_id = auth.uid() for update;
+  if not found then raise exception '你不在该房间中'; end if;
+  if exists (
+    select 1 from public.room_players
+    where room_id = p_room_id and id <> v_player.id and lower(nickname) = lower(trim(p_nickname))
+  ) then raise exception '该行动代号已被使用'; end if;
+
+  if p_role = 'boss' then
+    update public.room_players set role = 'runner', coins = 0, is_ready = false
+    where room_id = p_room_id and id <> v_player.id and role = 'boss';
+  elsif v_player.role = 'boss' and (
+    select count(*) from public.room_players where room_id = p_room_id and id <> v_player.id and role = 'runner'
+  ) >= 2 then
+    select * into v_replacement from public.room_players
+    where room_id = p_room_id and id <> v_player.id and role = 'runner'
+    order by turn_order limit 1 for update;
+    update public.room_players set role = 'boss', coins = v_room.base_guarantee, is_ready = false
+    where id = v_replacement.id;
+  end if;
+  update public.room_players set
+    nickname = trim(p_nickname),
+    role = p_role,
+    coins = case when p_role = 'boss' then v_room.base_guarantee else 0 end,
+    is_ready = false
+  where id = v_player.id;
+  insert into public.game_events(room_id, message)
+  values (
+    p_room_id,
+    v_player.nickname || '将行动代号改为 ' || trim(p_nickname) || '，并切换为' || case when p_role = 'boss' then '老板' else '打手' end
+  );
+end;
+$$;
+
 create or replace function public.advance_room_turn_internal(p_room_id uuid, p_after_order integer)
 returns void
 language plpgsql security definer set search_path = public
@@ -690,6 +739,96 @@ begin
 end;
 $$;
 
+create or replace function public.admin_set_player_dice(p_room_id uuid, p_player_id uuid, p_dice_count integer)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_room public.rooms%rowtype;
+  v_player public.room_players%rowtype;
+begin
+  if not public.is_admin() then raise exception '只有管理员可以调整玩家骰子'; end if;
+  if p_dice_count not between 0 and 20 then raise exception '玩家骰子数量必须在 0 到 20 之间'; end if;
+  select * into v_room from public.rooms where id = p_room_id for update;
+  if not found or v_room.status = 'finished' then raise exception '当前房间不能调整骰子'; end if;
+  select * into v_player from public.room_players where id = p_player_id and room_id = p_room_id for update;
+  if not found then raise exception '玩家不在当前房间'; end if;
+
+  update public.room_players set dice_count = p_dice_count where id = v_player.id;
+  insert into public.game_events(room_id, message)
+  values (p_room_id, '管理员将 ' || v_player.nickname || ' 的骰子设为 ' || p_dice_count || ' 个');
+  if v_room.status = 'playing' and v_room.current_turn = v_player.user_id then
+    if p_dice_count = 0 then
+      insert into public.game_events(room_id, message)
+      values (p_room_id, v_player.nickname || ' 没有可用骰子，自动跳过本回合');
+      perform public.advance_room_turn_internal(p_room_id, v_player.turn_order);
+    else
+      update public.rooms set rolls_remaining = p_dice_count where id = p_room_id;
+    end if;
+  elsif v_room.status = 'playing' and v_room.current_turn is null and p_dice_count > 0 then
+    perform public.advance_room_turn_internal(p_room_id, v_player.turn_order - 1);
+  end if;
+end;
+$$;
+
+create or replace function public.admin_update_player_role(p_room_id uuid, p_player_id uuid, p_role text)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_room public.rooms%rowtype;
+  v_player public.room_players%rowtype;
+  v_existing_boss public.room_players%rowtype;
+  v_replacement public.room_players%rowtype;
+  v_guarantee integer;
+begin
+  if not public.is_admin() then raise exception '只有管理员可以修改玩家身份'; end if;
+  if p_role not in ('boss', 'runner') then raise exception '玩家身份无效'; end if;
+  select * into v_room from public.rooms where id = p_room_id for update;
+  if not found or v_room.status = 'finished' then raise exception '已结束的房间不能修改玩家身份'; end if;
+  select * into v_player from public.room_players where id = p_player_id and room_id = p_room_id for update;
+  if not found then raise exception '玩家不在当前房间'; end if;
+  if v_player.role = p_role then return; end if;
+
+  if p_role = 'boss' then
+    select * into v_existing_boss from public.room_players
+    where room_id = p_room_id and id <> v_player.id and role = 'boss'
+    limit 1 for update;
+    v_guarantee := case
+      when v_room.status = 'lobby' then v_room.base_guarantee
+      else coalesce(v_existing_boss.coins, v_room.base_guarantee)
+    end;
+    update public.room_players set
+      role = 'runner', coins = 0,
+      is_ready = case when v_room.status = 'lobby' then false else is_ready end
+    where room_id = p_room_id and id <> v_player.id and role = 'boss';
+  elsif v_player.role = 'boss' and (
+    v_room.status = 'playing' or (
+      select count(*) from public.room_players where room_id = p_room_id and id <> v_player.id and role = 'runner'
+    ) >= 2
+  ) then
+    select * into v_replacement from public.room_players
+    where room_id = p_room_id and id <> v_player.id and role = 'runner'
+    order by turn_order limit 1 for update;
+    if not found then raise exception '当前房间没有可接替的打手'; end if;
+    update public.room_players set
+      role = 'boss',
+      coins = case when v_room.status = 'lobby' then v_room.base_guarantee else v_player.coins end,
+      round_roll_count = 0,
+      is_ready = case when v_room.status = 'lobby' then false else is_ready end
+    where id = v_replacement.id;
+  end if;
+  update public.room_players set
+    role = p_role,
+    coins = case when p_role = 'boss' then v_guarantee else 0 end,
+    round_roll_count = case when p_role = 'boss' then 0 else round_roll_count end,
+    is_ready = case when v_room.status = 'lobby' then false else is_ready end
+  where id = v_player.id;
+  insert into public.game_events(room_id, message)
+  values (p_room_id, '管理员将 ' || v_player.nickname || ' 设为' || case when p_role = 'boss' then '老板' else '打手' end);
+end;
+$$;
+
 create or replace function public.admin_adjust_boss_guarantee(p_room_id uuid, p_delta integer)
 returns void
 language plpgsql security definer set search_path = public
@@ -724,6 +863,35 @@ begin
     '管理员为老板保底' || case when v_actual_change >= 0 then '增加 ' else '减少 ' end
       || abs(v_actual_change) || ' 万，当前 ' || v_next_guarantee || ' 万'
   );
+end;
+$$;
+
+create or replace function public.admin_set_boss_guarantee(p_room_id uuid, p_guarantee integer)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_room public.rooms%rowtype;
+  v_boss public.room_players%rowtype;
+  v_limit integer;
+begin
+  if not public.is_admin() then raise exception '只有管理员可以调整老板保底'; end if;
+  select * into v_room from public.rooms where id = p_room_id for update;
+  if not found or v_room.status = 'finished' then raise exception '当前房间不能调整保底'; end if;
+  v_limit := case when v_room.status = 'lobby' then 10000 else 1000000 end;
+  if p_guarantee not between 0 and v_limit then
+    raise exception '老板保底必须在 0 到 % 万之间', v_limit;
+  end if;
+  select * into v_boss from public.room_players
+  where room_id = p_room_id and role = 'boss' for update;
+  if not found then raise exception '当前房间还没有老板'; end if;
+
+  update public.room_players set coins = p_guarantee where id = v_boss.id;
+  if v_room.status = 'lobby' then
+    update public.rooms set base_guarantee = p_guarantee where id = p_room_id;
+  end if;
+  insert into public.game_events(room_id, message)
+  values (p_room_id, '管理员将老板保底从 ' || v_boss.coins || ' 万设为 ' || p_guarantee || ' 万');
 end;
 $$;
 
@@ -1087,10 +1255,14 @@ revoke all on function public.admin_clear_cache() from public;
 revoke all on function public.admin_randomize_room_board(uuid) from public;
 revoke all on function public.join_room(text, text, text) from public;
 revoke all on function public.set_ready(uuid, boolean) from public;
+revoke all on function public.update_lobby_player(uuid, text, text) from public;
 revoke all on function public.admin_update_round_chances(uuid, integer, integer) from public;
 revoke all on function public.admin_update_room_settings(uuid, uuid, integer, integer) from public;
 revoke all on function public.admin_adjust_player_dice(uuid, uuid, integer) from public;
+revoke all on function public.admin_set_player_dice(uuid, uuid, integer) from public;
+revoke all on function public.admin_update_player_role(uuid, uuid, text) from public;
 revoke all on function public.admin_adjust_boss_guarantee(uuid, integer) from public;
+revoke all on function public.admin_set_boss_guarantee(uuid, integer) from public;
 revoke all on function public.admin_update_room_tile(uuid, text, text, text, text, text, integer) from public;
 revoke all on function public.admin_start_game(uuid) from public;
 revoke all on function public.admin_finish_room(uuid) from public;
@@ -1104,10 +1276,14 @@ grant execute on function public.admin_clear_cache() to authenticated;
 grant execute on function public.admin_randomize_room_board(uuid) to authenticated;
 grant execute on function public.join_room(text, text, text) to authenticated;
 grant execute on function public.set_ready(uuid, boolean) to authenticated;
+grant execute on function public.update_lobby_player(uuid, text, text) to authenticated;
 grant execute on function public.admin_update_round_chances(uuid, integer, integer) to authenticated;
 grant execute on function public.admin_update_room_settings(uuid, uuid, integer, integer) to authenticated;
 grant execute on function public.admin_adjust_player_dice(uuid, uuid, integer) to authenticated;
+grant execute on function public.admin_set_player_dice(uuid, uuid, integer) to authenticated;
+grant execute on function public.admin_update_player_role(uuid, uuid, text) to authenticated;
 grant execute on function public.admin_adjust_boss_guarantee(uuid, integer) to authenticated;
+grant execute on function public.admin_set_boss_guarantee(uuid, integer) to authenticated;
 grant execute on function public.admin_update_room_tile(uuid, text, text, text, text, text, integer) to authenticated;
 grant execute on function public.admin_start_game(uuid) to authenticated;
 grant execute on function public.admin_finish_room(uuid) to authenticated;
