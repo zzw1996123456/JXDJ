@@ -1,4 +1,4 @@
-import { BOARD_TILES } from './board'
+import { getRoundTiles } from './board'
 import type { GameEvent, GameSnapshot, Player, PlayerRole, Room } from '../types'
 
 const DEMO_USER_ID = 'demo-player'
@@ -15,8 +15,11 @@ export function createDemoRoom(nickname: string, role: PlayerRole): GameSnapshot
     status: 'lobby',
     current_turn: null,
     winner_id: null,
-    board_size: BOARD_TILES.length,
-    target_laps: 2,
+    board_size: 8,
+    target_laps: 3,
+    current_round: 1,
+    round1_advance_chance: 35,
+    round2_advance_chance: 30,
     created_at: now(),
   }
 
@@ -49,7 +52,7 @@ export function startDemoGame(snapshot: GameSnapshot): GameSnapshot {
     ...snapshot,
     room: { ...snapshot.room, status: 'playing', current_turn: player.user_id },
     events: [
-      { id: crypto.randomUUID(), room_id: snapshot.room.id, message: '护航推演开始：20 个权益格按老板 60%、打手 40%配置', created_at: now() },
+      { id: crypto.randomUUID(), room_id: snapshot.room.id, message: '护航推演开始，当前为第一轮 8 格棋盘', created_at: now() },
       ...snapshot.events,
     ],
   }
@@ -58,14 +61,14 @@ export function startDemoGame(snapshot: GameSnapshot): GameSnapshot {
 export function rollDemoDice(snapshot: GameSnapshot): { snapshot: GameSnapshot; dice: number } {
   const dice = Math.floor(Math.random() * 6) + 1
   const current = snapshot.players[0]
+  const round = snapshot.room.current_round
+  const tiles = getRoundTiles(round)
   const distance = current.distance + dice
-  const position = distance % BOARD_TILES.length
-  const tile = BOARD_TILES[position]
-  let coinChange = tile.guaranteeChange
-  if (Math.floor(distance / BOARD_TILES.length) > Math.floor(current.distance / BOARD_TILES.length)) coinChange += 20
+  const position = (current.position + dice) % tiles.length
+  const tile = tiles[position]
+  const coinChange = tile.guaranteeChange
 
-  const player = { ...current, distance, position, coins: Math.max(0, current.coins + coinChange) }
-  const won = distance >= BOARD_TILES.length * snapshot.room.target_laps
+  let player = { ...current, distance, position, coins: Math.max(0, current.coins + coinChange) }
   const guaranteeText = coinChange === 0 ? '' : `，保障值 +${coinChange}`
   const event: GameEvent = {
     id: crypto.randomUUID(),
@@ -73,11 +76,31 @@ export function rollDemoDice(snapshot: GameSnapshot): { snapshot: GameSnapshot; 
     message: `${player.nickname} 掷出 ${dice}，触发「${tile.name}」：${tile.detail}${guaranteeText}`,
     created_at: now(),
   }
-  const winEvent: GameEvent = {
-    id: crypto.randomUUID(),
-    room_id: snapshot.room.id,
-    message: `${player.nickname} 完成两圈护航推演，本局协议生成完毕`,
-    created_at: now(),
+  const chance = round === 1 ? snapshot.room.round1_advance_chance : snapshot.room.round2_advance_chance
+  const advanced = round < 3 && Math.random() * 100 < chance
+  const finished = round === 3 && position === tiles.length - 1
+  let room = snapshot.room
+  let events = [event, ...snapshot.events]
+
+  if (advanced) {
+    const nextRound = (round + 1) as 2 | 3
+    const nextTiles = getRoundTiles(nextRound)
+    player = { ...player, position: 0 }
+    room = { ...room, current_round: nextRound, board_size: nextTiles.length }
+    events = [{
+      id: crypto.randomUUID(),
+      room_id: snapshot.room.id,
+      message: `晋级判定成功，进入第${nextRound === 2 ? '二' : '三'}轮 ${nextTiles.length} 格棋盘`,
+      created_at: now(),
+    }, ...events]
+  } else if (finished) {
+    room = { ...room, status: 'finished', winner_id: player.user_id, current_turn: null }
+    events = [{
+      id: crypto.randomUUID(),
+      room_id: snapshot.room.id,
+      message: `${player.nickname} 摇到协议结算格，本局结束`,
+      created_at: now(),
+    }, ...events]
   }
 
   return {
@@ -85,10 +108,8 @@ export function rollDemoDice(snapshot: GameSnapshot): { snapshot: GameSnapshot; 
     snapshot: {
       ...snapshot,
       players: [player],
-      room: won
-        ? { ...snapshot.room, status: 'finished', winner_id: player.user_id, current_turn: null }
-        : snapshot.room,
-      events: won ? [winEvent, event, ...snapshot.events] : [event, ...snapshot.events],
+      room,
+      events,
     },
   }
 }

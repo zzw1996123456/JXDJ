@@ -1,5 +1,6 @@
 export type PlayerRole = 'boss' | 'runner'
 export type RoomStatus = 'lobby' | 'playing' | 'finished'
+export type GameRound = 1 | 2 | 3
 
 export interface Room {
   id: string
@@ -10,6 +11,9 @@ export interface Room {
   winner_id: string | null
   board_size: number
   target_laps: number
+  current_round: GameRound
+  round1_advance_chance: number
+  round2_advance_chance: number
   created_at: string
 }
 
@@ -45,7 +49,7 @@ export interface GameSnapshot {
 export interface TileDefinition {
   name: string
   shortName: string
-  type: 'shared' | 'boss' | 'runner'
+  type: 'shared' | 'boss' | 'runner' | 'empty'
   detail: string
   guaranteeChange: number
 }

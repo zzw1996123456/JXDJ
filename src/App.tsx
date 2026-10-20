@@ -9,11 +9,16 @@ import {
   Dice5,
   Flag,
   LoaderCircle,
+  LockKeyhole,
   LogIn,
+  LogOut,
   Play,
+  Plus,
   Radio,
   Route,
   RotateCcw,
+  Save,
+  Settings2,
   Shield,
   Sparkles,
   Swords,
@@ -22,20 +27,15 @@ import {
   Wifi,
   WifiOff,
 } from 'lucide-react'
-import { BOARD_TILES, getBoardGridPosition, PLAYER_COLORS } from './lib/board'
+import { getBoardDimensions, getBoardGridPosition, getRoundTiles, PLAYER_COLORS } from './lib/board'
 import { createDemoRoom, rollDemoDice, startDemoGame } from './lib/demoGame'
 import { isSupabaseConfigured, supabase } from './lib/supabase'
-import type { GameEvent, GameSnapshot, Player, PlayerRole, Room } from './types'
+import type { GameEvent, GameRound, GameSnapshot, Player, PlayerRole, Room } from './types'
 
 const ACTIVE_ROOM_KEY = 'delta-monopoly-active-room'
 const NICKNAME_KEY = 'delta-monopoly-nickname'
 const MAX_PLAYERS = 3
-
-function getPlayerShare(player: Player, players: Player[]) {
-  if (player.role === 'boss') return 60
-  const runnerCount = players.filter((item) => item.role === 'runner').length
-  return runnerCount > 0 ? 40 / runnerCount : 0
-}
+const ROUND_LABELS: Record<GameRound, string> = { 1: '第一轮', 2: '第二轮', 3: '第三轮' }
 
 function formatError(error: unknown) {
   if (error instanceof Error) return error.message
@@ -110,7 +110,7 @@ function ModeHub({ onSelect }: { onSelect: () => void }) {
         <section className="mode-intro">
           <p className="eyebrow"><Radio size={14} /> 景序电竞 · 三角洲行动</p>
           <h1>选择你的<br /><span>趣味行动。</span></h1>
-          <p>每一种玩法都是独立趣味单。选定模式后，再创建房间邀请队友加入。</p>
+          <p>每一种玩法都是独立趣味单。管理员创建房间后，玩家凭房间码加入。</p>
         </section>
 
         <section className="mode-catalog" aria-labelledby="mode-title">
@@ -124,7 +124,7 @@ function ModeHub({ onSelect }: { onSelect: () => void }) {
 
           <div className="mode-grid">
             <button className="mode-card featured" onClick={onSelect} type="button">
-              <span className="mode-status live"><Radio size={13} /> 可创建房间</span>
+              <span className="mode-status live"><Radio size={13} /> 可在线组队</span>
               <span className="mode-preview monopoly-preview" aria-hidden="true">
                 {Array.from({ length: 16 }, (_, index) => <i key={index} />)}
                 <b><Dice5 size={34} /></b>
@@ -132,10 +132,10 @@ function ModeHub({ onSelect }: { onSelect: () => void }) {
               <span className="mode-card-copy">
                 <small>趣味单 01</small>
                 <strong>护航大富翁</strong>
-                <span>轮流掷骰生成护航条款，在保底、路线与打法之间完成一份小队协议。</span>
+                <span>从 8 格逐轮晋级到 24 格，在空格与护航条款之间完成三轮推演。</span>
               </span>
               <span className="mode-card-footer">
-                <span>2–3 人 · 1老板 + 最多2打手</span>
+                <span>三轮棋盘 · 最多 3 人</span>
                 <span className="enter-mode">进入 <ArrowRight size={17} /></span>
               </span>
             </button>
@@ -168,15 +168,15 @@ function ModeHub({ onSelect }: { onSelect: () => void }) {
 
 function MonopolyEntry({
   busy,
-  onCreate,
   onJoin,
   onDemo,
+  onAdmin,
   onBack,
 }: {
   busy: boolean
-  onCreate: (nickname: string, role: PlayerRole) => void
   onJoin: (nickname: string, role: PlayerRole, code: string) => void
   onDemo: (nickname: string, role: PlayerRole) => void
+  onAdmin: () => void
   onBack: () => void
 }) {
   const [nickname, setNickname] = useState(() => localStorage.getItem(NICKNAME_KEY) ?? '')
@@ -193,11 +193,6 @@ function MonopolyEntry({
     localStorage.setItem(NICKNAME_KEY, name)
     setFormError('')
     return name
-  }
-
-  function create() {
-    const name = validate()
-    if (name) onCreate(name, role)
   }
 
   function join() {
@@ -226,10 +221,10 @@ function MonopolyEntry({
         <section className="hero-copy">
           <p className="eyebrow"><Dice5 size={14} /> 趣味单 01 · 大富翁</p>
           <h1>大富翁<br /><span>护航协议局。</span></h1>
-          <p className="hero-subtitle">老板与打手轮流掷骰，把保底、搜撤路线、装备档位和交战方式写进本局护航协议。</p>
+          <p className="hero-subtitle">三轮棋盘逐步扩张，任何身份都可能触发老板权益、打手权益、公共事件或空格。</p>
           <div className="mission-stats" aria-label="游戏规则概览">
-            <span><strong>60%</strong> 老板权益</span>
-            <span><strong>40%</strong> 打手权益</span>
+            <span><strong>3</strong> 轮推演</span>
+            <span><strong>8/12/24</strong> 格棋盘</span>
             <span><strong>3</strong> 人上限</span>
           </div>
         </section>
@@ -238,7 +233,7 @@ function MonopolyEntry({
         <div className="panel-heading">
           <div>
             <p className="kicker">新行动</p>
-            <h2 id="entry-title">创建或加入房间</h2>
+            <h2 id="entry-title">加入在线房间</h2>
           </div>
           <StatusPill online={isSupabaseConfigured} />
         </div>
@@ -258,21 +253,16 @@ function MonopolyEntry({
           <legend>本局身份</legend>
           <div className="segmented">
             <button className={role === 'runner' ? 'active' : ''} onClick={() => setRole('runner')} type="button">
-              <Swords size={17} /> 打手席 · 共 40%
+              <Swords size={17} /> 打手
             </button>
             <button className={role === 'boss' ? 'active' : ''} onClick={() => setRole('boss')} type="button">
-              <Crown size={17} /> 老板席 · 60%
+              <Crown size={17} /> 老板
             </button>
           </div>
-          <p className="role-help">两名打手满编时各占 20%；只有一名打手时独享打手席 40%。</p>
+          <p className="role-help">身份不会限制落格，老板也会触发打手权益，打手也会触发老板权益。</p>
         </fieldset>
 
         {formError && <p className="form-error" role="alert">{formError}</p>}
-
-        <button className="button primary create-button" disabled={busy || !isSupabaseConfigured} onClick={create} type="button">
-          {busy ? <LoaderCircle className="spin" size={19} /> : <UserPlus size={19} />}
-          创建在线房间
-        </button>
 
         <div className="join-row">
           <input
@@ -282,14 +272,19 @@ function MonopolyEntry({
             placeholder="6 位房间码"
             value={code}
           />
-          <button className="button secondary" disabled={busy || !isSupabaseConfigured} onClick={join} type="button">
+          <button className="button primary" disabled={busy || !isSupabaseConfigured} onClick={join} type="button">
             <LogIn size={18} /> 加入
           </button>
         </div>
 
+        <p className="config-note">在线房间由管理员创建。取得 6 位房间码后即可加入。</p>
+
         <div className="divider"><span>或</span></div>
         <button className="button ghost full" disabled={busy} onClick={demo} type="button">
           <Dice5 size={18} /> 本机试玩
+        </button>
+        <button className="button admin-entry full" disabled={busy || !isSupabaseConfigured} onClick={onAdmin} type="button">
+          <LockKeyhole size={17} /> 管理员入口
         </button>
 
         {!isSupabaseConfigured && (
@@ -336,6 +331,348 @@ function RoomHeader({ snapshot, onExit }: { snapshot: GameSnapshot; onExit: () =
   )
 }
 
+function AdminPanel({ onBack }: { onBack: () => void }) {
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [authorized, setAuthorized] = useState(false)
+  const [checking, setChecking] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [rooms, setRooms] = useState<Room[]>([])
+  const [players, setPlayers] = useState<Player[]>([])
+  const [events, setEvents] = useState<GameEvent[]>([])
+  const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null)
+  const [round1Chance, setRound1Chance] = useState('35')
+  const [round2Chance, setRound2Chance] = useState('30')
+
+  const selectedRoom = rooms.find((room) => room.id === selectedRoomId) ?? null
+  const selectedPlayers = players.filter((player) => player.room_id === selectedRoomId)
+  const selectedEvents = events.filter((event) => event.room_id === selectedRoomId)
+  const selectedBosses = selectedPlayers.filter((player) => player.role === 'boss').length
+  const selectedRunners = selectedPlayers.filter((player) => player.role === 'runner').length
+  const canStart = selectedRoom?.status === 'lobby'
+    && selectedPlayers.length >= 2
+    && selectedPlayers.length <= 3
+    && selectedBosses === 1
+    && selectedRunners >= 1
+    && selectedRunners <= 2
+    && selectedPlayers.every((player) => player.is_ready)
+
+  const loadRoomEvents = useCallback(async (roomId: string) => {
+    if (!supabase) return
+    const pageSize = 1000
+    const allEvents: GameEvent[] = []
+
+    for (let from = 0; ; from += pageSize) {
+      const { data, error: eventsError } = await supabase
+        .from('game_events')
+        .select('*')
+        .eq('room_id', roomId)
+        .order('created_at', { ascending: false })
+        .range(from, from + pageSize - 1)
+      if (eventsError) throw eventsError
+
+      const batch = data as GameEvent[]
+      allEvents.push(...batch)
+      if (batch.length < pageSize) break
+    }
+
+    setEvents(allEvents)
+  }, [])
+
+  const loadDashboard = useCallback(async () => {
+    if (!supabase) return
+    const [roomsResult, playersResult] = await Promise.all([
+      supabase.from('rooms').select('*').order('created_at', { ascending: false }),
+      supabase.from('room_players').select('*').order('turn_order'),
+    ])
+    if (roomsResult.error) throw roomsResult.error
+    if (playersResult.error) throw playersResult.error
+
+    const nextRooms = roomsResult.data as Room[]
+    setRooms(nextRooms)
+    setPlayers(playersResult.data as Player[])
+    setSelectedRoomId((current) => current && nextRooms.some((room) => room.id === current) ? current : nextRooms[0]?.id ?? null)
+  }, [])
+
+  useEffect(() => {
+    async function checkSession() {
+      if (!supabase) {
+        setChecking(false)
+        return
+      }
+      const { data } = await supabase.auth.getSession()
+      if (!data.session) {
+        setChecking(false)
+        return
+      }
+      const { data: isAdmin, error: adminError } = await supabase.rpc('is_admin')
+      if (!adminError && isAdmin === true) {
+        setAuthorized(true)
+        try {
+          await loadDashboard()
+        } catch (loadError) {
+          setError(formatError(loadError))
+        }
+      }
+      setChecking(false)
+    }
+    void checkSession()
+  }, [loadDashboard])
+
+  useEffect(() => {
+    if (!authorized || !supabase) return
+    const client = supabase
+    const channel = client
+      .channel('admin-dashboard')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'rooms' }, () => void loadDashboard())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'room_players' }, () => void loadDashboard())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'game_events' }, () => {
+        if (selectedRoomId) void loadRoomEvents(selectedRoomId)
+      })
+      .subscribe()
+
+    return () => {
+      void client.removeChannel(channel)
+    }
+  }, [authorized, loadDashboard, loadRoomEvents, selectedRoomId])
+
+  useEffect(() => {
+    if (!authorized) return
+    if (!selectedRoomId) {
+      setEvents([])
+      return
+    }
+    void loadRoomEvents(selectedRoomId).catch((loadError) => setError(formatError(loadError)))
+  }, [authorized, loadRoomEvents, selectedRoomId])
+
+  useEffect(() => {
+    if (!selectedRoom) return
+    setRound1Chance(String(selectedRoom.round1_advance_chance))
+    setRound2Chance(String(selectedRoom.round2_advance_chance))
+  }, [selectedRoom?.id, selectedRoom?.round1_advance_chance, selectedRoom?.round2_advance_chance])
+
+  async function runAdminAction(action: () => Promise<void>) {
+    setBusy(true)
+    setError('')
+    try {
+      await action()
+    } catch (actionError) {
+      setError(formatError(actionError))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function login() {
+    void runAdminAction(async () => {
+      if (!supabase) throw new Error('尚未配置 Supabase')
+      if (!email.trim() || !password) throw new Error('请输入管理员邮箱和密码')
+      const { error: loginError } = await supabase.auth.signInWithPassword({ email: email.trim(), password })
+      if (loginError) throw loginError
+      const { data: isAdmin, error: adminError } = await supabase.rpc('is_admin')
+      if (adminError) throw adminError
+      if (isAdmin !== true) {
+        await supabase.auth.signOut()
+        throw new Error('此账号不在管理员白名单中')
+      }
+      setAuthorized(true)
+      setPassword('')
+      await loadDashboard()
+    })
+  }
+
+  function logout() {
+    void runAdminAction(async () => {
+      if (supabase) await supabase.auth.signOut()
+      setAuthorized(false)
+      setRooms([])
+      setPlayers([])
+      setEvents([])
+      setSelectedRoomId(null)
+    })
+  }
+
+  function createRoom() {
+    void runAdminAction(async () => {
+      if (!supabase) return
+      const { data, error: rpcError } = await supabase.rpc('admin_create_room')
+      if (rpcError) throw rpcError
+      const result = Array.isArray(data) ? data[0] : data
+      await loadDashboard()
+      if (result?.room_id) setSelectedRoomId(result.room_id)
+    })
+  }
+
+  function saveChances() {
+    if (!selectedRoom) return
+    void runAdminAction(async () => {
+      if (!supabase) return
+      const first = Number(round1Chance)
+      const second = Number(round2Chance)
+      if (!Number.isInteger(first) || first < 0 || first > 100 || !Number.isInteger(second) || second < 0 || second > 100) {
+        throw new Error('晋级概率必须是 0–100 的整数')
+      }
+      const { error: rpcError } = await supabase.rpc('admin_update_round_chances', {
+        p_room_id: selectedRoom.id,
+        p_round1_chance: first,
+        p_round2_chance: second,
+      })
+      if (rpcError) throw rpcError
+      await loadDashboard()
+    })
+  }
+
+  function startRoom() {
+    if (!selectedRoom) return
+    void runAdminAction(async () => {
+      if (!supabase) return
+      const { error: rpcError } = await supabase.rpc('admin_start_game', { p_room_id: selectedRoom.id })
+      if (rpcError) throw rpcError
+      await loadDashboard()
+    })
+  }
+
+  function finishRoom() {
+    if (!selectedRoom) return
+    void runAdminAction(async () => {
+      if (!supabase) return
+      const { error: rpcError } = await supabase.rpc('admin_finish_room', { p_room_id: selectedRoom.id })
+      if (rpcError) throw rpcError
+      await loadDashboard()
+    })
+  }
+
+  async function copyRoomCode() {
+    if (selectedRoom) await navigator.clipboard.writeText(selectedRoom.code)
+  }
+
+  if (checking) {
+    return <div className="loading-screen"><Logo /><LoaderCircle className="spin" size={28} /></div>
+  }
+
+  return (
+    <div className="admin-page">
+      <header className="portal-header">
+        <Logo />
+        <button className="back-link" onClick={onBack} type="button"><ArrowLeft size={17} /> 返回玩家入口</button>
+      </header>
+
+      {!authorized ? (
+        <main className="admin-login-shell">
+          <section className="admin-login-copy">
+            <p className="eyebrow"><LockKeyhole size={14} /> 管理员控制台</p>
+            <h1>管理房间与<br /><span>全部摇骰记录。</span></h1>
+            <p>只有加入 Supabase 管理员白名单的账号可以登录。</p>
+          </section>
+          <section className="entry-panel">
+            <div className="panel-heading">
+              <div><p className="kicker">ADMIN</p><h2>管理员登录</h2></div>
+              <Shield size={21} />
+            </div>
+            <label className="field">
+              <span>邮箱</span>
+              <input autoComplete="username" onChange={(event) => setEmail(event.target.value)} type="email" value={email} />
+            </label>
+            <label className="field">
+              <span>密码</span>
+              <input autoComplete="current-password" onChange={(event) => setPassword(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && login()} type="password" value={password} />
+            </label>
+            {error && <p className="form-error" role="alert">{error}</p>}
+            <button className="button primary full" disabled={busy} onClick={login} type="button">
+              {busy ? <LoaderCircle className="spin" size={18} /> : <LogIn size={18} />} 登录管理面板
+            </button>
+          </section>
+        </main>
+      ) : (
+        <main className="admin-shell">
+          <aside className="admin-room-list">
+            <div className="admin-section-heading">
+              <div><p className="kicker">ROOMS</p><h1>房间管理</h1></div>
+              <button aria-label="创建房间" className="icon-button admin-add" disabled={busy} onClick={createRoom} title="创建房间" type="button"><Plus size={19} /></button>
+            </div>
+            <button className="button primary full" disabled={busy} onClick={createRoom} type="button"><UserPlus size={18} /> 创建新房间</button>
+            <div className="admin-room-items">
+              {rooms.map((room) => {
+                const count = players.filter((player) => player.room_id === room.id).length
+                return (
+                  <button className={`admin-room-item ${selectedRoomId === room.id ? 'active' : ''}`} key={room.id} onClick={() => setSelectedRoomId(room.id)} type="button">
+                    <span><strong>{room.code}</strong><small>{count}/3 人 · {ROUND_LABELS[room.current_round]}</small></span>
+                    <em className={`room-status status-${room.status}`}>{room.status === 'lobby' ? '等待' : room.status === 'playing' ? '进行中' : '已结束'}</em>
+                  </button>
+                )
+              })}
+              {rooms.length === 0 && <p className="admin-empty">还没有房间，点击上方按钮创建。</p>}
+            </div>
+            <button className="button ghost full admin-logout" disabled={busy} onClick={logout} type="button"><LogOut size={17} /> 退出管理员</button>
+          </aside>
+
+          <section className="admin-room-detail">
+            {selectedRoom ? (
+              <>
+                <div className="admin-detail-header">
+                  <div>
+                    <p className="kicker">SELECTED ROOM</p>
+                    <button className="admin-code" onClick={copyRoomCode} title="复制房间码" type="button">{selectedRoom.code} <Clipboard size={17} /></button>
+                  </div>
+                  <div className="admin-room-actions">
+                    <button className="button primary" disabled={busy || !canStart} onClick={startRoom} type="button"><Play size={17} /> 开始房间</button>
+                    <button className="button secondary" disabled={busy || selectedRoom.status !== 'playing'} onClick={finishRoom} type="button"><Flag size={17} /> 结束本局</button>
+                  </div>
+                </div>
+
+                <div className="admin-summary-strip">
+                  <span><small>状态</small><strong>{selectedRoom.status === 'lobby' ? '等待玩家' : selectedRoom.status === 'playing' ? '进行中' : '已结束'}</strong></span>
+                  <span><small>当前轮次</small><strong>{ROUND_LABELS[selectedRoom.current_round]}</strong></span>
+                  <span><small>玩家</small><strong>{selectedPlayers.length} / 3</strong></span>
+                </div>
+
+                <section className="admin-probability-panel">
+                  <div className="section-title"><p className="kicker">晋级概率</p><Settings2 size={18} /></div>
+                  <div className="probability-grid">
+                    <label><span>第一轮 → 第二轮</span><span className="percent-input"><input max="100" min="0" onChange={(event) => setRound1Chance(event.target.value)} type="number" value={round1Chance} /><b>%</b></span></label>
+                    <label><span>第二轮 → 第三轮</span><span className="percent-input"><input max="100" min="0" onChange={(event) => setRound2Chance(event.target.value)} type="number" value={round2Chance} /><b>%</b></span></label>
+                    <button className="button secondary" disabled={busy} onClick={saveChances} type="button"><Save size={17} /> 保存概率</button>
+                  </div>
+                </section>
+
+                <section className="admin-player-panel">
+                  <div className="section-title"><p className="kicker">房间玩家</p><Users size={18} /></div>
+                  <div className="admin-player-list">
+                    {selectedPlayers.map((player, index) => (
+                      <div className="admin-player-row" key={player.id}>
+                        <PlayerAvatar index={index} player={player} />
+                        <span><strong>{player.nickname}</strong><small>{player.role === 'boss' ? '老板' : '打手'}</small></span>
+                        <em>{player.is_ready ? '已准备' : '未准备'}</em>
+                      </div>
+                    ))}
+                    {selectedPlayers.length === 0 && <p className="admin-empty">等待玩家使用房间码加入。</p>}
+                  </div>
+                </section>
+
+                <section className="admin-event-panel">
+                  <div className="section-title"><p className="kicker">全部摇骰记录</p><Radio size={18} /></div>
+                  <div className="admin-event-list">
+                    {selectedEvents.map((event) => (
+                      <div className="admin-event-row" key={event.id}>
+                        <time>{new Date(event.created_at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</time>
+                        <p>{event.message}</p>
+                      </div>
+                    ))}
+                    {selectedEvents.length === 0 && <p className="admin-empty">暂无记录。</p>}
+                  </div>
+                </section>
+              </>
+            ) : (
+              <div className="admin-detail-empty"><Settings2 size={34} /><p>创建或选择一个房间开始管理。</p></div>
+            )}
+          </section>
+        </main>
+      )}
+    </div>
+  )
+}
+
 function LobbyView({
   snapshot,
   busy,
@@ -350,15 +687,13 @@ function LobbyView({
   onExit: () => void
 }) {
   const currentPlayer = snapshot.players.find((player) => player.user_id === snapshot.userId)
-  const isHost = snapshot.room.host_user_id === snapshot.userId
-  const allReady = snapshot.players.length > 0 && snapshot.players.every((player) => player.is_ready)
   const boss = snapshot.players.find((player) => player.role === 'boss')
   const runners = snapshot.players.filter((player) => player.role === 'runner')
   const validLineup = Boolean(boss) && runners.length >= 1 && runners.length <= 2 && snapshot.players.length <= MAX_PLAYERS
   const rosterSlots = [
-    { key: 'boss', label: '老板席', share: 60, player: boss },
-    { key: 'runner-1', label: '打手席 A', share: runners.length === 1 ? 40 : 20, player: runners[0] },
-    { key: 'runner-2', label: '打手席 B', share: 20, player: runners[1] },
+    { key: 'boss', label: '老板席', player: boss },
+    { key: 'runner-1', label: '打手席 A', player: runners[0] },
+    { key: 'runner-2', label: '打手席 B', player: runners[1] },
   ]
 
   return (
@@ -370,8 +705,8 @@ function LobbyView({
           <h1>等待队员<br /><span>进入行动。</span></h1>
           <p>房间码 <strong>{snapshot.room.code}</strong></p>
           <div className="lobby-rule-line">
-            <span><Crown size={17} /> 老板 60%</span>
-            <span><Swords size={17} /> 打手共 40%</span>
+            <span><Flag size={17} /> 三轮推演</span>
+            <span><Dice5 size={17} /> 8 → 12 → 24 格</span>
             <span><Users size={17} /> 最多 3 人</span>
           </div>
         </section>
@@ -397,7 +732,7 @@ function LobbyView({
                     <strong>{slot.player?.nickname ?? `等待${slot.label}`}</strong>
                     <span>{slot.label}{slot.player?.user_id === snapshot.room.host_user_id ? ' · 房主' : ''}</span>
                   </div>
-                  <span className={`share-state ${slot.player ? 'filled' : ''}`}>{slot.share}% 权益</span>
+                  <span className={`share-state ${slot.player ? 'filled' : ''}`}>{slot.player ? '已占用' : '空缺'}</span>
                   {slot.player && (
                     <span className={`ready-state ${slot.player.is_ready ? 'ready' : ''}`}>
                       {slot.player.is_ready ? <Check size={15} /> : <span className="waiting-dot" />}
@@ -413,33 +748,46 @@ function LobbyView({
             <button className={`button ${currentPlayer?.is_ready ? 'secondary' : 'primary'}`} disabled={busy || snapshot.isDemo} onClick={onReady} type="button">
               <Shield size={18} /> {currentPlayer?.is_ready ? '取消准备' : '准备'}
             </button>
-            {isHost && (
-              <button className="button primary" disabled={busy || !allReady || (!snapshot.isDemo && !validLineup)} onClick={onStart} type="button">
+            {snapshot.isDemo ? (
+              <button className="button primary" disabled={busy} onClick={onStart} type="button">
                 {busy ? <LoaderCircle className="spin" size={18} /> : <Play size={18} />}
-                开始行动
+                开始试玩
               </button>
+            ) : (
+              <div className="admin-waiting"><Settings2 size={17} /> 等待管理员开始</div>
             )}
           </div>
           {snapshot.isDemo && <p className="inline-note">试玩房已自动准备，可直接开始。</p>}
           {!snapshot.isDemo && !validLineup && <p className="inline-note">至少需要 1 名老板和 1 名打手；满编为 1 老板 + 2 打手。</p>}
-          {!snapshot.isDemo && validLineup && runners.length === 1 && <p className="inline-note">当前打手独享 40% 权益；第 2 名打手加入后各占 20%。</p>}
+          {!snapshot.isDemo && validLineup && <p className="inline-note">全员准备后，由管理员在管理面板开始本局。</p>}
         </section>
       </main>
     </div>
   )
 }
 
-function Board({ players }: { players: Player[] }) {
+function Board({ players, room }: { players: Player[]; room: Room }) {
+  const tiles = getRoundTiles(room.current_round)
+  const dimensions = getBoardDimensions(tiles.length)
+  const advanceChance = room.current_round === 1 ? room.round1_advance_chance : room.round2_advance_chance
+
   return (
-    <div className="board" aria-label="行动棋盘">
-      {BOARD_TILES.map((tile, index) => {
+    <div
+      aria-label={`${ROUND_LABELS[room.current_round]}行动棋盘`}
+      className={`board board-size-${tiles.length}`}
+      style={{
+        '--board-columns': dimensions.columns,
+        '--board-rows': dimensions.rows,
+      } as React.CSSProperties}
+    >
+      {tiles.map((tile, index) => {
         const playersHere = players
           .map((player, playerIndex) => ({ player, playerIndex }))
           .filter(({ player }) => player.position === index)
         return (
-          <div className={`tile tile-${tile.type}`} key={tile.name} style={getBoardGridPosition(index)}>
+          <div className={`tile tile-${tile.type}`} key={`${tile.name}-${index}`} style={getBoardGridPosition(index, tiles.length)}>
             <span className="tile-number">{String(index + 1).padStart(2, '0')}</span>
-            <span className="tile-owner">{tile.type === 'boss' ? '老板' : tile.type === 'runner' ? '打手' : '公共'}</span>
+            <span className="tile-owner">{tile.type === 'boss' ? '老板' : tile.type === 'runner' ? '打手' : tile.type === 'empty' ? '空格' : '公共'}</span>
             <strong>{tile.shortName}</strong>
             <small>{tile.detail}</small>
             <div className="tile-players">
@@ -450,15 +798,16 @@ function Board({ players }: { players: Player[] }) {
           </div>
         )
       })}
-      <div className="board-center">
+      <div
+        className="board-center"
+        data-round={room.current_round}
+        style={{ gridColumn: `2 / ${dimensions.columns}`, gridRow: `2 / ${dimensions.rows}` }}
+      >
         <span className="center-mark"><span /></span>
-        <p>TACTICAL BOARD</p>
+        <p>{ROUND_LABELS[room.current_round]} · {tiles.length} CELLS</p>
         <strong>护航协议局</strong>
-        <div className="equity-split" aria-label="权益格比例">
-          <span><Crown size={14} /> 老板 60%</span>
-          <span><Swords size={14} /> 打手 40%</span>
-        </div>
-        <small>12 个老板格 · 8 个打手格 · 4 个公共节点</small>
+        <small>{room.current_round < 3 ? `本轮晋级概率 ${advanceChance}%` : '摇到协议结算格完成本局'}</small>
+        <small>所有身份均可能触发任意权益格</small>
       </div>
     </div>
   )
@@ -498,9 +847,9 @@ function GameView({
               <span className={`turn-indicator ${isMyTurn ? 'active' : ''}`} />
               <p>{snapshot.room.status === 'finished' ? '行动结束' : isMyTurn ? '轮到你行动' : `等待 ${currentPlayer?.nickname ?? '队员'}`}</p>
             </div>
-            <span>{ownPlayer ? `第 ${Math.floor(ownPlayer.distance / snapshot.room.board_size) + 1} 圈` : ''}</span>
+            <span>{ROUND_LABELS[snapshot.room.current_round]} · {snapshot.room.board_size} 格</span>
           </div>
-          <Board players={snapshot.players} />
+          <Board players={snapshot.players} room={snapshot.room} />
         </section>
 
         <aside className="game-sidebar">
@@ -516,7 +865,7 @@ function GameView({
 
           <section className="ranking-panel">
             <div className="section-title">
-              <p className="kicker">权益进度</p>
+              <p className="kicker">玩家状态</p>
               <Flag size={18} />
             </div>
             <div className="ranking-list">
@@ -528,7 +877,7 @@ function GameView({
                     <PlayerAvatar index={originalIndex} player={player} />
                     <div>
                       <strong>{player.nickname}</strong>
-                      <small>{player.role === 'boss' ? '老板' : '打手'} · {getPlayerShare(player, snapshot.players)}% 权益</small>
+                      <small>{player.role === 'boss' ? '老板' : '打手'} · 当前第 {player.position + 1} 格</small>
                     </div>
                     <span className="guarantee-score"><small>保障</small>{player.coins}</span>
                   </div>
@@ -559,8 +908,8 @@ function GameView({
           <section aria-labelledby="winner-title" aria-modal="true" className="winner-dialog" role="dialog">
             <span className="winner-icon"><Crown size={34} /></span>
             <p className="kicker">AGREEMENT COMPLETE</p>
-            <h2 id="winner-title">护航协议已生成</h2>
-            <p>{winner?.nickname ?? '行动队员'} 完成两圈推演，最终保障值为 {winner?.coins ?? 0}。</p>
+            <h2 id="winner-title">本局已经结束</h2>
+            <p>{winner ? `${winner.nickname} 摇到协议结算格。` : '管理员已结束本局。'} 最终记录已保存在管理面板。</p>
             <div className="winner-actions">
               {snapshot.isDemo && <button className="button primary" onClick={onRestart} type="button"><RotateCcw size={18} /> 再来一局</button>}
               <button className="button secondary" onClick={onExit} type="button"><ArrowLeft size={18} /> 返回房间入口</button>
@@ -574,6 +923,7 @@ function GameView({
 
 export default function App() {
   const [selectedMode, setSelectedMode] = useState<'monopoly' | null>(null)
+  const [showAdmin, setShowAdmin] = useState(false)
   const [snapshot, setSnapshot] = useState<GameSnapshot | null>(null)
   const [busy, setBusy] = useState(false)
   const [loading, setLoading] = useState(true)
@@ -636,7 +986,7 @@ export default function App() {
 
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' })
-  }, [selectedMode, snapshot?.room.status])
+  }, [selectedMode, showAdmin, snapshot?.room.status])
 
   async function runAction(action: () => Promise<void>) {
     setBusy(true)
@@ -654,19 +1004,6 @@ export default function App() {
     setSnapshot(createDemoRoom(nickname, role))
     setDice(null)
     setError('')
-  }
-
-  function createOnline(nickname: string, role: PlayerRole) {
-    void runAction(async () => {
-      if (!supabase) throw new Error('请先完成 Supabase 配置')
-      const user = await ensureOnlineUser()
-      const { data, error: rpcError } = await supabase.rpc('create_room', { p_nickname: nickname, p_role: role })
-      if (rpcError) throw rpcError
-      const result = Array.isArray(data) ? data[0] : data
-      if (!result?.room_id) throw new Error('创建房间失败')
-      localStorage.setItem(ACTIVE_ROOM_KEY, result.room_id)
-      setSnapshot(await fetchSnapshot(result.room_id, user.id))
-    })
   }
 
   function joinOnline(nickname: string, role: PlayerRole, code: string) {
@@ -697,18 +1034,7 @@ export default function App() {
   }
 
   function startGame() {
-    if (!snapshot) return
-    if (snapshot.isDemo) {
-      setSnapshot(startDemoGame(snapshot))
-      return
-    }
-    if (!supabase) return
-    const client = supabase
-    void runAction(async () => {
-      const { error: rpcError } = await client.rpc('start_game', { p_room_id: snapshot.room.id })
-      if (rpcError) throw rpcError
-      await refreshRoom(snapshot.room.id, snapshot.userId)
-    })
+    if (snapshot?.isDemo) setSnapshot(startDemoGame(snapshot))
   }
 
   function rollDice() {
@@ -767,6 +1093,10 @@ export default function App() {
     return <div className="loading-screen"><Logo /><LoaderCircle className="spin" size={28} /></div>
   }
 
+  if (showAdmin && !snapshot) {
+    return <AdminPanel onBack={() => setShowAdmin(false)} />
+  }
+
   return (
     <>
       {!snapshot && !selectedMode && <ModeHub onSelect={() => setSelectedMode('monopoly')} />}
@@ -774,7 +1104,7 @@ export default function App() {
         <MonopolyEntry
           busy={busy}
           onBack={() => setSelectedMode(null)}
-          onCreate={createOnline}
+          onAdmin={() => setShowAdmin(true)}
           onDemo={createDemo}
           onJoin={joinOnline}
         />
