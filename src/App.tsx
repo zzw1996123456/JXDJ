@@ -56,6 +56,7 @@ import type {
 
 const ACTIVE_ROOM_KEY = 'delta-monopoly-active-room'
 const NICKNAME_KEY = 'delta-monopoly-nickname'
+const LAST_ROOM_CODE_KEY = 'delta-monopoly-last-room-code'
 const MAX_PLAYERS = 3
 const ROUND_LABELS: Record<GameRound, string> = { 1: '第一轮', 2: '第二轮', 3: '第三轮' }
 const TILE_TYPES = Object.keys(TILE_TYPE_LABELS) as TileType[]
@@ -225,7 +226,7 @@ function MonopolyEntry({
 }) {
   const [nickname, setNickname] = useState(() => localStorage.getItem(NICKNAME_KEY) ?? '')
   const [role, setRole] = useState<PlayerRole>('runner')
-  const [code, setCode] = useState('')
+  const [code, setCode] = useState(() => localStorage.getItem(LAST_ROOM_CODE_KEY) ?? '')
   const [formError, setFormError] = useState('')
 
   function validate() {
@@ -294,7 +295,7 @@ function MonopolyEntry({
         </label>
 
         <fieldset className="role-field">
-          <legend>本局身份</legend>
+          <legend>首次加入身份</legend>
           <div className="segmented">
             <button className={role === 'runner' ? 'active' : ''} onClick={() => setRole('runner')} type="button">
               <Swords size={17} /> 打手
@@ -303,7 +304,7 @@ function MonopolyEntry({
               <Crown size={17} /> 老板
             </button>
           </div>
-          <p className="role-help">选择你在本局中的固定席位。</p>
+          <p className="role-help">首次加入时选择席位；重新进入时自动恢复原身份。</p>
         </fieldset>
 
         {formError && <p className="form-error" role="alert">{formError}</p>}
@@ -321,7 +322,7 @@ function MonopolyEntry({
           </button>
         </div>
 
-        <p className="config-note">在线房间由管理员创建。取得 6 位房间码后即可加入。</p>
+        <p className="config-note">退出或关闭网页不会清除席位，使用同一房间码和原行动代号即可继续。</p>
 
         <div className="divider"><span>或</span></div>
         <button className="button ghost full" disabled={busy} onClick={demo} type="button">
@@ -367,7 +368,7 @@ function RoomHeader({ snapshot, onExit }: { snapshot: GameSnapshot; onExit: () =
           <strong>{snapshot.room.code}</strong>
           {copied ? <Check size={16} /> : <Clipboard size={16} />}
         </button>
-        <button aria-label="退出房间" className="icon-button" onClick={onExit} title="退出房间" type="button">
+        <button aria-label="暂离房间" className="icon-button" onClick={onExit} title="暂离房间（保留席位）" type="button">
           <ArrowLeft size={19} />
         </button>
       </div>
@@ -1289,6 +1290,7 @@ export default function App() {
       const result = Array.isArray(data) ? data[0] : data
       if (!result?.room_id) throw new Error('未找到该房间')
       localStorage.setItem(ACTIVE_ROOM_KEY, result.room_id)
+      localStorage.setItem(LAST_ROOM_CODE_KEY, result.room_code ?? code)
       setSnapshot(await fetchSnapshot(result.room_id, user.id))
     })
   }
@@ -1342,17 +1344,7 @@ export default function App() {
   }
 
   function exitRoom() {
-    if (!snapshot || snapshot.isDemo || !supabase) {
-      clearLocalRoom()
-      return
-    }
-    const client = supabase
-    const roomId = snapshot.room.id
-    void runAction(async () => {
-      const { error: rpcError } = await client.rpc('leave_room', { p_room_id: roomId })
-      if (rpcError) throw rpcError
-      clearLocalRoom()
-    })
+    clearLocalRoom()
   }
 
   function restartDemo() {

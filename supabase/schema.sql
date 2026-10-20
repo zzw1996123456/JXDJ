@@ -398,6 +398,9 @@ as $$
 declare
   v_user_id uuid := auth.uid();
   v_room public.rooms%rowtype;
+  v_existing public.room_players%rowtype;
+  v_previous_user_id uuid;
+  v_match_count integer;
   v_turn_order integer;
 begin
   if v_user_id is null then raise exception '请先建立玩家身份'; end if;
@@ -405,32 +408,54 @@ begin
   if p_role not in ('boss', 'runner') then raise exception '玩家身份无效'; end if;
   select * into v_room from public.rooms where code = upper(trim(p_code)) for update;
   if not found then raise exception '房间不存在，请检查房间码'; end if;
-  if v_room.status <> 'lobby' then raise exception '该房间已经开始行动'; end if;
 
-  if exists (select 1 from public.room_players rp where rp.room_id = v_room.id and rp.user_id = v_user_id) then
-    if p_role = 'boss' and exists (
-      select 1 from public.room_players rp where rp.room_id = v_room.id and rp.role = 'boss' and rp.user_id <> v_user_id
-    ) then raise exception '老板席已经有人了'; end if;
-    if p_role = 'runner' and (
-      select count(*) from public.room_players rp where rp.room_id = v_room.id and rp.role = 'runner' and rp.user_id <> v_user_id
-    ) >= 2 then raise exception '两个打手席已经满了'; end if;
-    update public.room_players as rp set nickname = trim(p_nickname), role = p_role
-    where rp.room_id = v_room.id and rp.user_id = v_user_id;
-  else
-    if (select count(*) from public.room_players rp where rp.room_id = v_room.id) >= 3 then raise exception '房间人数已满'; end if;
-    if p_role = 'boss' and exists (
-      select 1 from public.room_players rp where rp.room_id = v_room.id and rp.role = 'boss'
-    ) then raise exception '老板席已经有人了'; end if;
-    if p_role = 'runner' and (
-      select count(*) from public.room_players rp where rp.room_id = v_room.id and rp.role = 'runner'
-    ) >= 2 then raise exception '两个打手席已经满了'; end if;
-    select coalesce(max(rp.turn_order), -1) + 1 into v_turn_order
-    from public.room_players rp where rp.room_id = v_room.id;
-    insert into public.room_players(room_id, user_id, nickname, role, turn_order, coins)
-    values (v_room.id, v_user_id, trim(p_nickname), p_role, v_turn_order, 100);
-    insert into public.game_events(room_id, message)
-    values (v_room.id, trim(p_nickname) || ' 以' || case when p_role = 'boss' then '老板' else '打手' end || '身份加入房间');
+  -- The current browser may already own a seat. Require its original codename
+  -- instead of allowing the seat identity to be renamed during reconnection.
+  select * into v_existing from public.room_players rp
+  where rp.room_id = v_room.id and rp.user_id = v_user_id;
+  if v_existing.id is not null then
+    if lower(v_existing.nickname) <> lower(trim(p_nickname)) then
+      raise exception '行动代号不正确，请输入该席位原来的行动代号';
+    end if;
+    return query select v_room.id, v_room.code;
+    return;
   end if;
+
+  select count(*) into v_match_count from public.room_players rp
+  where rp.room_id = v_room.id and lower(rp.nickname) = lower(trim(p_nickname));
+  if v_match_count > 1 then raise exception '房间内存在重复行动代号，请联系管理员处理'; end if;
+
+  -- A matching codename reclaims the original seat even after the game starts.
+  if v_match_count = 1 then
+    select * into v_existing from public.room_players rp
+    where rp.room_id = v_room.id and lower(rp.nickname) = lower(trim(p_nickname));
+    v_previous_user_id := v_existing.user_id;
+    update public.room_players set user_id = v_user_id where id = v_existing.id;
+    update public.rooms set
+      current_turn = case when current_turn = v_previous_user_id then v_user_id else current_turn end,
+      starting_player_id = case when starting_player_id = v_previous_user_id then v_user_id else starting_player_id end,
+      winner_id = case when winner_id = v_previous_user_id then v_user_id else winner_id end
+    where id = v_room.id;
+    insert into public.game_events(room_id, message)
+    values (v_room.id, v_existing.nickname || ' 通过原行动代号重新进入房间');
+    return query select v_room.id, v_room.code;
+    return;
+  end if;
+
+  if v_room.status <> 'lobby' then raise exception '行动代号不正确，进行中的房间只能由原玩家重新进入'; end if;
+  if (select count(*) from public.room_players rp where rp.room_id = v_room.id) >= 3 then raise exception '房间人数已满'; end if;
+  if p_role = 'boss' and exists (
+    select 1 from public.room_players rp where rp.room_id = v_room.id and rp.role = 'boss'
+  ) then raise exception '老板席已经有人了'; end if;
+  if p_role = 'runner' and (
+    select count(*) from public.room_players rp where rp.room_id = v_room.id and rp.role = 'runner'
+  ) >= 2 then raise exception '两个打手席已经满了'; end if;
+  select coalesce(max(rp.turn_order), -1) + 1 into v_turn_order
+  from public.room_players rp where rp.room_id = v_room.id;
+  insert into public.room_players(room_id, user_id, nickname, role, turn_order, coins)
+  values (v_room.id, v_user_id, trim(p_nickname), p_role, v_turn_order, 100);
+  insert into public.game_events(room_id, message)
+  values (v_room.id, trim(p_nickname) || ' 以' || case when p_role = 'boss' then '老板' else '打手' end || '身份加入房间');
   return query select v_room.id, v_room.code;
 end;
 $$;
@@ -605,52 +630,13 @@ returns void
 language plpgsql security definer set search_path = public
 as $$
 declare
-  v_room public.rooms%rowtype;
-  v_player public.room_players%rowtype;
-  v_next public.room_players%rowtype;
-  v_next_rolls integer;
-  v_player_count integer;
-  v_order integer;
-  v_step integer;
-  v_next_found boolean := false;
+  v_nickname text;
 begin
-  select * into v_room from public.rooms where id = p_room_id for update;
-  if not found then return; end if;
-  select * into v_player from public.room_players where room_id = p_room_id and user_id = auth.uid();
-  if not found then return; end if;
-  delete from public.room_players where id = v_player.id;
-  if v_room.starting_player_id = v_player.user_id then
-    update public.rooms set starting_player_id = null where id = p_room_id;
-  end if;
-  if v_room.status = 'playing' and v_room.current_turn = auth.uid() then
-    select count(*) into v_player_count from public.room_players where room_id = p_room_id;
-    if v_player_count = 0 then
-      update public.rooms set status = 'finished', current_turn = null, rolls_remaining = 0 where id = p_room_id;
-    else
-      v_order := v_player.turn_order;
-      for v_step in 1..greatest(v_player_count * 4, 4) loop
-        select * into v_next from public.room_players
-        where room_id = p_room_id and turn_order > v_order order by turn_order limit 1;
-        if not found then
-          select * into v_next from public.room_players where room_id = p_room_id order by turn_order limit 1;
-        end if;
-        if v_next.id is null then exit; end if;
-        if v_next.skip_turns > 0 then
-          update public.room_players set skip_turns = skip_turns - 1 where id = v_next.id;
-          insert into public.game_events(room_id, message) values (p_room_id, v_next.nickname || ' 跳过 1 次行动');
-          v_order := v_next.turn_order;
-        else
-          v_next_rolls := greatest(1, least(6, v_room.rolls_per_turn + v_next.next_roll_modifier));
-          update public.room_players set next_roll_modifier = 0 where id = v_next.id;
-          update public.rooms set current_turn = v_next.user_id, rolls_remaining = v_next_rolls where id = p_room_id;
-          v_next_found := true;
-          exit;
-        end if;
-      end loop;
-      if not v_next_found then raise exception '无法确定下一位行动玩家'; end if;
-    end if;
-  end if;
-  insert into public.game_events(room_id, message) values (p_room_id, v_player.nickname || ' 离开了房间');
+  select nickname into v_nickname from public.room_players
+  where room_id = p_room_id and user_id = auth.uid();
+  if v_nickname is null then return; end if;
+  insert into public.game_events(room_id, message)
+  values (p_room_id, v_nickname || ' 暂时离开了房间，席位已保留');
 end;
 $$;
 
