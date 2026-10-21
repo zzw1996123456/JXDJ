@@ -3671,6 +3671,8 @@ body::after {
 .admin-room-list > *,
 .admin-room-detail > * { position: relative; z-index: 1; }
 
+.admin-room-detail > .admin-detail-header { z-index: 20; }
+
 .mode-grid { gap: 14px; }
 
 .mode-card {
