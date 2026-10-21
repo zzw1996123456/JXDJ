@@ -276,6 +276,63 @@ function availableEffects(round: GameRound, finalRound: GameRound) {
     : effect !== 'finish')
 }
 
+function buildMovementPath(
+  tiles: RoomTile[],
+  edges: RoomTileEdge[],
+  startPosition: number,
+  steps: number,
+  landingPosition: number,
+  finalPosition: number,
+) {
+  if (tiles.length === 0 || steps < 1) return []
+  const tileById = new Map(tiles.map((tile) => [tile.id, tile]))
+  const startTile = tiles.find((tile) => tile.position === startPosition)
+  const landingTile = tiles.find((tile) => tile.position === landingPosition)
+  if (!startTile || !landingTile) return []
+  const landingTileId = landingTile.id
+
+  const adjacency = new Map<string, string[]>()
+  for (const edge of edges) {
+    adjacency.set(edge.from_tile_id, [...(adjacency.get(edge.from_tile_id) ?? []), edge.to_tile_id])
+    if (edge.is_bidirectional) adjacency.set(edge.to_tile_id, [...(adjacency.get(edge.to_tile_id) ?? []), edge.from_tile_id])
+  }
+
+  const pathCache = new Map<string, string[] | null>()
+  function findPath(tileId: string, remaining: number): string[] | null {
+    const cacheKey = `${tileId}:${remaining}`
+    if (pathCache.has(cacheKey)) return pathCache.get(cacheKey) ?? null
+    if (remaining === 0) {
+      const result = tileId === landingTileId ? [tileId] : null
+      pathCache.set(cacheKey, result)
+      return result
+    }
+    for (const nextTileId of adjacency.get(tileId) ?? []) {
+      if (!tileById.has(nextTileId)) continue
+      const suffix = findPath(nextTileId, remaining - 1)
+      if (suffix) {
+        const result = [tileId, ...suffix]
+        pathCache.set(cacheKey, result)
+        return result
+      }
+    }
+    pathCache.set(cacheKey, null)
+    return null
+  }
+
+  const matched = findPath(startTile.id, steps)
+  const path = matched
+    ? matched.slice(1).flatMap((tileId) => tileById.get(tileId)?.position ?? [])
+    : Array.from({ length: steps }, (_, index) => (startPosition + index + 1) % tiles.length)
+
+  if (landingTile.effect_type === 'move' && finalPosition !== landingPosition) {
+    const direction = landingTile.effect_value >= 0 ? 1 : -1
+    for (let step = 1; step <= Math.abs(landingTile.effect_value); step += 1) {
+      path.push((landingPosition + direction * step + tiles.length * 2) % tiles.length)
+    }
+  }
+  return path
+}
+
 function formatError(error: unknown) {
   if (error instanceof Error) return error.message
   if (typeof error === 'object' && error && 'message' in error) return String(error.message)
@@ -548,9 +605,9 @@ function MonopolyEntry({
   )
 }
 
-function PlayerAvatar({ player, index }: { player: Player; index: number }) {
+function PlayerAvatar({ player, index, className = '' }: { player: Player; index: number; className?: string }) {
   return (
-    <span className="player-avatar" style={{ '--player-color': PLAYER_COLORS[index % PLAYER_COLORS.length] } as React.CSSProperties}>
+    <span className={`player-avatar ${className}`.trim()} style={{ '--player-color': PLAYER_COLORS[index % PLAYER_COLORS.length] } as React.CSSProperties}>
       {player.nickname.slice(0, 1).toUpperCase()}
     </span>
   )
@@ -2568,6 +2625,8 @@ const Board = memo(function Board({
   selectedTileId,
   onTileSelect,
   onTileMove,
+  movementEvent,
+  onMovementStateChange,
 }: {
   players: Player[]
   room: Room
@@ -2578,9 +2637,11 @@ const Board = memo(function Board({
   selectedTileId?: string | null
   onTileSelect?: (tile: RoomTile) => void
   onTileMove?: (tile: RoomTile, x: number, y: number) => void
+  movementEvent?: GameEvent
+  onMovementStateChange?: (moving: boolean) => void
 }) {
-  const tiles = getRoundTiles(allTiles, displayRound)
-  const edges = allEdges.filter((edge) => edge.round_number === displayRound)
+  const tiles = useMemo(() => getRoundTiles(allTiles, displayRound), [allTiles, displayRound])
+  const edges = useMemo(() => allEdges.filter((edge) => edge.round_number === displayRound), [allEdges, displayRound])
   const bounds = getRoomBoardBounds(tiles)
   const stageRef = useRef<HTMLDivElement>(null)
   const boardRef = useRef<HTMLDivElement>(null)
@@ -2603,7 +2664,15 @@ const Board = memo(function Board({
   const zoomLabelRef = useRef<HTMLSpanElement>(null)
   const zoomOutButtonRef = useRef<HTMLButtonElement>(null)
   const zoomInButtonRef = useRef<HTMLButtonElement>(null)
+  const targetPlayersRef = useRef(new Map(players.map((player) => [player.id, player])))
+  const visualPositionsRef = useRef<Record<string, number>>(Object.fromEntries(players.map((player) => [player.id, player.position])))
+  const movementTimerRef = useRef<number | null>(null)
+  const movementTokenRef = useRef(0)
+  const displayRoundRef = useRef(displayRound)
   const [isDragging, setIsDragging] = useState(false)
+  const [visualPositions, setVisualPositions] = useState<Record<string, number>>(visualPositionsRef.current)
+  const [movingPlayerId, setMovingPlayerId] = useState<string | null>(null)
+  const [activeStepPosition, setActiveStepPosition] = useState<number | null>(null)
 
   const tileCanvasPositions = useMemo(() => new Map(tiles.map((tile, index) => [
     tile.id,
@@ -2699,17 +2768,17 @@ const Board = memo(function Board({
   }, [applyBoardView, bounds.height, bounds.minX, bounds.minY, bounds.width])
 
   useEffect(() => {
-    const frame = window.requestAnimationFrame(resetBoardView)
+    const frame = window.requestAnimationFrame(fitBoardView)
     return () => window.cancelAnimationFrame(frame)
-  }, [displayRound, tiles.length])
+  }, [displayRound, fitBoardView, tiles.length])
 
   useEffect(() => {
     const stage = stageRef.current
     if (!stage || typeof ResizeObserver === 'undefined') return
-    const observer = new ResizeObserver(() => applyBoardView(viewRef.current, true))
+    const observer = new ResizeObserver(fitBoardView)
     observer.observe(stage)
     return () => observer.disconnect()
-  }, [applyBoardView])
+  }, [fitBoardView])
 
   useEffect(() => {
     const stage = stageRef.current
@@ -2726,7 +2795,99 @@ const Board = memo(function Board({
   useEffect(() => () => {
     const drag = tileDragRef.current
     if (drag?.frame !== null && drag?.frame !== undefined) window.cancelAnimationFrame(drag.frame)
+    movementTokenRef.current += 1
+    if (movementTimerRef.current !== null) window.clearTimeout(movementTimerRef.current)
+    onMovementStateChange?.(false)
   }, [])
+
+  useEffect(() => {
+    const previousPlayers = targetPlayersRef.current
+    const nextPlayers = new Map(players.map((player) => [player.id, player]))
+    targetPlayersRef.current = nextPlayers
+
+    if (displayRoundRef.current !== displayRound) {
+      displayRoundRef.current = displayRound
+      movementTokenRef.current += 1
+      if (movementTimerRef.current !== null) window.clearTimeout(movementTimerRef.current)
+      movementTimerRef.current = null
+      const nextPositions = Object.fromEntries(players.map((player) => [player.id, player.position]))
+      visualPositionsRef.current = nextPositions
+      setVisualPositions(nextPositions)
+      setMovingPlayerId(null)
+      setActiveStepPosition(null)
+      onMovementStateChange?.(false)
+      return
+    }
+
+    const eventPlayer = movementEvent?.metadata?.round === displayRound
+      ? players.find((player) => player.id === movementEvent.metadata?.player_id)
+      : undefined
+    const changedPlayer = room.current_round !== displayRound && eventPlayer
+      ? eventPlayer
+      : players.find((player) => previousPlayers.get(player.id)?.distance !== player.distance)
+        ?? players.find((player) => previousPlayers.get(player.id)?.position !== player.position)
+    if (!changedPlayer || previousPlayers.size === 0) {
+      if (movementTimerRef.current === null) {
+        const nextPositions = Object.fromEntries(players.map((player) => [player.id, player.position]))
+        visualPositionsRef.current = nextPositions
+        setVisualPositions(nextPositions)
+      }
+      return
+    }
+
+    const previous = previousPlayers.get(changedPlayer.id)
+    if (!previous) return
+    const eventMatches = movementEvent?.metadata?.player_id === changedPlayer.id
+      && movementEvent.metadata.round === displayRound
+    const steps = eventMatches && movementEvent?.metadata?.dice
+      ? movementEvent.metadata.dice
+      : Math.max(1, Math.min(12, Math.abs(changedPlayer.distance - previous.distance)))
+    const landingPosition = eventMatches && movementEvent?.metadata?.landed_position !== undefined
+      ? movementEvent.metadata.landed_position
+      : changedPlayer.position
+    const path = buildMovementPath(tiles, edges, previous.position, steps, landingPosition, changedPlayer.position)
+    if (path.length === 0) {
+      const nextPositions = { ...visualPositionsRef.current, [changedPlayer.id]: changedPlayer.position }
+      visualPositionsRef.current = nextPositions
+      setVisualPositions(nextPositions)
+      return
+    }
+
+    movementTokenRef.current += 1
+    const token = movementTokenRef.current
+    if (movementTimerRef.current !== null) window.clearTimeout(movementTimerRef.current)
+    movementTimerRef.current = null
+    setMovingPlayerId(changedPlayer.id)
+    onMovementStateChange?.(true)
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    const stepDuration = reducedMotion ? 30 : 300
+    let index = 0
+
+    const playStep = () => {
+      if (movementTokenRef.current !== token) return
+      const position = path[index]
+      const nextPositions = { ...visualPositionsRef.current, [changedPlayer.id]: position }
+      visualPositionsRef.current = nextPositions
+      setVisualPositions(nextPositions)
+      setActiveStepPosition(position)
+      index += 1
+      if (index < path.length) {
+        movementTimerRef.current = window.setTimeout(playStep, stepDuration)
+        return
+      }
+      movementTimerRef.current = window.setTimeout(() => {
+        if (movementTokenRef.current !== token) return
+        movementTimerRef.current = null
+        const finalPositions = Object.fromEntries(players.map((player) => [player.id, player.position]))
+        visualPositionsRef.current = finalPositions
+        setVisualPositions(finalPositions)
+        setMovingPlayerId(null)
+        setActiveStepPosition(null)
+        onMovementStateChange?.(false)
+      }, reducedMotion ? 10 : 340)
+    }
+    playStep()
+  }, [displayRound, edges, movementEvent, onMovementStateChange, players, tiles])
 
   function startBoardDrag(event: React.PointerEvent<HTMLDivElement>) {
     if (event.button !== 0) return
@@ -2900,7 +3061,7 @@ const Board = memo(function Board({
           {tiles.map((tile, index) => {
             const playersHere = players
               .map((player, playerIndex) => ({ player, playerIndex }))
-              .filter(({ player }) => player.position === tile.position)
+              .filter(({ player }) => (visualPositions[player.id] ?? player.position) === tile.position)
             const tileContent = (
               <>
                 {tile.image_url && <><img alt="" className="tile-image" decoding="async" draggable={false} src={tile.image_url} /><span className="tile-image-shade" /></>}
@@ -2910,12 +3071,12 @@ const Board = memo(function Board({
                 <small>{tile.detail}</small>
                 <div className="tile-players">
                   {playersHere.map(({ player, playerIndex }) => (
-                    <PlayerAvatar index={playerIndex} key={player.id} player={player} />
+                    <PlayerAvatar className={movingPlayerId === player.id ? 'player-avatar-moving' : ''} index={playerIndex} key={player.id} player={player} />
                   ))}
                 </div>
               </>
             )
-            const tileClassName = `tile tile-${tile.tile_type} ${selectedTileId === tile.id ? 'selected' : ''}`.trim()
+            const tileClassName = `tile tile-${tile.tile_type} ${selectedTileId === tile.id ? 'selected' : ''} ${activeStepPosition === tile.position ? 'tile-step-active' : ''}`.trim()
             const canvasPosition = getRoomTileCanvasPosition(tile, index, tiles.length)
             const positionStyle = { left: canvasPosition.x, top: canvasPosition.y, ...tileColorStyle(tile) }
             return onTileSelect ? (
@@ -2967,6 +3128,8 @@ function GameView({
   onRestart: () => void
   onExit: () => void
 }) {
+  const [isAnimatingMove, setIsAnimatingMove] = useState(false)
+  const [boardRound, setBoardRound] = useState(snapshot.room.current_round)
   const currentPlayer = snapshot.players.find((player) => player.user_id === snapshot.room.current_turn)
   const ownPlayer = snapshot.players.find((player) => player.user_id === snapshot.userId)
   const winner = snapshot.players.find((player) => player.user_id === snapshot.room.winner_id)
@@ -2974,6 +3137,18 @@ function GameView({
   const waitingForDice = snapshot.room.status === 'playing' && snapshot.room.current_turn === null
   const routePending = snapshot.room.pending_player_id !== null
   const isChoosingRoute = snapshot.room.pending_player_id === snapshot.userId
+  const latestMovementEvent = snapshot.events.find((event) => event.event_type === 'roll' && event.metadata?.player_id)
+  const boardTileCount = getRoundTiles(snapshot.tiles, boardRound).length
+  const handleMovementStateChange = useCallback((moving: boolean) => {
+    setIsAnimatingMove(moving)
+    if (!moving) setBoardRound(snapshot.room.current_round)
+  }, [snapshot.room.current_round])
+
+  useEffect(() => {
+    if (boardRound === snapshot.room.current_round || isAnimatingMove) return
+    const canAnimatePreviousRound = latestMovementEvent?.metadata?.round === boardRound
+    if (!canAnimatePreviousRound) setBoardRound(snapshot.room.current_round)
+  }, [boardRound, isAnimatingMove, latestMovementEvent, snapshot.room.current_round])
   const sortedPlayers = useMemo(
     () => [...snapshot.players].sort((a, b) => b.distance - a.distance || a.turn_order - b.turn_order),
     [snapshot.players],
@@ -2989,9 +3164,9 @@ function GameView({
               <span className={`turn-indicator ${isMyTurn && !snapshot.room.is_paused ? 'active' : ''}`} />
               <p>{snapshot.room.is_paused ? '本局已暂停' : snapshot.room.status === 'finished' ? '行动结束' : waitingForDice ? snapshot.isDemo ? '试玩骰子已用完' : '等待管理员补充骰子' : isMyTurn ? '轮到你行动' : `等待 ${currentPlayer?.nickname ?? '队员'}`}</p>
             </div>
-            <span>{roundLabel(snapshot.room.current_round)} · {snapshot.room.board_size} 格 · 当前骰子 {ownPlayer?.dice_count ?? 0} 个</span>
+            <span>{roundLabel(boardRound)} · {boardTileCount} 格 · 当前骰子 {ownPlayer?.dice_count ?? 0} 个</span>
           </div>
-          <Board edges={snapshot.edges} players={snapshot.players} room={snapshot.room} tiles={snapshot.tiles} />
+          <Board displayRound={boardRound} edges={snapshot.edges} movementEvent={latestMovementEvent} onMovementStateChange={handleMovementStateChange} players={snapshot.players} room={snapshot.room} tiles={snapshot.tiles} />
           {routePending && (
             <section className="route-choice-panel" aria-live="polite">
               <div><Route size={19} /><strong>{isChoosingRoute ? `骰子为 ${snapshot.room.pending_dice}，请选择路线` : `等待 ${currentPlayer?.nickname ?? '当前玩家'} 选择路线`}</strong></div>
@@ -3002,7 +3177,7 @@ function GameView({
                     const tile = snapshot.tiles.find((item) => item.id === tileId)
                     return tile ? String(tile.position + 1) : '?'
                   }).join(' → ')
-                  return <button disabled={busy} key={`${option.tile_id}-${index}`} onClick={() => onChooseRoute(option)} type="button"><span>路线 {index + 1}</span><strong>前往第 {option.position + 1} 格 · {destination?.short_name ?? '未知格'}</strong><small>{pathLabels}</small></button>
+                  return <button disabled={busy || isAnimatingMove} key={`${option.tile_id}-${index}`} onClick={() => onChooseRoute(option)} type="button"><span>路线 {index + 1}</span><strong>前往第 {option.position + 1} 格 · {destination?.short_name ?? '未知格'}</strong><small>{pathLabels}</small></button>
                 })}
               </div>}
             </section>
@@ -3015,7 +3190,7 @@ function GameView({
               {dice ?? <Dice5 size={34} />}
             </div>
             <div className="dice-actions">
-              <button className="button primary roll-button" disabled={busy || routePending || snapshot.room.is_paused || !isMyTurn || snapshot.room.status !== 'playing' || (ownPlayer?.dice_count ?? 0) <= 0} onClick={onRoll} type="button">
+              <button className="button primary roll-button" disabled={busy || isAnimatingMove || routePending || snapshot.room.is_paused || !isMyTurn || snapshot.room.status !== 'playing' || (ownPlayer?.dice_count ?? 0) <= 0} onClick={onRoll} type="button">
                 {busy ? <LoaderCircle className="spin" size={19} /> : <Dice5 size={19} />}
                 <span>{snapshot.room.is_paused ? '等待管理员继续' : waitingForDice ? '等待补充骰子' : isMyTurn ? `掷骰行动 · 剩余 ${ownPlayer?.dice_count ?? 0}` : '等待回合'}</span>
               </button>

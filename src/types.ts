@@ -112,10 +112,12 @@ export interface GameEvent {
   message: string
   event_type?: 'system' | 'roll' | 'settlement_rule'
   metadata?: {
+    player_id?: string
     player_name?: string
     role?: PlayerRole
     round?: number
     dice?: number
+    landed_position?: number
     tile_name?: string
     tile_detail?: string
     tile_type?: TileType

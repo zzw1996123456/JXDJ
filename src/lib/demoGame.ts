@@ -7,8 +7,8 @@ function now() {
   return new Date().toISOString()
 }
 
-function event(roomId: string, message: string): GameEvent {
-  return { id: crypto.randomUUID(), room_id: roomId, message, created_at: now() }
+function event(roomId: string, message: string, metadata?: GameEvent['metadata'], eventType?: GameEvent['event_type']): GameEvent {
+  return { id: crypto.randomUUID(), room_id: roomId, message, event_type: eventType, metadata, created_at: now() }
 }
 
 export function createDemoRoom(nickname: string, role: PlayerRole): GameSnapshot {
@@ -169,7 +169,24 @@ export function resolveDemoDice(snapshot: GameSnapshot, dice: number): { snapsho
     dice_count: rollsRemaining,
     round_roll_count: current.round_roll_count + 1,
   }
-  addedEvents.push(event(snapshot.room.id, `${player.nickname} 掷出 ${dice}，落到「${tile.name}」：${tile.detail}`))
+  addedEvents.push(event(
+    snapshot.room.id,
+    `${player.nickname} 掷出 ${dice}，落到「${tile.name}」：${tile.detail}`,
+    {
+      player_id: player.id,
+      player_name: player.nickname,
+      role: player.role,
+      round,
+      dice,
+      landed_position: landedPosition,
+      tile_name: tile.name,
+      tile_detail: tile.detail,
+      tile_type: tile.tile_type,
+      effect_type: tile.effect_type,
+      effect_value: tile.effect_value,
+    },
+    'roll',
+  ))
   if (tile.effect_type === 'move') {
     addedEvents.unshift(event(snapshot.room.id, `${player.nickname} ${tile.effect_value > 0 ? '前进' : '后退'} ${Math.abs(tile.effect_value)} 格，到达第 ${position + 1} 格`))
   }
