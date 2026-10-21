@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { BOARD_LAYOUT_PRESETS, BOARD_TILE_STEP_X, BOARD_TILE_STEP_Y, createBoardLayout, createDefaultTileEdges, createRandomRoomTiles, getBoardDimensions, getBoardGridPosition, getRoomBoardBounds, getRoomBoardDimensions, getRoomTileCanvasPosition, getRoomTileGridPosition, gridPointToCanvas, RULE_TEMPLATES, usesDenseBoardLayout } from '../src/lib/board'
+import { BOARD_LAYOUT_PRESETS, BOARD_TILE_STEP_X, BOARD_TILE_STEP_Y, createBoardLayout, createDefaultTileEdges, createRandomRoomTiles, getBoardDimensions, getBoardGridPosition, getRoomBoardBounds, getRoomBoardDimensions, getRoomTileCanvasPosition, getRoomTileGridPosition, gridPointToCanvas, RULE_TEMPLATES, snapBoardTilePosition, usesDenseBoardLayout } from '../src/lib/board'
 import { chooseDemoDice, createDemoRoom, resolveDemoDice, startDemoGame } from '../src/lib/demoGame'
 import type { GameRound, RoomTile, TileEffect } from '../src/types'
 
@@ -330,4 +330,26 @@ for (const preset of BOARD_LAYOUT_PRESETS) {
   assert.ok(canvasPoints.every((point) => point.x % BOARD_TILE_STEP_X === 0 && point.y % BOARD_TILE_STEP_Y === 0), `${preset.name}必须转换为稳定的像素间距`)
 }
 
-console.log('效果回归测试通过：落格效果、分轮规则、无限画布、5 种自适应预设与默认路线图')
+const snapAnchor = { x: 100, y: 100 }
+assert.deepEqual(
+  snapBoardTilePosition({ x: 100 + BOARD_TILE_STEP_X - 7, y: 106 }, [snapAnchor]),
+  { x: 100 + BOARD_TILE_STEP_X, y: 100, snappedX: true, snappedY: true },
+  '靠近格子右侧时必须吸附到标准间距并对齐',
+)
+assert.deepEqual(
+  snapBoardTilePosition({ x: 93, y: 400 }, [snapAnchor]),
+  { x: 100, y: 400, snappedX: true, snappedY: false },
+  '远距离同列排布只应吸附横坐标',
+)
+assert.deepEqual(
+  snapBoardTilePosition({ x: 420, y: 108 }, [snapAnchor]),
+  { x: 420, y: 100, snappedX: false, snappedY: true },
+  '远距离同行排布只应吸附纵坐标',
+)
+assert.deepEqual(
+  snapBoardTilePosition({ x: 100 + BOARD_TILE_STEP_X - 14, y: 115 }, [snapAnchor]),
+  { x: 100 + BOARD_TILE_STEP_X - 14, y: 115, snappedX: false, snappedY: false },
+  '超出轻量吸附范围后必须保持自由坐标',
+)
+
+console.log('效果回归测试通过：落格效果、分轮规则、无限画布、轻量磁吸、5 种自适应预设与默认路线图')

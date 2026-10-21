@@ -45,6 +45,7 @@ import {
 } from 'lucide-react'
 import {
   BOARD_LAYOUT_PRESETS,
+  BOARD_TILE_SNAP_DISTANCE,
   BOARD_TILE_HEIGHT,
   BOARD_TILE_WIDTH,
   createBoardLayout,
@@ -54,6 +55,7 @@ import {
   gridPointToCanvas,
   getRoundTiles,
   PLAYER_COLORS,
+  snapBoardTilePosition,
   TILE_TYPE_LABELS,
 } from './lib/board'
 import type { BoardCanvasPoint, BoardLayoutPresetId } from './lib/board'
@@ -2213,13 +2215,18 @@ const Board = memo(function Board({
   const zoomInButtonRef = useRef<HTMLButtonElement>(null)
   const [isDragging, setIsDragging] = useState(false)
 
-  const tilePositions = useMemo(() => new Map(tiles.map((tile, index) => {
-    const point = getRoomTileCanvasPosition(tile, index, tiles.length)
+  const tileCanvasPositions = useMemo(() => new Map(tiles.map((tile, index) => [
+    tile.id,
+    getRoomTileCanvasPosition(tile, index, tiles.length),
+  ])), [tiles])
+
+  const tilePositions = useMemo(() => new Map(tiles.map((tile) => {
+    const point = tileCanvasPositions.get(tile.id)!
     return [tile.id, {
       x: point.x + BOARD_TILE_WIDTH / 2,
       y: point.y + BOARD_TILE_HEIGHT / 2,
     }]
-  })), [tiles])
+  })), [tileCanvasPositions, tiles])
 
   const edgeLines = useMemo(() => edges.flatMap((edge) => {
     const from = tilePositions.get(edge.from_tile_id)
@@ -2389,6 +2396,26 @@ const Board = memo(function Board({
     event.currentTarget.setPointerCapture(event.pointerId)
   }
 
+  function resolveTileDragPosition(
+    tileId: string,
+    originX: number,
+    originY: number,
+    startX: number,
+    startY: number,
+    clientX: number,
+    clientY: number,
+  ) {
+    const position = {
+      x: originX + (clientX - startX) / viewRef.current.scale,
+      y: originY + (clientY - startY) / viewRef.current.scale,
+    }
+    const otherPositions = [...tileCanvasPositions.entries()]
+      .filter(([candidateId]) => candidateId !== tileId)
+      .map(([, point]) => point)
+    const threshold = Math.min(18, BOARD_TILE_SNAP_DISTANCE / viewRef.current.scale)
+    return snapBoardTilePosition(position, otherPositions, threshold)
+  }
+
   function moveTileDrag(event: React.PointerEvent<HTMLButtonElement>) {
     const drag = tileDragRef.current
     if (!drag || drag.pointerId !== event.pointerId) return
@@ -2403,9 +2430,9 @@ const Board = memo(function Board({
     if (!drag.moved || drag.frame !== null) return
     drag.frame = window.requestAnimationFrame(() => {
       drag.frame = null
-      const deltaX = (drag.latestX - drag.startX) / viewRef.current.scale
-      const deltaY = (drag.latestY - drag.startY) / viewRef.current.scale
-      drag.element.style.transform = `translate3d(${deltaX}px, ${deltaY}px, 0)`
+      const next = resolveTileDragPosition(drag.tile.id, drag.originX, drag.originY, drag.startX, drag.startY, drag.latestX, drag.latestY)
+      drag.element.classList.toggle('tile-snapped', next.snappedX || next.snappedY)
+      drag.element.style.transform = `translate3d(${next.x - drag.originX}px, ${next.y - drag.originY}px, 0)`
     })
   }
 
@@ -2420,13 +2447,13 @@ const Board = memo(function Board({
     }
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
     if (!drag.moved || !onTileMove) return
-    const deltaX = (event.clientX - drag.startX) / viewRef.current.scale
-    const deltaY = (event.clientY - drag.startY) / viewRef.current.scale
-    const nextX = Math.round((drag.originX + deltaX) * 10) / 10
-    const nextY = Math.round((drag.originY + deltaY) * 10) / 10
+    const next = resolveTileDragPosition(drag.tile.id, drag.originX, drag.originY, drag.startX, drag.startY, event.clientX, event.clientY)
+    const nextX = Math.round(next.x * 10) / 10
+    const nextY = Math.round(next.y * 10) / 10
     onTileMove(drag.tile, nextX, nextY)
     window.requestAnimationFrame(() => {
       drag.element.classList.remove('tile-dragging')
+      drag.element.classList.remove('tile-snapped')
       drag.element.style.transform = ''
     })
     window.setTimeout(() => { suppressTileClickRef.current = false }, 0)
@@ -2439,6 +2466,7 @@ const Board = memo(function Board({
     tileDragRef.current = null
     if (drag.frame !== null) window.cancelAnimationFrame(drag.frame)
     drag.element.classList.remove('tile-dragging')
+    drag.element.classList.remove('tile-snapped')
     drag.element.style.transform = ''
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
     suppressTileClickRef.current = true

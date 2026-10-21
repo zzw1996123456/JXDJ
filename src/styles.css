@@ -1593,6 +1593,11 @@ button.mode-card {
   will-change: transform;
 }
 
+.admin-board .tile.tile-dragging.tile-snapped {
+  outline-color: var(--acid);
+  box-shadow: 0 0 0 3px rgba(219, 255, 75, 0.18), 0 12px 28px rgba(0, 0, 0, 0.42);
+}
+
 .admin-board .tile:focus-visible {
   z-index: 3;
   outline: 2px solid var(--cyan);

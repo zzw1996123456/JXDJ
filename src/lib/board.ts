@@ -208,6 +208,61 @@ export const BOARD_TILE_HEIGHT = 92
 export const BOARD_TILE_GAP = 30
 export const BOARD_TILE_STEP_X = BOARD_TILE_WIDTH + BOARD_TILE_GAP
 export const BOARD_TILE_STEP_Y = BOARD_TILE_HEIGHT + BOARD_TILE_GAP
+export const BOARD_TILE_SNAP_DISTANCE = 10
+
+export interface BoardSnapResult extends BoardCanvasPoint {
+  snappedX: boolean
+  snappedY: boolean
+}
+
+export function snapBoardTilePosition(
+  position: BoardCanvasPoint,
+  otherPositions: BoardCanvasPoint[],
+  threshold = BOARD_TILE_SNAP_DISTANCE,
+): BoardSnapResult {
+  const limit = Math.max(0, threshold)
+  let adjacent: { x: number; y: number; distance: number } | null = null
+
+  for (const other of otherPositions) {
+    const anchors = [
+      { x: other.x - BOARD_TILE_STEP_X, y: other.y },
+      { x: other.x + BOARD_TILE_STEP_X, y: other.y },
+      { x: other.x, y: other.y - BOARD_TILE_STEP_Y },
+      { x: other.x, y: other.y + BOARD_TILE_STEP_Y },
+    ]
+    for (const anchor of anchors) {
+      const distance = Math.max(Math.abs(position.x - anchor.x), Math.abs(position.y - anchor.y))
+      if (distance <= limit && (!adjacent || distance < adjacent.distance)) adjacent = { ...anchor, distance }
+    }
+  }
+
+  if (adjacent) return { x: adjacent.x, y: adjacent.y, snappedX: true, snappedY: true }
+
+  let snappedX = position.x
+  let snappedY = position.y
+  let xDistance = limit + 1
+  let yDistance = limit + 1
+
+  for (const other of otherPositions) {
+    const horizontalDistance = Math.abs(position.x - other.x)
+    const verticalDistance = Math.abs(position.y - other.y)
+    if (verticalDistance >= BOARD_TILE_HEIGHT && horizontalDistance <= limit && horizontalDistance < xDistance) {
+      snappedX = other.x
+      xDistance = horizontalDistance
+    }
+    if (horizontalDistance >= BOARD_TILE_WIDTH && verticalDistance <= limit && verticalDistance < yDistance) {
+      snappedY = other.y
+      yDistance = verticalDistance
+    }
+  }
+
+  return {
+    x: snappedX,
+    y: snappedY,
+    snappedX: xDistance <= limit,
+    snappedY: yDistance <= limit,
+  }
+}
 
 export interface BoardLayoutPreset {
   id: BoardLayoutPresetId
