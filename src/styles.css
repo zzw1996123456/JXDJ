@@ -4830,14 +4830,19 @@ body * {
   height: 112px;
   position: absolute;
   inset: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: 2px;
+  background: #dce9e2;
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 24%), inset 0 12px 20px rgb(255 255 255 / 12%), inset 0 -14px 22px rgb(44 78 67 / 10%);
 }
 
-.dice-cube-face.face-front { transform: rotateY(0deg) translateZ(56px); }
-.dice-cube-face.face-back { transform: rotateY(180deg) translateZ(56px); }
-.dice-cube-face.face-right { transform: rotateY(90deg) translateZ(56px); }
-.dice-cube-face.face-left { transform: rotateY(-90deg) translateZ(56px); }
-.dice-cube-face.face-top { transform: rotateX(90deg) translateZ(56px); }
-.dice-cube-face.face-bottom { transform: rotateX(-90deg) translateZ(56px); }
+.dice-cube-face.face-front { background: #e7f0eb; transform: rotateY(0deg) translateZ(55.8px); }
+.dice-cube-face.face-back { background: #b9cec4; transform: rotateY(180deg) translateZ(55.8px); }
+.dice-cube-face.face-right { background: #c8dcd3; transform: rotateY(90deg) translateZ(55.8px); }
+.dice-cube-face.face-left { background: #d5e4dd; transform: rotateY(-90deg) translateZ(55.8px); }
+.dice-cube-face.face-top { background: #f2f7f4; transform: rotateX(90deg) translateZ(55.8px); }
+.dice-cube-face.face-bottom { background: #abc2b8; transform: rotateX(-90deg) translateZ(55.8px); }
 
 .dice-pips {
   width: 70%;
@@ -4912,14 +4917,14 @@ body * {
 
 @media (max-width: 680px) {
   .dice-cube-scene,
-  .dice-cube,
+  .dice-cube { width: 88px; height: 88px; }
   .dice-cube-face { width: 88px; height: 88px; }
-  .dice-cube-face.face-front { transform: rotateY(0deg) translateZ(44px); }
-  .dice-cube-face.face-back { transform: rotateY(180deg) translateZ(44px); }
-  .dice-cube-face.face-right { transform: rotateY(90deg) translateZ(44px); }
-  .dice-cube-face.face-left { transform: rotateY(-90deg) translateZ(44px); }
-  .dice-cube-face.face-top { transform: rotateX(90deg) translateZ(44px); }
-  .dice-cube-face.face-bottom { transform: rotateX(-90deg) translateZ(44px); }
+  .dice-cube-face.face-front { transform: rotateY(0deg) translateZ(43.8px); }
+  .dice-cube-face.face-back { transform: rotateY(180deg) translateZ(43.8px); }
+  .dice-cube-face.face-right { transform: rotateY(90deg) translateZ(43.8px); }
+  .dice-cube-face.face-left { transform: rotateY(-90deg) translateZ(43.8px); }
+  .dice-cube-face.face-top { transform: rotateX(90deg) translateZ(43.8px); }
+  .dice-cube-face.face-bottom { transform: rotateX(-90deg) translateZ(43.8px); }
   .dice-result-face { width: 98px; height: 98px; }
   .dice-roll-overlay strong { font-size: 36px; }
 }
