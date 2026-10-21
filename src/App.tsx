@@ -27,6 +27,7 @@ import {
   Route,
   RotateCcw,
   Save,
+  Send,
   Settings2,
   Shield,
   Shuffle,
@@ -68,6 +69,7 @@ import type {
   GameEvent,
   GameRound,
   GameSnapshot,
+  GuaranteeRequest,
   GuaranteeEffect,
   Player,
   PlayerRole,
@@ -396,12 +398,13 @@ async function ensureOnlineUser() {
 
 async function fetchSnapshot(roomId: string, userId: string): Promise<GameSnapshot> {
   if (!supabase) throw new Error('尚未配置 Supabase')
-  const [roomResult, playersResult, eventsResult, tilesResult, edgesResult] = await Promise.all([
+  const [roomResult, playersResult, eventsResult, tilesResult, edgesResult, guaranteeRequestsResult] = await Promise.all([
     supabase.from('rooms').select('*').eq('id', roomId).single(),
     supabase.from('room_players').select('*').eq('room_id', roomId).order('turn_order'),
     supabase.from('game_events').select('*').eq('room_id', roomId).order('created_at', { ascending: false }).limit(40),
     supabase.from('room_tiles').select('*').eq('room_id', roomId).order('round_number').order('position'),
     supabase.from('room_tile_edges').select('*').eq('room_id', roomId).order('created_at'),
+    supabase.from('guarantee_requests').select('*').eq('room_id', roomId).order('created_at', { ascending: false }).limit(60),
   ])
 
   if (roomResult.error) throw roomResult.error
@@ -409,6 +412,7 @@ async function fetchSnapshot(roomId: string, userId: string): Promise<GameSnapsh
   if (eventsResult.error) throw eventsResult.error
   if (tilesResult.error) throw tilesResult.error
   if (edgesResult.error) throw edgesResult.error
+  if (guaranteeRequestsResult.error) throw guaranteeRequestsResult.error
 
   return {
     room: roomResult.data as Room,
@@ -416,6 +420,7 @@ async function fetchSnapshot(roomId: string, userId: string): Promise<GameSnapsh
     events: eventsResult.data as GameEvent[],
     tiles: tilesResult.data as RoomTile[],
     edges: edgesResult.data as RoomTileEdge[],
+    guaranteeRequests: guaranteeRequestsResult.data as GuaranteeRequest[],
     userId,
     isDemo: false,
   }
@@ -742,6 +747,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
   const [newRoomName, setNewRoomName] = useState('')
   const [players, setPlayers] = useState<Player[]>([])
   const [events, setEvents] = useState<GameEvent[]>([])
+  const [guaranteeRequests, setGuaranteeRequests] = useState<GuaranteeRequest[]>([])
   const [settlementRules, setSettlementRules] = useState<SettlementRule[]>([])
   const [roomTiles, setRoomTiles] = useState<RoomTile[]>([])
   const [roomEdges, setRoomEdges] = useState<RoomTileEdge[]>([])
@@ -763,6 +769,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
   const [edgeBidirectional, setEdgeBidirectional] = useState(false)
   const [diceDrafts, setDiceDrafts] = useState<Record<string, string>>({})
   const [guaranteeDrafts, setGuaranteeDrafts] = useState<Record<string, string>>({})
+  const [baseGuaranteeDrafts, setBaseGuaranteeDrafts] = useState<Record<string, string>>({})
   const [suffixDrafts, setSuffixDrafts] = useState<Record<number, string>>({})
   const [configNotice, setConfigNotice] = useState('')
   const configInputRef = useRef<HTMLInputElement>(null)
@@ -788,6 +795,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
   const selectedRoom = rooms.find((room) => room.id === selectedRoomId) ?? null
   const selectedPlayers = players.filter((player) => player.room_id === selectedRoomId)
   const selectedEvents = events.filter((event) => event.room_id === selectedRoomId)
+  const selectedGuaranteeRequests = guaranteeRequests.filter((request) => request.room_id === selectedRoomId)
   const selectedSettlementRules = settlementRules
     .filter((rule) => rule.room_id === selectedRoomId)
     .sort((left, right) => left.sequence_number - right.sequence_number)
@@ -894,6 +902,13 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
     setEvents(allEvents)
   }, [])
 
+  const loadGuaranteeRequests = useCallback(async (roomId: string) => {
+    if (!supabase) return
+    const { data, error: requestError } = await supabase.from('guarantee_requests').select('*').eq('room_id', roomId).order('created_at', { ascending: false }).limit(200)
+    if (requestError) throw requestError
+    setGuaranteeRequests(data as GuaranteeRequest[])
+  }, [])
+
   const loadSettlementRules = useCallback(async (roomId: string) => {
     if (!supabase) return
     const { data, error: rulesError } = await supabase
@@ -955,6 +970,9 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'game_events' }, () => {
         if (selectedRoomId) void loadRoomEvents(selectedRoomId)
       })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'guarantee_requests' }, () => {
+        if (selectedRoomId) void loadGuaranteeRequests(selectedRoomId)
+      })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'room_tiles' }, (payload) => {
         if (!selectedRoomId) return
         if (payload.eventType === 'UPDATE') {
@@ -995,20 +1013,21 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       }
       void client.removeChannel(channel)
     }
-  }, [applyPendingTileState, authorized, loadDashboard, loadRoomEdges, loadRoomEvents, loadRoomTiles, loadSettlementRules, loadTileImages, selectedRoomId])
+  }, [applyPendingTileState, authorized, loadDashboard, loadGuaranteeRequests, loadRoomEdges, loadRoomEvents, loadRoomTiles, loadSettlementRules, loadTileImages, selectedRoomId])
 
   useEffect(() => {
     if (!authorized) return
     if (!selectedRoomId) {
       setEvents([])
+      setGuaranteeRequests([])
       setSettlementRules([])
       setRoomTiles([])
       setRoomEdges([])
       return
     }
-    void Promise.all([loadRoomEvents(selectedRoomId), loadRoomTiles(selectedRoomId), loadRoomEdges(selectedRoomId), loadTileImages(), loadSettlementRules(selectedRoomId)])
+    void Promise.all([loadRoomEvents(selectedRoomId), loadGuaranteeRequests(selectedRoomId), loadRoomTiles(selectedRoomId), loadRoomEdges(selectedRoomId), loadTileImages(), loadSettlementRules(selectedRoomId)])
       .catch((loadError) => setError(formatError(loadError)))
-  }, [authorized, loadRoomEdges, loadRoomEvents, loadRoomTiles, loadSettlementRules, loadTileImages, selectedRoomId])
+  }, [authorized, loadGuaranteeRequests, loadRoomEdges, loadRoomEvents, loadRoomTiles, loadSettlementRules, loadTileImages, selectedRoomId])
 
   useEffect(() => {
     if (!selectedRoom) return
@@ -1041,6 +1060,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
     setConfigNotice('')
     setDiceDrafts({})
     setGuaranteeDrafts({})
+    setBaseGuaranteeDrafts({})
     setSuffixDrafts({})
     setCropSource((current) => {
       if (current) URL.revokeObjectURL(current.url)
@@ -1617,18 +1637,24 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
     void runAdminAction(async () => {
       if (!supabase) return
       const guarantee = Number(guaranteeDrafts[player.id] ?? player.coins)
-      const maximum = selectedRoom.status === 'lobby' ? 10000 : 1000000
-      if (!Number.isInteger(guarantee) || guarantee < 0 || guarantee > maximum) {
-        throw new Error(`老板保底必须是 0–${maximum} 万的整数`)
+      const baseGuarantee = Number(baseGuaranteeDrafts[player.id] ?? selectedRoom.base_guarantee_balance ?? selectedRoom.base_guarantee)
+      if (!Number.isInteger(guarantee) || guarantee < 0 || guarantee > 100000000 || !Number.isInteger(baseGuarantee) || baseGuarantee < 0 || baseGuarantee > 100000000) {
+        throw new Error('现有保底和基础保底必须是 0–10 亿的整数')
       }
-      const { error: rpcError } = await supabase.rpc('admin_set_boss_guarantee', {
+      const { error: rpcError } = await supabase.rpc('admin_set_boss_guarantees', {
         p_room_id: selectedRoom.id,
-        p_guarantee: guarantee,
+        p_current: guarantee,
+        p_base: baseGuarantee,
       })
       if (rpcError) throw rpcError
       await loadDashboard()
       await loadRoomEvents(selectedRoom.id)
       setGuaranteeDrafts((current) => {
+        const next = { ...current }
+        delete next[player.id]
+        return next
+      })
+      setBaseGuaranteeDrafts((current) => {
         const next = { ...current }
         delete next[player.id]
         return next
@@ -2263,7 +2289,9 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                   <span><small>当前轮次</small><strong>{roundLabel(selectedRoom.current_round)} / 共 {selectedRoom.total_rounds ?? 3} 轮</strong></span>
                   <span><small>玩家</small><strong>{selectedPlayers.length} / 3</strong></span>
                   <span><small>初始骰子</small><strong>{selectedRoom.rolls_per_turn} 个</strong></span>
-                  <span><small>基础保底</small><strong>{selectedRoom.base_guarantee ?? 100} 万</strong></span>
+                  <span><small>配置基础保底</small><strong>{selectedRoom.base_guarantee ?? 100} 万</strong></span>
+                  <span><small>当前基础余额</small><strong>{selectedRoom.base_guarantee_balance ?? selectedRoom.base_guarantee ?? 100} 万</strong></span>
+                  <span><small>待确认申请</small><strong>{selectedGuaranteeRequests.filter((request) => request.status === 'pending').length} 条</strong></span>
                 </div>
 
                 <section className="admin-turn-panel">
@@ -2505,8 +2533,10 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                           {player.role === 'boss' && (
                             <div className="admin-resource-editor">
                               <Shield size={13} />
-                              <input aria-label="老板保底数值" disabled={busy || selectedRoom.status === 'finished'} max={selectedRoom.status === 'lobby' ? 10000 : 1000000} min="0" onChange={(event) => setGuaranteeDrafts((current) => ({ ...current, [player.id]: event.target.value }))} type="number" value={guaranteeDrafts[player.id] ?? String(player.coins)} />
-                              <small>万</small>
+                              <input aria-label="老板现有保底数值" disabled={busy || selectedRoom.status === 'finished'} max="1000000000" min="0" onChange={(event) => setGuaranteeDrafts((current) => ({ ...current, [player.id]: event.target.value }))} step="1" type="number" value={guaranteeDrafts[player.id] ?? String(player.coins)} />
+                              <small>现有</small>
+                              <input aria-label="老板基础保底数值" disabled={busy || selectedRoom.status === 'finished'} max="1000000000" min="0" onChange={(event) => setBaseGuaranteeDrafts((current) => ({ ...current, [player.id]: event.target.value }))} step="1" type="number" value={baseGuaranteeDrafts[player.id] ?? String(selectedRoom.base_guarantee_balance ?? selectedRoom.base_guarantee ?? 0)} />
+                              <small>基础</small>
                               <button aria-label="保存老板保底" disabled={busy || selectedRoom.status === 'finished'} onClick={() => saveBossGuarantee(player)} title="保存保底" type="button"><Save size={14} /></button>
                             </div>
                           )}
@@ -2541,6 +2571,19 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                       </article>
                     ))}
                     {selectedSettlementRules.length === 0 && <p className="admin-empty">全员骰子第一次归零后，这里会自动生成规则。</p>}
+                  </div>
+                </section>
+
+                <section className="admin-event-panel">
+                  <div className="section-title"><p className="kicker">保底申请审计</p><Shield size={18} /></div>
+                  <div className="admin-event-list">
+                    {selectedGuaranteeRequests.map((request) => (
+                      <div className="admin-event-row" key={request.id}>
+                        <time>{new Date(request.created_at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</time>
+                        <p>{request.requester_nickname} · {request.operation === 'add' ? '增加' : '扣减'} {request.amount} 万 · {request.target === 'base' ? '基础保底' : request.target === 'current' ? '现有保底' : '现有→基础自动分配'} · {request.status === 'pending' ? '待老板确认' : request.status === 'approved' ? `已同意（现有 ${request.current_guarantee_after} / 基础 ${request.base_guarantee_after}）` : '已拒绝'}</p>
+                      </div>
+                    ))}
+                    {selectedGuaranteeRequests.length === 0 && <p className="admin-empty">暂无保底申请。</p>}
                   </div>
                 </section>
 
@@ -3256,6 +3299,9 @@ function GameView({
   onAddDemoDice,
   onRestart,
   onExit,
+  onCreateGuaranteeRequest,
+  onApproveGuaranteeRequest,
+  onRejectGuaranteeRequest,
 }: {
   snapshot: GameSnapshot
   busy: boolean
@@ -3265,6 +3311,9 @@ function GameView({
   onAddDemoDice: () => void
   onRestart: () => void
   onExit: () => void
+  onCreateGuaranteeRequest: (operation: 'add' | 'subtract', target: 'current' | 'base' | 'auto', amount: number) => void
+  onApproveGuaranteeRequest: (requestId: string) => void
+  onRejectGuaranteeRequest: (requestId: string) => void
 }) {
   const [isAnimatingMove, setIsAnimatingMove] = useState(false)
   const [boardRound, setBoardRound] = useState(snapshot.room.current_round)
@@ -3291,6 +3340,22 @@ function GameView({
     () => [...snapshot.players].sort((a, b) => b.distance - a.distance || a.turn_order - b.turn_order),
     [snapshot.players],
   )
+  const [requestOperation, setRequestOperation] = useState<'add' | 'subtract'>('subtract')
+  const [requestTarget, setRequestTarget] = useState<'current' | 'base' | 'auto'>('auto')
+  const [requestAmount, setRequestAmount] = useState('')
+  const [activeRequestId, setActiveRequestId] = useState<string | null>(null)
+  const boss = snapshot.players.find((player) => player.role === 'boss')
+  const ownRequests = snapshot.guaranteeRequests.filter((request) => request.requester_user_id === snapshot.userId)
+  const pendingBossRequests = snapshot.guaranteeRequests.filter((request) => request.status === 'pending' && boss?.user_id === snapshot.userId)
+  const activeRequest = snapshot.guaranteeRequests.find((request) => request.id === activeRequestId) ?? pendingBossRequests[0] ?? null
+  const baseBalance = snapshot.room.base_guarantee_balance ?? snapshot.room.base_guarantee ?? 0
+
+  function submitGuaranteeRequest() {
+    const amount = Number(requestAmount)
+    if (!Number.isInteger(amount) || amount <= 0) return
+    onCreateGuaranteeRequest(requestOperation, requestOperation === 'add' && requestTarget === 'auto' ? 'current' : requestTarget, amount)
+    setRequestAmount('')
+  }
 
   return (
     <div className="app-shell game-shell">
@@ -3368,6 +3433,35 @@ function GameView({
             </div>
           </section>
 
+          <section className="guarantee-panel">
+            <div className="section-title"><div><p className="kicker">双保底余额</p><strong>老板实时保底</strong></div><Shield size={18} /></div>
+            <div className="guarantee-balance-grid">
+              <span><small>现有保底</small><strong>{boss?.coins ?? 0}<em>万</em></strong></span>
+              <span><small>基础保底</small><strong>{baseBalance}<em>万</em></strong></span>
+            </div>
+            {ownPlayer?.role === 'runner' && (
+              <div className="guarantee-request-form">
+                <div className="guarantee-form-row">
+                  <select aria-label="保底操作" onChange={(event) => setRequestOperation(event.target.value as 'add' | 'subtract')} value={requestOperation}>
+                    <option value="subtract">申请扣减</option><option value="add">申请增加</option>
+                  </select>
+                  <select aria-label="保底目标" onChange={(event) => setRequestTarget(event.target.value as 'current' | 'base' | 'auto')} value={requestTarget}>
+                    {requestOperation === 'subtract' && <option value="auto">自动：先现有后基础</option>}
+                    <option value="current">现有保底</option><option value="base">基础保底</option>
+                  </select>
+                </div>
+                <div className="guarantee-form-row">
+                  <input aria-label="保底申请数额" inputMode="numeric" min="1" onChange={(event) => setRequestAmount(event.target.value.replace(/[^0-9]/g, ''))} placeholder="输入整数金额" type="text" value={requestAmount} />
+                  <button className="button primary" disabled={busy || !requestAmount || snapshot.room.status === 'finished'} onClick={submitGuaranteeRequest} type="button"><Send size={16} /> 提交申请</button>
+                </div>
+                <div className="guarantee-request-status">
+                  {ownRequests.slice(0, 3).map((request) => <p key={request.id}>{request.operation === 'add' ? '增加' : '扣减'} {request.amount} 万 · {request.status === 'pending' ? '等待老板确认' : request.status === 'approved' ? '老板已同意' : '老板已拒绝，请修改后重提'}</p>)}
+                </div>
+              </div>
+            )}
+            {ownPlayer?.role === 'boss' && pendingBossRequests.length > 0 && <p className="guarantee-request-hint">有 {pendingBossRequests.length} 条保底申请待确认</p>}
+          </section>
+
           <section className="log-panel">
             <div className="section-title">
               <p className="kicker">行动记录</p>
@@ -3396,6 +3490,18 @@ function GameView({
               {snapshot.isDemo && <button className="button primary" onClick={onRestart} type="button"><RotateCcw size={18} /> 再来一局</button>}
               <button className="button secondary" onClick={onExit} type="button"><ArrowLeft size={18} /> 返回房间入口</button>
             </div>
+          </section>
+        </div>
+      )}
+      {activeRequest && ownPlayer?.role === 'boss' && activeRequest.status === 'pending' && (
+        <div className="modal-backdrop" role="presentation">
+          <section aria-labelledby="guarantee-request-title" aria-modal="true" className="winner-dialog guarantee-request-dialog" role="dialog">
+            <span className="winner-icon"><Shield size={30} /></span>
+            <p className="kicker">GUARANTEE REVIEW</p>
+            <h2 id="guarantee-request-title">确认保底申请</h2>
+            <p>{activeRequest.requester_nickname} 申请{activeRequest.operation === 'add' ? '增加' : '扣减'} {activeRequest.amount} 万，{activeRequest.target === 'auto' ? '按现有保底优先、基础保底补足' : activeRequest.target === 'base' ? '操作基础保底' : '操作现有保底'}。</p>
+            <div className="guarantee-review-grid"><span>确认前<small>现有 {activeRequest.current_guarantee_before} · 基础 {activeRequest.base_guarantee_before}</small></span><span>预计变化<small>现有 {activeRequest.current_guarantee_delta >= 0 ? '+' : ''}{activeRequest.current_guarantee_delta} · 基础 {activeRequest.base_guarantee_delta >= 0 ? '+' : ''}{activeRequest.base_guarantee_delta}</small></span><span>确认后<small>现有 {activeRequest.current_guarantee_after} · 基础 {activeRequest.base_guarantee_after}</small></span></div>
+            <div className="winner-actions"><button className="button primary" disabled={busy} onClick={() => { onApproveGuaranteeRequest(activeRequest.id); setActiveRequestId(null) }} type="button"><Check size={17} /> 同意并扣减</button><button className="button secondary" disabled={busy} onClick={() => { onRejectGuaranteeRequest(activeRequest.id); setActiveRequestId(null) }} type="button"><X size={17} /> 不同意</button><button className="button ghost" onClick={() => setActiveRequestId(null)} type="button">稍后处理</button></div>
           </section>
         </div>
       )}
@@ -3497,6 +3603,7 @@ export default function App() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'rooms', filter: `id=eq.${roomId}` }, () => void refreshRoom(roomId, userId))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'room_players', filter: `room_id=eq.${roomId}` }, () => void refreshRoom(roomId, userId))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'game_events', filter: `room_id=eq.${roomId}` }, () => void refreshRoom(roomId, userId))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'guarantee_requests', filter: `room_id=eq.${roomId}` }, () => void refreshRoom(roomId, userId))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'room_tiles', filter: `room_id=eq.${roomId}` }, () => void refreshRoom(roomId, userId))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'room_tile_edges', filter: `room_id=eq.${roomId}` }, () => void refreshRoom(roomId, userId))
       .subscribe()
@@ -3669,6 +3776,44 @@ export default function App() {
     })
   }
 
+  function createGuaranteeRequest(operation: 'add' | 'subtract', target: 'current' | 'base' | 'auto', amount: number) {
+    if (!snapshot || snapshot.isDemo || !supabase) {
+      setError(snapshot?.isDemo ? '试玩模式不支持在线保底申请' : '尚未配置 Supabase')
+      return
+    }
+    const client = supabase
+    void runAction(async () => {
+      const { error: rpcError } = await client.rpc('create_guarantee_request', {
+        p_room_id: snapshot.room.id,
+        p_operation: operation,
+        p_target: target,
+        p_amount: amount,
+      })
+      if (rpcError) throw rpcError
+      await refreshRoom(snapshot.room.id, snapshot.userId)
+    })
+  }
+
+  function approveGuaranteeRequest(requestId: string) {
+    if (!snapshot || snapshot.isDemo || !supabase) return
+    const client = supabase
+    void runAction(async () => {
+      const { error: rpcError } = await client.rpc('approve_guarantee_request', { p_request_id: requestId })
+      if (rpcError) throw rpcError
+      await refreshRoom(snapshot.room.id, snapshot.userId)
+    })
+  }
+
+  function rejectGuaranteeRequest(requestId: string) {
+    if (!snapshot || snapshot.isDemo || !supabase) return
+    const client = supabase
+    void runAction(async () => {
+      const { error: rpcError } = await client.rpc('reject_guarantee_request', { p_request_id: requestId, p_note: null })
+      if (rpcError) throw rpcError
+      await refreshRoom(snapshot.room.id, snapshot.userId)
+    })
+  }
+
   function clearLocalRoom() {
     deferRoomUpdatesRef.current = false
     localStorage.removeItem(ACTIVE_ROOM_KEY)
@@ -3735,7 +3880,7 @@ export default function App() {
         <LobbyView busy={busy} onProfileUpdate={updateLobbyProfile} onReady={toggleReady} onStart={startGame} snapshot={snapshot} />
       )}
       {snapshot && snapshot.room.status !== 'lobby' && (
-        <GameView busy={busy} dice={dice} onAddDemoDice={addDemoDice} onChooseRoute={chooseRoute} onExit={exitRoom} onRestart={restartDemo} onRoll={rollDice} snapshot={snapshot} />
+        <GameView busy={busy} dice={dice} onAddDemoDice={addDemoDice} onApproveGuaranteeRequest={approveGuaranteeRequest} onChooseRoute={chooseRoute} onCreateGuaranteeRequest={createGuaranteeRequest} onExit={exitRoom} onRejectGuaranteeRequest={rejectGuaranteeRequest} onRestart={restartDemo} onRoll={rollDice} snapshot={snapshot} />
       )}
       {diceAnimation && <DiceRollOverlay state={diceAnimation} />}
       {error && (

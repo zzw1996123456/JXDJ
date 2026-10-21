@@ -1617,6 +1617,220 @@ end $$;
 
 select pg_notify('pgrst', 'reload schema');
 
+-- 双余额保底申请：room_players.coins 是现有保底，rooms.base_guarantee_balance 是基础保底余额。
+alter table public.rooms add column if not exists base_guarantee_balance bigint;
+update public.rooms set base_guarantee_balance = base_guarantee where base_guarantee_balance is null;
+alter table public.rooms alter column base_guarantee_balance set default 100;
+alter table public.rooms alter column base_guarantee_balance set not null;
+alter table public.rooms drop constraint if exists rooms_base_guarantee_balance_check;
+alter table public.rooms add constraint rooms_base_guarantee_balance_check check (base_guarantee_balance >= 0);
+
+create or replace function public.sync_room_base_guarantee_balance()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  if tg_op = 'INSERT' then
+    new.base_guarantee_balance := new.base_guarantee;
+  elsif new.status = 'lobby' and new.base_guarantee is distinct from old.base_guarantee then
+    new.base_guarantee_balance := new.base_guarantee;
+  end if;
+  return new;
+end;
+$$;
+drop trigger if exists rooms_sync_base_guarantee_balance on public.rooms;
+create trigger rooms_sync_base_guarantee_balance
+before insert or update of base_guarantee on public.rooms
+for each row execute function public.sync_room_base_guarantee_balance();
+
+create table if not exists public.guarantee_requests (
+  id uuid primary key default gen_random_uuid(),
+  room_id uuid not null references public.rooms(id) on delete cascade,
+  requester_player_id uuid not null references public.room_players(id) on delete cascade,
+  requester_user_id uuid not null,
+  requester_nickname text not null,
+  operation text not null check (operation in ('add', 'subtract')),
+  target text not null check (target in ('current', 'base', 'auto')),
+  amount bigint not null check (amount > 0),
+  status text not null default 'pending' check (status in ('pending', 'approved', 'rejected')),
+  current_guarantee_before bigint not null default 0,
+  base_guarantee_before bigint not null default 0,
+  current_guarantee_delta bigint not null default 0,
+  base_guarantee_delta bigint not null default 0,
+  current_guarantee_after bigint not null default 0,
+  base_guarantee_after bigint not null default 0,
+  reviewer_user_id uuid,
+  reviewed_at timestamptz,
+  review_note text,
+  created_at timestamptz not null default now()
+);
+alter table public.guarantee_requests enable row level security;
+create index if not exists guarantee_requests_room_created_idx on public.guarantee_requests(room_id, created_at desc);
+drop policy if exists "room members can read guarantee requests" on public.guarantee_requests;
+create policy "room members can read guarantee requests" on public.guarantee_requests for select to authenticated using (public.is_room_member(room_id));
+drop policy if exists "admins can read guarantee requests" on public.guarantee_requests;
+create policy "admins can read guarantee requests" on public.guarantee_requests for select to authenticated using (public.is_admin());
+grant select on public.guarantee_requests to authenticated;
+
+create or replace function public.create_guarantee_request(
+  p_room_id uuid, p_operation text, p_target text, p_amount bigint
+)
+returns public.guarantee_requests
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_player public.room_players%rowtype;
+  v_boss public.room_players%rowtype;
+  v_room public.rooms%rowtype;
+  v_request public.guarantee_requests%rowtype;
+  v_current bigint;
+  v_base bigint;
+  v_current_delta bigint := 0;
+  v_base_delta bigint := 0;
+begin
+  if auth.uid() is null then raise exception '请先进入房间'; end if;
+  if p_operation not in ('add', 'subtract') or p_target not in ('current', 'base', 'auto') then raise exception '保底申请类型无效'; end if;
+  if p_amount is null or p_amount <= 0 then raise exception '申请数额必须是正整数'; end if;
+  if p_amount > 1000000000 then raise exception '单次申请最多 10 亿'; end if;
+  select * into v_room from public.rooms where id = p_room_id for update;
+  if not found or v_room.status = 'finished' then raise exception '当前房间不能提交保底申请'; end if;
+  select * into v_player from public.room_players where room_id = p_room_id and user_id = auth.uid() for update;
+  if not found or v_player.role <> 'runner' then raise exception '只有打手可以提交保底申请'; end if;
+  select * into v_boss from public.room_players where room_id = p_room_id and role = 'boss' for update;
+  if not found then raise exception '当前房间还没有老板'; end if;
+  v_current := greatest(0, v_boss.coins::bigint);
+  v_base := greatest(0, coalesce(v_room.base_guarantee_balance, 0)::bigint);
+  if p_operation = 'add' then
+    if p_target = 'base' then v_base_delta := p_amount; else v_current_delta := p_amount; end if;
+  else
+    if p_target = 'current' then
+      if p_amount > v_current then raise exception '现有保底不足，请选择自动扣减'; end if;
+      v_current_delta := -p_amount;
+    elsif p_target = 'base' then
+      if p_amount > v_base then raise exception '基础保底不足'; end if;
+      v_base_delta := -p_amount;
+    else
+      v_current_delta := -least(p_amount, v_current);
+      v_base_delta := -(p_amount - least(p_amount, v_current));
+      if p_amount > v_current + v_base then raise exception '现有保底和基础保底合计不足'; end if;
+    end if;
+  end if;
+  insert into public.guarantee_requests(
+    room_id, requester_player_id, requester_user_id, requester_nickname, operation, target, amount,
+    current_guarantee_before, base_guarantee_before, current_guarantee_delta, base_guarantee_delta,
+    current_guarantee_after, base_guarantee_after
+  ) values (
+    p_room_id, v_player.id, auth.uid(), v_player.nickname, p_operation, p_target, p_amount,
+    v_current, v_base, v_current_delta, v_base_delta, v_current + v_current_delta, v_base + v_base_delta
+  ) returning * into v_request;
+  insert into public.game_events(room_id, message, event_type, metadata)
+  values (p_room_id,
+    v_player.nickname || ' 提交保底' || case when p_operation = 'add' then '增加' else '扣减' end || '申请 ' || p_amount || ' 万，等待老板确认',
+    'system', jsonb_build_object('request_id', v_request.id, 'player_id', v_player.id, 'player_name', v_player.nickname,
+      'operation', p_operation, 'target', p_target, 'amount', p_amount, 'current_before', v_current,
+      'base_before', v_base, 'current_delta', v_current_delta, 'base_delta', v_base_delta,
+      'current_after', v_current + v_current_delta, 'base_after', v_base + v_base_delta));
+  return v_request;
+end;
+$$;
+
+create or replace function public.approve_guarantee_request(p_request_id uuid)
+returns public.guarantee_requests
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_request public.guarantee_requests%rowtype;
+  v_room public.rooms%rowtype;
+  v_boss public.room_players%rowtype;
+  v_current bigint;
+  v_base bigint;
+  v_current_delta bigint;
+  v_base_delta bigint;
+begin
+  select * into v_request from public.guarantee_requests where id = p_request_id for update;
+  if not found or v_request.status <> 'pending' then raise exception '这条保底申请已处理'; end if;
+  select * into v_room from public.rooms where id = v_request.room_id for update;
+  if v_room.status = 'finished' then raise exception '本局已结束，不能确认申请'; end if;
+  select * into v_boss from public.room_players where room_id = v_request.room_id and role = 'boss' for update;
+  if not found or v_boss.user_id <> auth.uid() then raise exception '只有当前老板可以确认申请'; end if;
+  v_current := greatest(0, v_boss.coins::bigint);
+  v_base := greatest(0, coalesce(v_room.base_guarantee_balance, 0)::bigint);
+  if v_request.operation = 'add' then
+    v_current_delta := case when v_request.target = 'base' then 0 else v_request.amount end;
+    v_base_delta := case when v_request.target = 'base' then v_request.amount else 0 end;
+  elsif v_request.target = 'current' then
+    if v_request.amount > v_current then raise exception '现有保底已变化且余额不足'; end if;
+    v_current_delta := -v_request.amount; v_base_delta := 0;
+  elsif v_request.target = 'base' then
+    if v_request.amount > v_base then raise exception '基础保底已变化且余额不足'; end if;
+    v_current_delta := 0; v_base_delta := -v_request.amount;
+  else
+    if v_request.amount > v_current + v_base then raise exception '现有保底和基础保底合计不足'; end if;
+    v_current_delta := -least(v_request.amount, v_current);
+    v_base_delta := -(v_request.amount - least(v_request.amount, v_current));
+  end if;
+  update public.room_players set coins = v_current + v_current_delta where id = v_boss.id;
+  update public.rooms set base_guarantee_balance = v_base + v_base_delta where id = v_room.id;
+  update public.guarantee_requests set status = 'approved', reviewer_user_id = auth.uid(), reviewed_at = now(),
+    current_guarantee_before = v_current, base_guarantee_before = v_base,
+    current_guarantee_delta = v_current_delta, base_guarantee_delta = v_base_delta,
+    current_guarantee_after = v_current + v_current_delta, base_guarantee_after = v_base + v_base_delta
+  where id = v_request.id returning * into v_request;
+  insert into public.game_events(room_id, message, event_type, metadata)
+  values (v_room.id, '老板同意 ' || v_request.requester_nickname || ' 的保底申请：现有保底 ' || v_current || ' → ' || (v_current + v_current_delta) || ' 万，基础保底 ' || v_base || ' → ' || (v_base + v_base_delta) || ' 万',
+    'system', jsonb_build_object('request_id', v_request.id, 'operation', v_request.operation, 'target', v_request.target,
+      'amount', v_request.amount, 'current_before', v_current, 'base_before', v_base, 'current_delta', v_current_delta,
+      'base_delta', v_base_delta, 'current_after', v_current + v_current_delta, 'base_after', v_base + v_base_delta));
+  return v_request;
+end;
+$$;
+
+create or replace function public.reject_guarantee_request(p_request_id uuid, p_note text default null)
+returns public.guarantee_requests
+language plpgsql security definer set search_path = public
+as $$
+declare v_request public.guarantee_requests%rowtype; v_boss public.room_players%rowtype;
+begin
+  select * into v_request from public.guarantee_requests where id = p_request_id and status = 'pending' for update;
+  if not found then raise exception '这条保底申请已处理'; end if;
+  select * into v_boss from public.room_players where room_id = v_request.room_id and role = 'boss';
+  if not found or v_boss.user_id <> auth.uid() then raise exception '只有当前老板可以拒绝申请'; end if;
+  update public.guarantee_requests set status = 'rejected', reviewer_user_id = auth.uid(), reviewed_at = now(), review_note = nullif(trim(coalesce(p_note, '')), '') where id = v_request.id returning * into v_request;
+  insert into public.game_events(room_id, message, event_type, metadata)
+  values (v_request.room_id, '老板拒绝了 ' || v_request.requester_nickname || ' 的保底申请' || case when coalesce(trim(p_note), '') = '' then '' else '：' || trim(p_note) end,
+    'system', jsonb_build_object('request_id', v_request.id, 'operation', v_request.operation, 'target', v_request.target, 'amount', v_request.amount));
+  return v_request;
+end;
+$$;
+
+create or replace function public.admin_set_boss_guarantees(p_room_id uuid, p_current bigint, p_base bigint)
+returns void language plpgsql security definer set search_path = public as $$
+declare v_boss public.room_players%rowtype; v_room public.rooms%rowtype;
+begin
+  if not public.is_admin() then raise exception '只有管理员可以调整老板保底'; end if;
+  if p_current < 0 or p_base < 0 or p_current > 1000000000 or p_base > 1000000000 then raise exception '保底必须是 0 到 10 亿的整数'; end if;
+  select * into v_room from public.rooms where id = p_room_id for update;
+  if not found or v_room.status = 'finished' then raise exception '当前房间不能调整保底'; end if;
+  select * into v_boss from public.room_players where room_id = p_room_id and role = 'boss' for update;
+  if not found then raise exception '当前房间还没有老板'; end if;
+  update public.room_players set coins = p_current where id = v_boss.id;
+  update public.rooms set base_guarantee_balance = p_base where id = p_room_id;
+  insert into public.game_events(room_id, message, event_type, metadata)
+  values (p_room_id, '管理员调整老板双保底：现有保底 ' || v_boss.coins || ' → ' || p_current || ' 万，基础保底 ' || coalesce(v_room.base_guarantee_balance, 0) || ' → ' || p_base || ' 万', 'system',
+    jsonb_build_object('operation', 'admin_set', 'current_before', v_boss.coins, 'base_before', coalesce(v_room.base_guarantee_balance, 0), 'current_after', p_current, 'base_after', p_base));
+end;
+$$;
+
+revoke all on function public.create_guarantee_request(uuid, text, text, bigint) from public;
+revoke all on function public.approve_guarantee_request(uuid) from public;
+revoke all on function public.reject_guarantee_request(uuid, text) from public;
+revoke all on function public.admin_set_boss_guarantees(uuid, bigint, bigint) from public;
+grant execute on function public.create_guarantee_request(uuid, text, text, bigint) to authenticated;
+grant execute on function public.approve_guarantee_request(uuid) to authenticated;
+grant execute on function public.reject_guarantee_request(uuid, text) to authenticated;
+grant execute on function public.admin_set_boss_guarantees(uuid, bigint, bigint) to authenticated;
+do $$ begin
+  begin alter publication supabase_realtime add table public.guarantee_requests; exception when duplicate_object then null; end;
+end $$;
+
 -- Advanced graph board: free tile placement, directed routes, and player route choice.
 alter table public.room_tiles add column if not exists grid_x integer;
 alter table public.room_tiles add column if not exists grid_y integer;

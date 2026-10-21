@@ -23,6 +23,7 @@ export interface Room {
   rolls_per_turn: number
   rolls_remaining: number
   base_guarantee: number
+  base_guarantee_balance: number
   total_rounds: number
   round1_board_size: number
   round2_board_size: number
@@ -124,8 +125,44 @@ export interface GameEvent {
     effect_type?: TileEffect
     effect_value?: number
     sequence_number?: number
+    request_id?: string
+    operation?: 'add' | 'subtract'
+    target?: 'current' | 'base' | 'auto'
+    amount?: number
+    current_before?: number
+    base_before?: number
+    current_delta?: number
+    base_delta?: number
+    current_after?: number
+    base_after?: number
   }
   settlement_rule_id?: number | null
+  created_at: string
+}
+
+export type GuaranteeRequestStatus = 'pending' | 'approved' | 'rejected'
+export type GuaranteeRequestOperation = 'add' | 'subtract'
+export type GuaranteeRequestTarget = 'current' | 'base' | 'auto'
+
+export interface GuaranteeRequest {
+  id: string
+  room_id: string
+  requester_player_id: string
+  requester_user_id: string
+  requester_nickname: string
+  operation: GuaranteeRequestOperation
+  target: GuaranteeRequestTarget
+  amount: number
+  status: GuaranteeRequestStatus
+  current_guarantee_before: number
+  base_guarantee_before: number
+  current_guarantee_delta: number
+  base_guarantee_delta: number
+  current_guarantee_after: number
+  base_guarantee_after: number
+  reviewer_user_id: string | null
+  reviewed_at: string | null
+  review_note: string | null
   created_at: string
 }
 
@@ -144,6 +181,7 @@ export interface GameSnapshot {
   events: GameEvent[]
   tiles: RoomTile[]
   edges: RoomTileEdge[]
+  guaranteeRequests: GuaranteeRequest[]
   userId: string
   isDemo: boolean
 }
