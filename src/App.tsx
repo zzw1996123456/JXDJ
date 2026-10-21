@@ -582,6 +582,16 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
   const pendingTileMovesRef = useRef(new Map<string, { x: number; y: number; revision: number }>())
   const tileMoveQueueRef = useRef(new Map<string, Promise<void>>())
   const tileMoveRevisionRef = useRef(0)
+  const pendingTileImagesRef = useRef(new Map<string, {
+    imageId: string | null
+    imageUrl: string | null
+    confirmedImageId: string | null
+    confirmedImageUrl: string | null
+    revision: number
+    saved: boolean
+  }>())
+  const tileImageQueueRef = useRef(new Map<string, Promise<void>>())
+  const tileImageRevisionRef = useRef(0)
   const layoutUndoRef = useRef(new Map<GameRound, BoardCanvasPoint[]>())
 
   const selectedRoom = rooms.find((room) => room.id === selectedRoomId) ?? null
@@ -604,6 +614,17 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
     && selectedRunners <= 2
     && selectedPlayers.every((player) => player.is_ready)
 
+  const applyPendingTileState = useCallback((tile: RoomTile) => {
+    const pendingMove = pendingTileMovesRef.current.get(tile.id)
+    const pendingImage = pendingTileImagesRef.current.get(tile.id)
+    if (!pendingMove && !pendingImage) return tile
+    return {
+      ...tile,
+      ...(pendingMove ? { layout_x: pendingMove.x, layout_y: pendingMove.y } : {}),
+      ...(pendingImage ? { image_id: pendingImage.imageId, image_url: pendingImage.imageUrl } : {}),
+    }
+  }, [])
+
   const loadRoomTiles = useCallback(async (roomId: string) => {
     if (!supabase) return
     const { data, error: tilesError } = await supabase
@@ -613,11 +634,8 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       .order('round_number')
       .order('position')
     if (tilesError) throw tilesError
-    setRoomTiles((data as RoomTile[]).map((tile) => {
-      const pending = pendingTileMovesRef.current.get(tile.id)
-      return pending ? { ...tile, layout_x: pending.x, layout_y: pending.y } : tile
-    }))
-  }, [])
+    setRoomTiles((data as RoomTile[]).map(applyPendingTileState))
+  }, [applyPendingTileState])
 
   const loadTileImages = useCallback(async () => {
     if (!supabase) return
@@ -725,8 +743,22 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'game_events' }, () => {
         if (selectedRoomId) void loadRoomEvents(selectedRoomId)
       })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'room_tiles' }, () => {
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'room_tiles' }, (payload) => {
         if (!selectedRoomId) return
+        if (payload.eventType === 'UPDATE') {
+          const updatedTile = payload.new as RoomTile
+          if (updatedTile.room_id !== selectedRoomId) return
+          const pendingImage = pendingTileImagesRef.current.get(updatedTile.id)
+          if (pendingImage?.saved && pendingImage.imageId === updatedTile.image_id) {
+            pendingTileImagesRef.current.delete(updatedTile.id)
+          }
+          setRoomTiles((current) => current.map((tile) => tile.id === updatedTile.id
+            ? applyPendingTileState(updatedTile)
+            : tile))
+          return
+        }
+        const changedTile = (payload.eventType === 'DELETE' ? payload.old : payload.new) as Partial<RoomTile>
+        if (changedTile.room_id && changedTile.room_id !== selectedRoomId) return
         if (tileRefreshTimerRef.current !== null) window.clearTimeout(tileRefreshTimerRef.current)
         tileRefreshTimerRef.current = window.setTimeout(() => {
           tileRefreshTimerRef.current = null
@@ -751,7 +783,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       }
       void client.removeChannel(channel)
     }
-  }, [authorized, loadDashboard, loadRoomEdges, loadRoomEvents, loadRoomTiles, loadSettlementRules, loadTileImages, selectedRoomId])
+  }, [applyPendingTileState, authorized, loadDashboard, loadRoomEdges, loadRoomEvents, loadRoomTiles, loadSettlementRules, loadTileImages, selectedRoomId])
 
   useEffect(() => {
     if (!authorized) return
@@ -791,6 +823,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
   ])
 
   useEffect(() => {
+    pendingTileImagesRef.current.clear()
     setRoomPendingDelete(null)
     setCodeCopied(false)
     setConfigNotice('')
@@ -1161,16 +1194,77 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
   }
 
   function assignTileImage(image: RoomTileImage | null) {
-    if (!selectedRoom || !tileDraft) return
-    void runAdminAction(async () => {
-      if (!supabase) return
-      const { error: rpcError } = await supabase.rpc('admin_set_tile_image', {
-        p_tile_id: tileDraft.id,
-        p_image_id: image?.id ?? null,
+    if (!selectedRoom || !tileDraft || !supabase) return
+    const client = supabase
+    const tileId = tileDraft.id
+    const nextImageId = image?.id ?? null
+    const nextImageUrl = image?.public_url ?? null
+    const existingPending = pendingTileImagesRef.current.get(tileId)
+    const currentImageId = existingPending ? existingPending.imageId : tileDraft.image_id
+    if (currentImageId === nextImageId) return
+
+    const revision = tileImageRevisionRef.current + 1
+    tileImageRevisionRef.current = revision
+    pendingTileImagesRef.current.set(tileId, {
+      imageId: nextImageId,
+      imageUrl: nextImageUrl,
+      confirmedImageId: existingPending?.confirmedImageId ?? tileDraft.image_id,
+      confirmedImageUrl: existingPending?.confirmedImageUrl ?? tileDraft.image_url,
+      revision,
+      saved: false,
+    })
+    setError('')
+    setRoomTiles((current) => current.map((tile) => tile.id === tileId
+      ? { ...tile, image_id: nextImageId, image_url: nextImageUrl }
+      : tile))
+    setTileDraft((current) => current?.id === tileId
+      ? { ...current, image_id: nextImageId, image_url: nextImageUrl }
+      : current)
+
+    const priorTask = tileImageQueueRef.current.get(tileId) ?? Promise.resolve()
+    let task: Promise<void>
+    task = priorTask.catch(() => undefined).then(async () => {
+      const { error: rpcError } = await client.rpc('admin_set_tile_image', {
+        p_tile_id: tileId,
+        p_image_id: nextImageId,
       })
       if (rpcError) throw rpcError
-      await loadRoomTiles(selectedRoom.id)
+    }).then(() => {
+      const pending = pendingTileImagesRef.current.get(tileId)
+      if (!pending) return
+      if (pending.revision === revision) {
+        pendingTileImagesRef.current.set(tileId, {
+          ...pending,
+          confirmedImageId: nextImageId,
+          confirmedImageUrl: nextImageUrl,
+          saved: true,
+        })
+        window.setTimeout(() => {
+          const current = pendingTileImagesRef.current.get(tileId)
+          if (current?.revision === revision && current.saved) pendingTileImagesRef.current.delete(tileId)
+        }, 1200)
+        return
+      }
+      pendingTileImagesRef.current.set(tileId, {
+        ...pending,
+        confirmedImageId: nextImageId,
+        confirmedImageUrl: nextImageUrl,
+      })
+    }, (assignError) => {
+      const pending = pendingTileImagesRef.current.get(tileId)
+      if (!pending || pending.revision !== revision) return
+      pendingTileImagesRef.current.delete(tileId)
+      setRoomTiles((current) => current.map((tile) => tile.id === tileId
+        ? { ...tile, image_id: pending.confirmedImageId, image_url: pending.confirmedImageUrl }
+        : tile))
+      setTileDraft((current) => current?.id === tileId
+        ? { ...current, image_id: pending.confirmedImageId, image_url: pending.confirmedImageUrl }
+        : current)
+      setError(formatError(assignError))
+    }).finally(() => {
+      if (tileImageQueueRef.current.get(tileId) === task) tileImageQueueRef.current.delete(tileId)
     })
+    tileImageQueueRef.current.set(tileId, task)
   }
 
   function deleteLibraryImage(image: RoomTileImage) {
@@ -1866,7 +1960,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                             <button aria-pressed={!tileDraft.image_id} className={!tileDraft.image_id ? 'selected' : ''} disabled={busy || selectedRoom.status !== 'lobby'} onClick={() => assignTileImage(null)} type="button"><span className="tile-image-none"><X size={18} /></span><small>无图片</small></button>
                             {tileImages.map((image) => (
                               <div className={`tile-image-option ${tileDraft.image_id === image.id ? 'selected' : ''}`} key={image.id}>
-                                <button aria-label={`使用图片 ${image.name}`} aria-pressed={tileDraft.image_id === image.id} disabled={busy || selectedRoom.status !== 'lobby'} onClick={() => assignTileImage(image)} type="button"><img alt="" src={image.public_url} /><small>{image.name}</small></button>
+                                <button aria-label={`使用图片 ${image.name}`} aria-pressed={tileDraft.image_id === image.id} disabled={busy || selectedRoom.status !== 'lobby'} onClick={() => assignTileImage(image)} type="button"><img alt="" decoding="async" src={image.public_url} /><small>{image.name}</small></button>
                                 <button aria-label={`删除图片 ${image.name}`} className="tile-image-delete" disabled={busy || selectedRoom.status !== 'lobby'} onClick={() => deleteLibraryImage(image)} title="删除图片" type="button"><Trash2 size={13} /></button>
                               </div>
                             ))}
@@ -2513,7 +2607,7 @@ const Board = memo(function Board({
               .filter(({ player }) => player.position === tile.position)
             const tileContent = (
               <>
-                {tile.image_url && <><img alt="" className="tile-image" draggable={false} src={tile.image_url} /><span className="tile-image-shade" /></>}
+                {tile.image_url && <><img alt="" className="tile-image" decoding="async" draggable={false} src={tile.image_url} /><span className="tile-image-shade" /></>}
                 <span className="tile-number">{String(tile.position + 1).padStart(2, '0')}</span>
                 <span className="tile-owner">{TILE_TYPE_LABELS[tile.tile_type]}</span>
                 <strong>{tile.short_name}</strong>
