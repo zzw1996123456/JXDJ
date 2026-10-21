@@ -4937,3 +4937,18 @@ body * {
   .dice-roll-overlay strong,
   .tile.tile-step-active { animation: none !important; }
 }
+
+/* Keep navigation content, but remove the full-width framed header surface. */
+.portal-header,
+.room-header {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.portal-header::after,
+.room-header::after {
+  content: none;
+}
