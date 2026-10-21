@@ -180,7 +180,7 @@ function tileColorStyle(tile: RoomTile): React.CSSProperties {
   const blue = Number.parseInt(value.slice(4, 6), 16)
   const light = (red * 299 + green * 587 + blue * 114) / 1000 > 145
   return {
-    backgroundColor: tile.tile_color,
+    backgroundColor: `rgb(${red} ${green} ${blue} / 58%)`,
     borderTopColor: light ? '#11140f' : '#f4f6ef',
     color: light ? '#11140f' : '#f4f6ef',
     '--tile-detail-color': light ? '#30362d' : '#e3e8dc',
