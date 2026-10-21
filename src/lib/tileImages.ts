@@ -3,6 +3,7 @@ import type { Area } from 'react-easy-crop'
 export const TILE_IMAGE_MAX_BYTES = 15 * 1024
 export const TILE_IMAGE_MAX_SOURCE_BYTES = 20 * 1024 * 1024
 export const TILE_IMAGE_ASPECT = 120 / 92
+const TILE_IMAGE_CROP_BACKGROUND = '#080a08'
 
 function loadImage(sourceUrl: string) {
   return new Promise<HTMLImageElement>((resolve, reject) => {
@@ -33,7 +34,29 @@ export async function cropTileImage(sourceUrl: string, crop: Area) {
     if (!context) throw new Error('当前浏览器无法处理图片')
     context.imageSmoothingEnabled = true
     context.imageSmoothingQuality = 'high'
-    context.drawImage(image, crop.x, crop.y, crop.width, crop.height, 0, 0, width, height)
+    context.fillStyle = TILE_IMAGE_CROP_BACKGROUND
+    context.fillRect(0, 0, width, height)
+
+    const sourceX = Math.max(0, crop.x)
+    const sourceY = Math.max(0, crop.y)
+    const sourceRight = Math.min(image.naturalWidth, crop.x + crop.width)
+    const sourceBottom = Math.min(image.naturalHeight, crop.y + crop.height)
+    const sourceWidth = Math.max(0, sourceRight - sourceX)
+    const sourceHeight = Math.max(0, sourceBottom - sourceY)
+
+    if (sourceWidth > 0 && sourceHeight > 0) {
+      context.drawImage(
+        image,
+        sourceX,
+        sourceY,
+        sourceWidth,
+        sourceHeight,
+        ((sourceX - crop.x) / crop.width) * width,
+        ((sourceY - crop.y) / crop.height) * height,
+        (sourceWidth / crop.width) * width,
+        (sourceHeight / crop.height) * height,
+      )
+    }
 
     for (const quality of [0.76, 0.62, 0.5, 0.4, 0.32, 0.24, 0.18, 0.12]) {
       lastBlob = await canvasToBlob(canvas, quality)

@@ -95,6 +95,8 @@ const ROOM_CONFIG_VERSION = 5
 const MIN_BOARD_ZOOM = 0.1
 const MAX_BOARD_ZOOM = 2
 const BOARD_VIEW_PADDING = 12
+const MIN_IMAGE_ZOOM = 0.25
+const MAX_IMAGE_ZOOM = 3
 
 interface RoomConfigFile {
   format: typeof ROOM_CONFIG_FORMAT
@@ -1856,7 +1858,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                           <div className="tile-image-library-heading">
                             <span><Images size={15} /> 公共图片库</span>
                             <button disabled={busy || selectedRoom.status !== 'lobby'} onClick={() => imageInputRef.current?.click()} type="button"><Plus size={14} /> 添加图片</button>
-                            <input accept="image/jpeg,image/png,image/webp" className="sr-only" onChange={(event) => chooseImageFile(event.target.files?.[0])} ref={imageInputRef} type="file" />
+                            <input accept="image/jpeg,image/png,image/webp" className="visually-hidden" onChange={(event) => chooseImageFile(event.target.files?.[0])} ref={imageInputRef} type="file" />
                           </div>
                           <div className="tile-image-list">
                             <button aria-pressed={!tileDraft.image_id} className={!tileDraft.image_id ? 'selected' : ''} disabled={busy || selectedRoom.status !== 'lobby'} onClick={() => assignTileImage(null)} type="button"><span className="tile-image-none"><X size={18} /></span><small>无图片</small></button>
@@ -2143,14 +2145,17 @@ function TileImageCropDialog({
             aspect={TILE_IMAGE_ASPECT}
             crop={crop}
             image={sourceUrl}
+            maxZoom={MAX_IMAGE_ZOOM}
+            minZoom={MIN_IMAGE_ZOOM}
             onCropChange={setCrop}
             onCropComplete={(_, croppedPixels) => setPixels(croppedPixels)}
             onZoomChange={setZoom}
+            restrictPosition={false}
             showGrid
             zoom={zoom}
           />
         </div>
-        <label className="crop-zoom"><span>缩放</span><input max="3" min="1" onChange={(event) => setZoom(Number(event.target.value))} step="0.01" type="range" value={zoom} /></label>
+        <label className="crop-zoom"><span>缩放</span><input max={MAX_IMAGE_ZOOM} min={MIN_IMAGE_ZOOM} onChange={(event) => setZoom(Number(event.target.value))} step="0.01" type="range" value={zoom} /></label>
         {error && <p className="form-error">{error}</p>}
         <div className="crop-actions">
           <button className="button ghost" disabled={busy} onClick={onCancel} type="button"><X size={16} /> 取消</button>
