@@ -3803,14 +3803,16 @@ create table if not exists public.site_content (
   hero_title_primary text not null default '大富翁',
   hero_title_accent text not null default '护航协议局。',
   hero_subtitle text not null default '多轮随机棋盘逐步扩张，每个房间都有不同的移动、回合和护航规则。',
-  stat_rounds_value text not null default '3',
-  stat_rounds_label text not null default '轮推演',
-  stat_board_value text not null default '8/12/24',
-  stat_board_label text not null default '格棋盘',
-  stat_players_value text not null default '3',
-  stat_players_label text not null default '人上限',
   updated_at timestamptz not null default now()
 );
+
+alter table public.site_content
+  drop column if exists stat_rounds_value,
+  drop column if exists stat_rounds_label,
+  drop column if exists stat_board_value,
+  drop column if exists stat_board_label,
+  drop column if exists stat_players_value,
+  drop column if exists stat_players_label;
 
 insert into public.site_content (id)
 values ('global')
@@ -3833,21 +3835,13 @@ begin
   if jsonb_typeof(p_content) <> 'object' then raise exception '首页文案格式无效'; end if;
 
   insert into public.site_content (
-    id, hero_eyebrow, hero_title_primary, hero_title_accent, hero_subtitle,
-    stat_rounds_value, stat_rounds_label, stat_board_value, stat_board_label,
-    stat_players_value, stat_players_label, updated_at
+    id, hero_eyebrow, hero_title_primary, hero_title_accent, hero_subtitle, updated_at
   ) values (
     'global',
     left(coalesce(p_content ->> 'hero_eyebrow', ''), 80),
     left(coalesce(p_content ->> 'hero_title_primary', ''), 80),
     left(coalesce(p_content ->> 'hero_title_accent', ''), 80),
     left(coalesce(p_content ->> 'hero_subtitle', ''), 80),
-    left(coalesce(p_content ->> 'stat_rounds_value', ''), 80),
-    left(coalesce(p_content ->> 'stat_rounds_label', ''), 80),
-    left(coalesce(p_content ->> 'stat_board_value', ''), 80),
-    left(coalesce(p_content ->> 'stat_board_label', ''), 80),
-    left(coalesce(p_content ->> 'stat_players_value', ''), 80),
-    left(coalesce(p_content ->> 'stat_players_label', ''), 80),
     now()
   )
   on conflict (id) do update set
@@ -3855,12 +3849,6 @@ begin
     hero_title_primary = excluded.hero_title_primary,
     hero_title_accent = excluded.hero_title_accent,
     hero_subtitle = excluded.hero_subtitle,
-    stat_rounds_value = excluded.stat_rounds_value,
-    stat_rounds_label = excluded.stat_rounds_label,
-    stat_board_value = excluded.stat_board_value,
-    stat_board_label = excluded.stat_board_label,
-    stat_players_value = excluded.stat_players_value,
-    stat_players_label = excluded.stat_players_label,
     updated_at = now();
 end;
 $$;

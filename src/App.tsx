@@ -150,12 +150,6 @@ interface SiteContent {
   hero_title_primary: string
   hero_title_accent: string
   hero_subtitle: string
-  stat_rounds_value: string
-  stat_rounds_label: string
-  stat_board_value: string
-  stat_board_label: string
-  stat_players_value: string
-  stat_players_label: string
 }
 
 const DEFAULT_SITE_CONTENT: SiteContent = {
@@ -163,12 +157,6 @@ const DEFAULT_SITE_CONTENT: SiteContent = {
   hero_title_primary: '大富翁',
   hero_title_accent: '护航协议局。',
   hero_subtitle: '多轮随机棋盘逐步扩张，每个房间都有不同的移动、回合和护航规则。',
-  stat_rounds_value: '3',
-  stat_rounds_label: '轮推演',
-  stat_board_value: '8/12/24',
-  stat_board_label: '格棋盘',
-  stat_players_value: '3',
-  stat_players_label: '人上限',
 }
 
 function normalizeSiteContent(content: Partial<SiteContent> | null | undefined): SiteContent {
@@ -581,11 +569,6 @@ function MonopolyEntry({
             {content.hero_title_accent && <span>{content.hero_title_accent}</span>}
           </h1>
           {content.hero_subtitle && <p className="hero-subtitle">{content.hero_subtitle}</p>}
-          <div className="mission-stats" aria-label="游戏规则概览">
-            {(content.stat_rounds_value || content.stat_rounds_label) && <span><strong>{content.stat_rounds_value}</strong> {content.stat_rounds_label}</span>}
-            {(content.stat_board_value || content.stat_board_label) && <span><strong>{content.stat_board_value}</strong> {content.stat_board_label}</span>}
-            {(content.stat_players_value || content.stat_players_label) && <span><strong>{content.stat_players_value}</strong> {content.stat_players_label}</span>}
-          </div>
         </section>
 
         <section className="entry-panel" aria-labelledby="entry-title">
@@ -2228,12 +2211,6 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                 <label><span>主标题第一行</span><input maxLength={80} onChange={(event) => setSiteContentDraft({ ...siteContentDraft, hero_title_primary: event.target.value })} value={siteContentDraft.hero_title_primary} /></label>
                 <label><span>主标题第二行</span><input maxLength={80} onChange={(event) => setSiteContentDraft({ ...siteContentDraft, hero_title_accent: event.target.value })} value={siteContentDraft.hero_title_accent} /></label>
                 <label className="site-content-wide"><span>主标题下方说明</span><textarea maxLength={80} onChange={(event) => setSiteContentDraft({ ...siteContentDraft, hero_subtitle: event.target.value })} rows={2} value={siteContentDraft.hero_subtitle} /></label>
-                <label><span>第一项数值</span><input maxLength={20} onChange={(event) => setSiteContentDraft({ ...siteContentDraft, stat_rounds_value: event.target.value })} value={siteContentDraft.stat_rounds_value} /></label>
-                <label><span>第一项文字</span><input maxLength={40} onChange={(event) => setSiteContentDraft({ ...siteContentDraft, stat_rounds_label: event.target.value })} value={siteContentDraft.stat_rounds_label} /></label>
-                <label><span>第二项数值</span><input maxLength={20} onChange={(event) => setSiteContentDraft({ ...siteContentDraft, stat_board_value: event.target.value })} value={siteContentDraft.stat_board_value} /></label>
-                <label><span>第二项文字</span><input maxLength={40} onChange={(event) => setSiteContentDraft({ ...siteContentDraft, stat_board_label: event.target.value })} value={siteContentDraft.stat_board_label} /></label>
-                <label><span>第三项数值</span><input maxLength={20} onChange={(event) => setSiteContentDraft({ ...siteContentDraft, stat_players_value: event.target.value })} value={siteContentDraft.stat_players_value} /></label>
-                <label><span>第三项文字</span><input maxLength={40} onChange={(event) => setSiteContentDraft({ ...siteContentDraft, stat_players_label: event.target.value })} value={siteContentDraft.stat_players_label} /></label>
               </div>
               <button className="button primary" disabled={busy} onClick={saveSiteContent} type="button"><Save size={17} /> 保存首页文案</button>
             </section>

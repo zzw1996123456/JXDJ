@@ -421,27 +421,6 @@ button.mode-card {
   line-height: 1.8;
 }
 
-.mission-stats {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 28px;
-  margin-top: 42px;
-  color: var(--muted);
-  font-size: 13px;
-}
-
-.mission-stats span {
-  display: flex;
-  align-items: baseline;
-  gap: 7px;
-}
-
-.mission-stats strong {
-  color: var(--ink);
-  font-family: 'Barlow Condensed', sans-serif;
-  font-size: 28px;
-}
-
 .entry-panel,
 .roster-panel {
   border: 1px solid var(--line);
@@ -3376,11 +3355,6 @@ button.mode-card {
     font-size: 14px;
   }
 
-  .mission-stats {
-    gap: 18px;
-    margin-top: 28px;
-  }
-
   .entry-panel,
   .roster-panel {
     box-shadow: 8px 8px 0 #0b0c09;
@@ -3872,7 +3846,6 @@ textarea:focus {
 .segmented button { border-radius: 5px; transition: background-color 180ms ease, color 180ms ease, box-shadow 180ms ease; }
 .segmented button.active { background: linear-gradient(135deg, #d9ff5e, #aeea45); box-shadow: 0 8px 20px rgb(174 234 69 / 15%); }
 
-.mission-stats span,
 .lobby-rule-line span {
   min-height: 38px;
   border: 1px solid rgb(211 230 202 / 14%);
@@ -4259,7 +4232,6 @@ textarea:focus {
 
   .portal-header,
   .room-header { background: rgb(8 13 12 / 72%); }
-  .mission-stats span,
   .lobby-rule-line span { min-height: 34px; padding: 5px 8px; }
   .entry-panel,
   .roster-panel { box-shadow: 0 22px 54px rgb(0 0 0 / 30%), inset 0 1px 0 rgb(255 255 255 / 5%); }
@@ -4493,7 +4465,6 @@ textarea:focus {
   box-shadow: 0 12px 32px rgb(3 12 11 / 22%), 0 0 26px rgb(217 169 184 / 8%);
 }
 
-.mission-stats span,
 .lobby-rule-line span,
 .player-row,
 .admin-summary-strip,
