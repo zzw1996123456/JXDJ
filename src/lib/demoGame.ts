@@ -1,4 +1,4 @@
-import { createRandomRoomTiles, getRoundTiles } from './board'
+import { createDefaultTileEdges, createRandomRoomTiles, getRoundTiles } from './board'
 import type { GameEvent, GameSnapshot, Player, PlayerRole, Room } from '../types'
 
 const DEMO_USER_ID = 'demo-player'
@@ -20,7 +20,7 @@ export function createDemoRoom(nickname: string, role: PlayerRole): GameSnapshot
     total_rounds: 3, round1_board_size: 8, round2_board_size: 12, round3_board_size: 24,
     round_board_sizes: [8, 12, 24, 24, 24, 24, 24, 24, 24, 24],
     round_advance_chances: [35, 30, 30, 30, 30, 30, 30, 30, 30],
-    imported_config: false, created_at: now(),
+    imported_config: false, pending_dice: null, pending_player_id: null, pending_route_options: [], created_at: now(),
   }
 
   const player: Player = {
@@ -32,11 +32,13 @@ export function createDemoRoom(nickname: string, role: PlayerRole): GameSnapshot
     ? `${nickname} 进入随机规则试玩房，基础保底 ${room.base_guarantee} 万`
     : `${nickname} 进入随机规则试玩房，打手不设保底`
 
+  const tiles = createRandomRoomTiles(room.id)
   return {
     room,
     players: [player],
     events: [event(room.id, entryMessage)],
-    tiles: createRandomRoomTiles(room.id),
+    tiles,
+    edges: createDefaultTileEdges(tiles),
     userId: DEMO_USER_ID,
     isDemo: true,
   }

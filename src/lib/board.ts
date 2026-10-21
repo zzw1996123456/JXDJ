@@ -1,4 +1,4 @@
-import type { GameRound, RoomTile, TileDefinition, TileEffect, TileType } from '../types'
+import type { GameRound, RoomTile, RoomTileEdge, TileDefinition, TileEffect, TileType } from '../types'
 
 type TemplateRound = 1 | 2 | 3
 
@@ -150,7 +150,7 @@ export function createRandomRoomTiles(roomId: string): RoomTile[] {
     tiles.push({
       id: crypto.randomUUID(), room_id: roomId, template_id: null, round_number: round, position: 0,
       name: '起点', short_name: '起点', tile_type: 'start', detail: '本轮行动从这里开始',
-      effect_type: 'none', effect_value: 0, tile_color: null, is_randomized: false, created_at: createdAt,
+      effect_type: 'none', effect_value: 0, tile_color: null, is_randomized: false, grid_x: null, grid_y: null, created_at: createdAt,
     })
 
     groups.forEach((group, groupPosition) => {
@@ -164,7 +164,7 @@ export function createRandomRoomTiles(roomId: string): RoomTile[] {
         id: crypto.randomUUID(), room_id: roomId, template_id: null, round_number: round, position,
         name: selected.name, short_name: selected.short_name, tile_type: selected.tile_type,
         detail: selected.detail, effect_type: selected.effect_type, effect_value: selected.effect_value,
-        tile_color: null, is_randomized: true, created_at: createdAt,
+        tile_color: null, is_randomized: true, grid_x: null, grid_y: null, created_at: createdAt,
       })
     })
   }
@@ -186,20 +186,10 @@ export function getBoardDimensions(size: number) {
   if (size === 24) return { columns: 8, rows: 6 }
 
   if (usesDenseBoardLayout(size)) {
-    let best = { columns: 5, rows: Math.ceil(size / 5) }
-    let bestScore = Number.POSITIVE_INFINITY
-    for (let columns = 4; columns <= size; columns += 1) {
-      const rows = Math.ceil(size / columns)
-      if (rows < 4) continue
-      const emptyRatio = (columns * rows - size) / size
-      const physicalAspect = (columns * 120) / (rows * 92)
-      const score = Math.abs(Math.log(physicalAspect)) + emptyRatio * 0.4
-      if (score < bestScore) {
-        best = { columns, rows }
-        bestScore = score
-      }
-    }
-    return best
+    let layers = 1
+    while ((3 + layers * 2) ** 2 - 9 < size) layers += 1
+    const side = 3 + layers * 2
+    return { columns: side, rows: side }
   }
 
   let best = { columns: Math.max(3, Math.ceil(size / 2)), rows: 3 }
@@ -221,12 +211,26 @@ export function getBoardDimensions(size: number) {
 export function getBoardGridPosition(index: number, size: number) {
   const { columns, rows } = getBoardDimensions(size)
   if (usesDenseBoardLayout(size)) {
-    const row = Math.floor(index / columns)
-    const offset = index % columns
-    return {
-      gridColumn: row % 2 === 0 ? offset + 1 : columns - offset,
-      gridRow: row + 1,
+    let remaining = index
+    const layers = (columns - 3) / 2
+    for (let layer = 0; layer < layers; layer += 1) {
+      const min = layer + 1
+      const max = columns - layer
+      const side = max - min + 1
+      const perimeter = side * 4 - 4
+      if (remaining >= perimeter) {
+        remaining -= perimeter
+        continue
+      }
+      if (remaining < side) return { gridColumn: min + remaining, gridRow: min }
+      remaining -= side
+      if (remaining < side - 1) return { gridColumn: max, gridRow: min + remaining + 1 }
+      remaining -= side - 1
+      if (remaining < side - 1) return { gridColumn: max - remaining - 1, gridRow: max }
+      remaining -= side - 1
+      return { gridColumn: min, gridRow: max - remaining - 1 }
     }
+    throw new RangeError(`Board position ${index} exceeds ${size} tile layout`)
   }
   if (index < columns) return { gridColumn: index + 1, gridRow: 1 }
   const rightEnd = columns + rows - 2
@@ -234,4 +238,43 @@ export function getBoardGridPosition(index: number, size: number) {
   const bottomEnd = rightEnd + columns
   if (index < bottomEnd) return { gridColumn: columns - (index - rightEnd), gridRow: rows }
   return { gridColumn: 1, gridRow: rows - 1 - (index - bottomEnd) }
+}
+
+export function getRoomTileGridPosition(tile: RoomTile, index: number, size: number) {
+  if (tile.grid_x !== null && tile.grid_y !== null) {
+    return { gridColumn: tile.grid_x + 1, gridRow: tile.grid_y + 1 }
+  }
+  return getBoardGridPosition(index, size)
+}
+
+export function getRoomBoardDimensions(tiles: RoomTile[]) {
+  const base = getBoardDimensions(tiles.length)
+  return tiles.reduce((dimensions, tile, index) => {
+    const position = getRoomTileGridPosition(tile, index, tiles.length)
+    return {
+      columns: Math.max(dimensions.columns, position.gridColumn),
+      rows: Math.max(dimensions.rows, position.gridRow),
+    }
+  }, base)
+}
+
+export function createDefaultTileEdges(tiles: RoomTile[]): RoomTileEdge[] {
+  const rounds = new Map<GameRound, RoomTile[]>()
+  for (const tile of tiles) {
+    const roundTiles = rounds.get(tile.round_number) ?? []
+    roundTiles.push(tile)
+    rounds.set(tile.round_number, roundTiles)
+  }
+  return [...rounds.values()].flatMap((roundTiles) => {
+    roundTiles.sort((left, right) => left.position - right.position)
+    return roundTiles.map((tile, index) => ({
+      id: `default-edge-${tile.id}`,
+      room_id: tile.room_id,
+      round_number: tile.round_number,
+      from_tile_id: tile.id,
+      to_tile_id: roundTiles[(index + 1) % roundTiles.length].id,
+      is_bidirectional: false,
+      created_at: tile.created_at,
+    }))
+  })
 }

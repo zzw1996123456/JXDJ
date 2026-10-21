@@ -30,6 +30,9 @@ export interface Room {
   round_board_sizes: number[]
   round_advance_chances: number[]
   imported_config: boolean
+  pending_dice: number | null
+  pending_player_id: string | null
+  pending_route_options: RouteOption[]
   created_at: string
 }
 
@@ -65,7 +68,25 @@ export interface RoomTile {
   effect_value: number
   tile_color: string | null
   is_randomized: boolean
+  grid_x: number | null
+  grid_y: number | null
   created_at: string
+}
+
+export interface RoomTileEdge {
+  id: string
+  room_id: string
+  round_number: GameRound
+  from_tile_id: string
+  to_tile_id: string
+  is_bidirectional: boolean
+  created_at: string
+}
+
+export interface RouteOption {
+  tile_id: string
+  position: number
+  path: string[]
 }
 
 export interface GameEvent {
@@ -103,6 +124,7 @@ export interface GameSnapshot {
   players: Player[]
   events: GameEvent[]
   tiles: RoomTile[]
+  edges: RoomTileEdge[]
   userId: string
   isDemo: boolean
 }

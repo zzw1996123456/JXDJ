@@ -2,6 +2,8 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowLeft,
   ArrowRight,
+  ArrowUpRight,
+  Move,
   Check,
   Clipboard,
   Crosshair,
@@ -41,8 +43,8 @@ import {
 } from 'lucide-react'
 import {
   EFFECT_LABELS,
-  getBoardDimensions,
-  getBoardGridPosition,
+  getRoomBoardDimensions,
+  getRoomTileGridPosition,
   getRoundTiles,
   usesDenseBoardLayout,
   PLAYER_COLORS,
@@ -59,6 +61,8 @@ import type {
   PlayerRole,
   Room,
   RoomTile,
+  RoomTileEdge,
+  RouteOption,
   SettlementRule,
   TileEffect,
   TileType,
@@ -78,13 +82,13 @@ const TILE_TYPES = Object.keys(TILE_TYPE_LABELS) as TileType[]
 const TILE_EFFECTS = Object.keys(EFFECT_LABELS) as TileEffect[]
 const GUARANTEE_EFFECTS: GuaranteeEffect[] = ['guarantee_add', 'guarantee_subtract', 'guarantee_multiply', 'guarantee_divide']
 const ROOM_CONFIG_FORMAT = 'jingxu-delta-monopoly-room'
-const ROOM_CONFIG_VERSION = 3
+const ROOM_CONFIG_VERSION = 4
 const MIN_BOARD_ZOOM = 0.1
 const MAX_BOARD_ZOOM = 2
 const BOARD_VIEW_PADDING = 12
 const BOARD_TILE_WIDTH = 120
 const BOARD_TILE_HEIGHT = 92
-const BOARD_GAP = 4
+const BOARD_GAP = 18
 const BOARD_PADDING = 4
 const BOARD_BORDER = 1
 
@@ -102,7 +106,13 @@ interface RoomConfigFile {
     round_sizes: number[]
     round_advance_chances: number[]
   }
-  tiles: Array<Pick<RoomTile, 'round_number' | 'position' | 'name' | 'short_name' | 'tile_type' | 'detail' | 'effect_type' | 'effect_value' | 'tile_color' | 'is_randomized'>>
+  tiles: Array<Pick<RoomTile, 'round_number' | 'position' | 'name' | 'short_name' | 'tile_type' | 'detail' | 'effect_type' | 'effect_value' | 'tile_color' | 'is_randomized' | 'grid_x' | 'grid_y'>>
+  edges: Array<{
+    round_number: GameRound
+    from_position: number
+    to_position: number
+    is_bidirectional: boolean
+  }>
 }
 
 function roundLabel(round: GameRound) {
@@ -243,23 +253,26 @@ async function ensureOnlineUser() {
 
 async function fetchSnapshot(roomId: string, userId: string): Promise<GameSnapshot> {
   if (!supabase) throw new Error('尚未配置 Supabase')
-  const [roomResult, playersResult, eventsResult, tilesResult] = await Promise.all([
+  const [roomResult, playersResult, eventsResult, tilesResult, edgesResult] = await Promise.all([
     supabase.from('rooms').select('*').eq('id', roomId).single(),
     supabase.from('room_players').select('*').eq('room_id', roomId).order('turn_order'),
     supabase.from('game_events').select('*').eq('room_id', roomId).order('created_at', { ascending: false }).limit(40),
     supabase.from('room_tiles').select('*').eq('room_id', roomId).order('round_number').order('position'),
+    supabase.from('room_tile_edges').select('*').eq('room_id', roomId).order('created_at'),
   ])
 
   if (roomResult.error) throw roomResult.error
   if (playersResult.error) throw playersResult.error
   if (eventsResult.error) throw eventsResult.error
   if (tilesResult.error) throw tilesResult.error
+  if (edgesResult.error) throw edgesResult.error
 
   return {
     room: roomResult.data as Room,
     players: playersResult.data as Player[],
     events: eventsResult.data as GameEvent[],
     tiles: tilesResult.data as RoomTile[],
+    edges: edgesResult.data as RoomTileEdge[],
     userId,
     isDemo: false,
   }
@@ -535,6 +548,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
   const [events, setEvents] = useState<GameEvent[]>([])
   const [settlementRules, setSettlementRules] = useState<SettlementRule[]>([])
   const [roomTiles, setRoomTiles] = useState<RoomTile[]>([])
+  const [roomEdges, setRoomEdges] = useState<RoomTileEdge[]>([])
   const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null)
   const [roomPendingDelete, setRoomPendingDelete] = useState<string | null>(null)
   const [advanceChances, setAdvanceChances] = useState<string[]>(DEFAULT_ADVANCE_CHANCES.map(String))
@@ -546,6 +560,8 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
   const [editorRound, setEditorRound] = useState<GameRound>(1)
   const [selectedTileId, setSelectedTileId] = useState<string | null>(null)
   const [tileDraft, setTileDraft] = useState<RoomTile | null>(null)
+  const [edgeTargetId, setEdgeTargetId] = useState('')
+  const [edgeBidirectional, setEdgeBidirectional] = useState(false)
   const [diceDrafts, setDiceDrafts] = useState<Record<string, string>>({})
   const [guaranteeDrafts, setGuaranteeDrafts] = useState<Record<string, string>>({})
   const [suffixDrafts, setSuffixDrafts] = useState<Record<number, string>>({})
@@ -562,6 +578,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
   const selectedRoundTiles = roomTiles
     .filter((tile) => tile.room_id === selectedRoomId && tile.round_number === editorRound)
     .sort((a, b) => a.position - b.position)
+  const selectedRoundEdges = roomEdges.filter((edge) => edge.round_number === editorRound)
   const selectedBosses = selectedPlayers.filter((player) => player.role === 'boss').length
   const selectedRunners = selectedPlayers.filter((player) => player.role === 'runner').length
   const canStart = selectedRoom?.status === 'lobby'
@@ -582,6 +599,19 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       .order('position')
     if (tilesError) throw tilesError
     setRoomTiles(data as RoomTile[])
+  }, [])
+
+  const loadRoomEdges = useCallback(async (roomId: string) => {
+    if (!supabase) return
+    const { error: ensureError } = await supabase.rpc('admin_ensure_room_edges', { p_room_id: roomId })
+    if (ensureError) throw ensureError
+    const { data, error: edgesError } = await supabase
+      .from('room_tile_edges')
+      .select('*')
+      .eq('room_id', roomId)
+      .order('created_at')
+    if (edgesError) throw edgesError
+    setRoomEdges(data as RoomTileEdge[])
   }, [])
 
   const loadRoomEvents = useCallback(async (roomId: string) => {
@@ -675,6 +705,9 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
           void loadRoomTiles(selectedRoomId)
         }, 150)
       })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'room_tile_edges' }, () => {
+        if (selectedRoomId) void loadRoomEdges(selectedRoomId)
+      })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'room_settlement_rules' }, () => {
         if (selectedRoomId) void loadSettlementRules(selectedRoomId)
       })
@@ -687,7 +720,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       }
       void client.removeChannel(channel)
     }
-  }, [authorized, loadDashboard, loadRoomEvents, loadRoomTiles, loadSettlementRules, selectedRoomId])
+  }, [authorized, loadDashboard, loadRoomEdges, loadRoomEvents, loadRoomTiles, loadSettlementRules, selectedRoomId])
 
   useEffect(() => {
     if (!authorized) return
@@ -695,11 +728,12 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       setEvents([])
       setSettlementRules([])
       setRoomTiles([])
+      setRoomEdges([])
       return
     }
-    void Promise.all([loadRoomEvents(selectedRoomId), loadRoomTiles(selectedRoomId), loadSettlementRules(selectedRoomId)])
+    void Promise.all([loadRoomEvents(selectedRoomId), loadRoomTiles(selectedRoomId), loadRoomEdges(selectedRoomId), loadSettlementRules(selectedRoomId)])
       .catch((loadError) => setError(formatError(loadError)))
-  }, [authorized, loadRoomEvents, loadRoomTiles, loadSettlementRules, selectedRoomId])
+  }, [authorized, loadRoomEdges, loadRoomEvents, loadRoomTiles, loadSettlementRules, selectedRoomId])
 
   useEffect(() => {
     if (!selectedRoom) return
@@ -738,6 +772,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
     const nextTile = selectedRoundTiles.find((tile) => tile.id === selectedTileId) ?? selectedRoundTiles[0] ?? null
     setSelectedTileId(nextTile?.id ?? null)
     setTileDraft(nextTile ? { ...nextTile } : null)
+    setEdgeTargetId('')
   }, [editorRound, selectedRoomId, roomTiles])
 
   async function runAdminAction(action: () => Promise<void>) {
@@ -779,6 +814,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       setEvents([])
       setSettlementRules([])
       setRoomTiles([])
+      setRoomEdges([])
       setSelectedRoomId(null)
     })
   }
@@ -871,7 +907,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
         p_round_sizes: roundSizes,
       })
       if (rpcError) throw rpcError
-      await Promise.all([loadDashboard(), loadRoomTiles(selectedRoom.id), loadRoomEvents(selectedRoom.id)])
+      await Promise.all([loadDashboard(), loadRoomTiles(selectedRoom.id), loadRoomEdges(selectedRoom.id), loadRoomEvents(selectedRoom.id)])
       setConfigNotice('棋盘轮数和格子数已保存')
     })
   }
@@ -910,7 +946,93 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
         p_is_randomized: tileDraft.tile_type === 'start' ? false : tileDraft.is_randomized,
       })
       if (rpcError) throw rpcError
+      if (tileDraft.grid_x !== null && tileDraft.grid_y !== null) {
+        const occupied = selectedRoundTiles.some((tile, index) => {
+          if (tile.id === tileDraft.id) return false
+          const position = getRoomTileGridPosition(tile, index, selectedRoundTiles.length)
+          return position.gridColumn - 1 === tileDraft.grid_x && position.gridRow - 1 === tileDraft.grid_y
+        })
+        if (occupied) throw new Error('该坐标已有格子，请换一个位置')
+        const { error: layoutError } = await supabase.rpc('admin_update_tile_layout', {
+          p_tile_id: tileDraft.id,
+          p_grid_x: tileDraft.grid_x,
+          p_grid_y: tileDraft.grid_y,
+        })
+        if (layoutError) throw layoutError
+      }
       await loadRoomTiles(selectedRoom.id)
+    })
+  }
+
+  const moveTile = useCallback((tile: RoomTile, gridX: number, gridY: number) => {
+    if (!selectedRoom || selectedRoom.status !== 'lobby') return
+    const occupied = selectedRoundTiles.some((candidate, index) => {
+      if (candidate.id === tile.id) return false
+      const position = getRoomTileGridPosition(candidate, index, selectedRoundTiles.length)
+      return position.gridColumn - 1 === gridX && position.gridRow - 1 === gridY
+    })
+    if (occupied) {
+      setError('该位置已有格子，请拖到空白网格')
+      return
+    }
+    void runAdminAction(async () => {
+      if (!supabase) return
+      const { error: rpcError } = await supabase.rpc('admin_update_tile_layout', {
+        p_tile_id: tile.id,
+        p_grid_x: gridX,
+        p_grid_y: gridY,
+      })
+      if (rpcError) throw rpcError
+      await loadRoomTiles(selectedRoom.id)
+    })
+  }, [selectedRoom, selectedRoundTiles, loadRoomTiles])
+
+  function addTiles() {
+    if (!selectedRoom) return
+    void runAdminAction(async () => {
+      if (!supabase) return
+      const { error: rpcError } = await supabase.rpc('admin_add_room_tiles', {
+        p_room_id: selectedRoom.id,
+        p_round: editorRound,
+      })
+      if (rpcError) throw rpcError
+      await Promise.all([loadDashboard(), loadRoomTiles(selectedRoom.id), loadRoomEdges(selectedRoom.id)])
+    })
+  }
+
+  function deleteTilePair() {
+    if (!selectedRoom || !tileDraft || tileDraft.tile_type === 'start') return
+    if (!window.confirm(`将删除第 ${tileDraft.position + 1} 格，并同时删除本轮最后一个非起点格，以保证格子总数为偶数。继续吗？`)) return
+    void runAdminAction(async () => {
+      if (!supabase) return
+      const { error: rpcError } = await supabase.rpc('admin_delete_room_tile_pair', { p_tile_id: tileDraft.id })
+      if (rpcError) throw rpcError
+      await Promise.all([loadDashboard(), loadRoomTiles(selectedRoom.id), loadRoomEdges(selectedRoom.id)])
+    })
+  }
+
+  function addEdge() {
+    if (!selectedRoom || !tileDraft || !edgeTargetId) return
+    void runAdminAction(async () => {
+      if (!supabase) return
+      const { error: rpcError } = await supabase.rpc('admin_upsert_tile_edge', {
+        p_from_tile_id: tileDraft.id,
+        p_to_tile_id: edgeTargetId,
+        p_is_bidirectional: edgeBidirectional,
+      })
+      if (rpcError) throw rpcError
+      await loadRoomEdges(selectedRoom.id)
+      setEdgeTargetId('')
+    })
+  }
+
+  function deleteEdge(edgeId: string) {
+    if (!selectedRoom) return
+    void runAdminAction(async () => {
+      if (!supabase) return
+      const { error: rpcError } = await supabase.rpc('admin_delete_tile_edge', { p_edge_id: edgeId })
+      if (rpcError) throw rpcError
+      await loadRoomEdges(selectedRoom.id)
     })
   }
 
@@ -1032,12 +1154,14 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
     if (!selectedRoom) return
     void runAdminAction(async () => {
       if (!supabase) return
-      const [roomResult, tilesResult] = await Promise.all([
+      const [roomResult, tilesResult, edgesResult] = await Promise.all([
         supabase.from('rooms').select('*').eq('id', selectedRoom.id).single(),
         supabase.from('room_tiles').select('*').eq('room_id', selectedRoom.id).order('round_number').order('position'),
+        supabase.from('room_tile_edges').select('*').eq('room_id', selectedRoom.id).order('created_at'),
       ])
       if (roomResult.error) throw roomResult.error
       if (tilesResult.error) throw tilesResult.error
+      if (edgesResult.error) throw edgesResult.error
       const room = roomResult.data as Room
       const tiles = tilesResult.data as RoomTile[]
       const expectedTiles = Array.from({ length: room.total_rounds ?? 3 }, (_, index) => roundBoardSize(room, (index + 1) as GameRound))
@@ -1069,7 +1193,15 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
           effect_value: Number(tile.effect_value),
           tile_color: tile.tile_color,
           is_randomized: tile.is_randomized,
+          grid_x: tile.grid_x,
+          grid_y: tile.grid_y,
         })),
+        edges: (edgesResult.data as RoomTileEdge[]).map((edge) => ({
+          round_number: edge.round_number,
+          from_position: tiles.find((tile) => tile.id === edge.from_tile_id)?.position ?? -1,
+          to_position: tiles.find((tile) => tile.id === edge.to_tile_id)?.position ?? -1,
+          is_bidirectional: edge.is_bidirectional,
+        })).filter((edge) => edge.from_position >= 0 && edge.to_position >= 0),
       }
       const date = new Date().toISOString().slice(0, 10)
       downloadTextFile(`${safeFilename(room.name)}_房间设置_${date}.json`, JSON.stringify(config, null, 2), 'application/json;charset=utf-8')
@@ -1096,7 +1228,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       }
       if (!config || typeof config !== 'object') throw new Error('导入文件内容无效')
       const candidate = config as Partial<RoomConfigFile> & { version?: number }
-      if (candidate.format !== ROOM_CONFIG_FORMAT || ![1, 2, ROOM_CONFIG_VERSION].includes(candidate.version ?? 0)) {
+      if (candidate.format !== ROOM_CONFIG_FORMAT || ![1, 2, 3, ROOM_CONFIG_VERSION].includes(candidate.version ?? 0)) {
         throw new Error('不支持的房间设置文件格式或版本')
       }
       if (!candidate.settings || !Array.isArray(candidate.tiles) || candidate.tiles.length < MIN_BOARD_SIZE) {
@@ -1107,7 +1239,12 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
         p_config: config,
       })
       if (rpcError) throw rpcError
-      await Promise.all([loadDashboard(), loadRoomTiles(selectedRoom.id), loadRoomEvents(selectedRoom.id)])
+      const { error: graphError } = await supabase.rpc('admin_import_room_graph', {
+        p_room_id: selectedRoom.id,
+        p_config: config,
+      })
+      if (graphError) throw graphError
+      await Promise.all([loadDashboard(), loadRoomTiles(selectedRoom.id), loadRoomEdges(selectedRoom.id), loadRoomEvents(selectedRoom.id)])
       setConfigNotice('房间设置已导入；之后重新随机只会替换标记为“参与随机”的格子')
     })
   }
@@ -1386,7 +1523,10 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                 <section className="admin-board-panel">
                   <div className="board-editor-heading">
                     <div className="section-title"><p className="kicker">随机棋盘与逐格编辑</p><SquarePen size={18} /></div>
-                    <button className="button secondary" disabled={busy || selectedRoom.status !== 'lobby'} onClick={randomizeBoard} type="button"><Shuffle size={17} /> 重新随机全部 {selectedRoom.total_rounds ?? 3} 轮</button>
+                    <div className="board-editor-actions">
+                      <button className="button secondary" disabled={busy || selectedRoom.status !== 'lobby' || selectedRoundTiles.length > MAX_BOARD_SIZE - 2} onClick={addTiles} type="button"><Plus size={17} /> 添加 2 格</button>
+                      <button className="button secondary" disabled={busy || selectedRoom.status !== 'lobby'} onClick={randomizeBoard} type="button"><Shuffle size={17} /> 重新随机全部 {selectedRoom.total_rounds ?? 3} 轮</button>
+                    </div>
                   </div>
                   <div className="board-structure-editor">
                     <div className="structure-stepper">
@@ -1405,7 +1545,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                     ))}
                     <button className="button secondary" disabled={busy || selectedRoom.status !== 'lobby'} onClick={saveBoardStructure} type="button"><Save size={17} /> 保存棋盘结构</button>
                   </div>
-                  <p className="probability-note">每轮第 1 格固定为起点。调整某轮格子数时，只会重建该轮棋盘。</p>
+                  <p className="probability-note">每轮第 1 格固定为起点。格子始终成对增删以保持偶数；可直接拖动格子，再用右侧路线工具连接。</p>
                   <div className="round-tabs" role="tablist" aria-label="选择编辑轮次">
                     {Array.from({ length: selectedRoom.total_rounds ?? 3 }, (_, index) => index + 1).map((round) => (
                       <button aria-selected={editorRound === round} className={editorRound === round ? 'active' : ''} key={round} onClick={() => setEditorRound(round)} role="tab" type="button">
@@ -1418,6 +1558,8 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                       <Board
                         className="admin-board"
                         displayRound={editorRound}
+                        edges={selectedRoundEdges}
+                        onTileMove={moveTile}
                         onTileSelect={chooseTile}
                         players={NO_PLAYERS}
                         room={selectedRoom}
@@ -1486,13 +1628,41 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                               <button aria-label="恢复默认颜色" disabled={selectedRoom.status !== 'lobby' || !tileDraft.tile_color} onClick={() => setTileDraft({ ...tileDraft, tile_color: null })} title="恢复默认颜色" type="button"><RotateCcw size={14} /></button>
                             </span>
                           </label>
+                          <label><span>横向坐标</span><input disabled={selectedRoom.status !== 'lobby'} min="0" onChange={(event) => setTileDraft({ ...tileDraft, grid_x: Math.max(0, Number(event.target.value)) })} type="number" value={tileDraft.grid_x ?? ''} placeholder="自动" /></label>
+                          <label><span>纵向坐标</span><input disabled={selectedRoom.status !== 'lobby'} min="0" onChange={(event) => setTileDraft({ ...tileDraft, grid_y: Math.max(0, Number(event.target.value)) })} type="number" value={tileDraft.grid_y ?? ''} placeholder="自动" /></label>
                           <label className="randomize-toggle">
                             <input checked={tileDraft.is_randomized} disabled={selectedRoom.status !== 'lobby' || tileDraft.tile_type === 'start'} onChange={(event) => setTileDraft({ ...tileDraft, is_randomized: event.target.checked })} type="checkbox" />
                             <span>重新随机时替换此格</span>
                             <small>导入设置后，未勾选的格子始终保持不变</small>
                           </label>
                         </div>
-                        <button className="button primary full" disabled={busy || selectedRoom.status !== 'lobby'} onClick={saveTile} type="button"><Save size={17} /> 保存这个格子</button>
+                        <div className="tile-form-actions">
+                          <button className="button primary" disabled={busy || selectedRoom.status !== 'lobby'} onClick={saveTile} type="button"><Save size={17} /> 保存格子内容</button>
+                          <button className="button danger" disabled={busy || selectedRoom.status !== 'lobby' || tileDraft.tile_type === 'start' || selectedRoundTiles.length <= MIN_BOARD_SIZE} onClick={deleteTilePair} type="button"><Trash2 size={17} /> 删除选中及末格</button>
+                        </div>
+                        <div className="edge-editor">
+                          <div className="edge-editor-title"><span>路线连接</span><Route size={16} /></div>
+                          <div className="edge-create-row">
+                            <select aria-label="路线终点" disabled={selectedRoom.status !== 'lobby'} onChange={(event) => setEdgeTargetId(event.target.value)} value={edgeTargetId}>
+                              <option value="">选择终点格</option>
+                              {selectedRoundTiles.filter((tile) => tile.id !== tileDraft.id).map((tile) => <option key={tile.id} value={tile.id}>第 {tile.position + 1} 格 · {tile.short_name}</option>)}
+                            </select>
+                            <div className="edge-direction" role="group" aria-label="路线方向">
+                              <button className={!edgeBidirectional ? 'active' : ''} onClick={() => setEdgeBidirectional(false)} type="button"><ArrowRight size={15} /> 单向</button>
+                              <button className={edgeBidirectional ? 'active' : ''} onClick={() => setEdgeBidirectional(true)} type="button"><ArrowLeft size={15} /><ArrowRight size={15} /> 双向</button>
+                            </div>
+                            <button className="button secondary" disabled={busy || selectedRoom.status !== 'lobby' || !edgeTargetId} onClick={addEdge} type="button"><ArrowUpRight size={16} /> 添加路线</button>
+                          </div>
+                          <div className="edge-list">
+                            {selectedRoundEdges.filter((edge) => edge.from_tile_id === tileDraft.id || (edge.is_bidirectional && edge.to_tile_id === tileDraft.id)).map((edge) => {
+                              const outgoing = edge.from_tile_id === tileDraft.id
+                              const otherId = outgoing ? edge.to_tile_id : edge.from_tile_id
+                              const other = selectedRoundTiles.find((tile) => tile.id === otherId)
+                              return <div key={edge.id}><span>{edge.is_bidirectional ? '双向' : '单向'} · {outgoing ? '前往' : '来自'}第 {other ? other.position + 1 : '?'} 格</span><button aria-label="删除路线" disabled={busy || selectedRoom.status !== 'lobby'} onClick={() => deleteEdge(edge.id)} title="删除路线" type="button"><X size={14} /></button></div>
+                            })}
+                            {selectedRoundEdges.every((edge) => edge.from_tile_id !== tileDraft.id && (!edge.is_bidirectional || edge.to_tile_id !== tileDraft.id)) && <small>当前格子还没有可用出口</small>}
+                          </div>
+                        </div>
                       </div>
                     ) : <p className="admin-empty">这一轮还没有生成棋盘格。</p>}
                   </div>
@@ -1701,31 +1871,63 @@ const Board = memo(function Board({
   players,
   room,
   tiles: allTiles,
+  edges: allEdges,
   displayRound = room.current_round,
   className = '',
   selectedTileId,
   onTileSelect,
+  onTileMove,
 }: {
   players: Player[]
   room: Room
   tiles: RoomTile[]
+  edges: RoomTileEdge[]
   displayRound?: GameRound
   className?: string
   selectedTileId?: string | null
   onTileSelect?: (tile: RoomTile) => void
+  onTileMove?: (tile: RoomTile, gridX: number, gridY: number) => void
 }) {
   const tiles = getRoundTiles(allTiles, displayRound)
-  const dimensions = getBoardDimensions(tiles.length)
+  const edges = allEdges.filter((edge) => edge.round_number === displayRound)
+  const dimensions = getRoomBoardDimensions(tiles)
   const denseLayout = usesDenseBoardLayout(tiles.length)
+  const denseCenterStart = Math.floor((dimensions.columns - 3) / 2) + 1
   const stageRef = useRef<HTMLDivElement>(null)
   const boardRef = useRef<HTMLDivElement>(null)
   const viewRef = useRef({ x: BOARD_VIEW_PADDING, y: BOARD_VIEW_PADDING, scale: 1 })
   const dragRef = useRef<{ pointerId: number; startX: number; startY: number; originX: number; originY: number } | null>(null)
+  const tileDragRef = useRef<{ pointerId: number; tile: RoomTile; index: number; startX: number; startY: number; moved: boolean } | null>(null)
   const suppressTileClickRef = useRef(false)
   const zoomLabelRef = useRef<HTMLSpanElement>(null)
   const zoomOutButtonRef = useRef<HTMLButtonElement>(null)
   const zoomInButtonRef = useRef<HTMLButtonElement>(null)
   const [isDragging, setIsDragging] = useState(false)
+
+  const tilePositions = useMemo(() => new Map(tiles.map((tile, index) => {
+    const grid = getRoomTileGridPosition(tile, index, tiles.length)
+    return [tile.id, {
+      ...grid,
+      x: BOARD_PADDING + (grid.gridColumn - 1) * (BOARD_TILE_WIDTH + BOARD_GAP) + BOARD_TILE_WIDTH / 2,
+      y: BOARD_PADDING + (grid.gridRow - 1) * (BOARD_TILE_HEIGHT + BOARD_GAP) + BOARD_TILE_HEIGHT / 2,
+    }]
+  })), [tiles])
+
+  const edgeLines = useMemo(() => edges.flatMap((edge) => {
+    const from = tilePositions.get(edge.from_tile_id)
+    const to = tilePositions.get(edge.to_tile_id)
+    if (!from || !to) return []
+    const dx = to.x - from.x
+    const dy = to.y - from.y
+    const distance = Math.hypot(dx, dy)
+    if (distance < 1) return []
+    const unitX = dx / distance
+    const unitY = dy / distance
+    const horizontalBoundary = Math.abs(unitX) > 0.001 ? BOARD_TILE_WIDTH / 2 / Math.abs(unitX) : Number.POSITIVE_INFINITY
+    const verticalBoundary = Math.abs(unitY) > 0.001 ? BOARD_TILE_HEIGHT / 2 / Math.abs(unitY) : Number.POSITIVE_INFINITY
+    const inset = Math.min(distance / 2 - 2, Math.min(horizontalBoundary, verticalBoundary) + 6)
+    return [{ edge, x1: from.x + unitX * inset, y1: from.y + unitY * inset, x2: to.x - unitX * inset, y2: to.y - unitY * inset }]
+  }), [edges, tilePositions])
 
   const getScaledBoardSize = useCallback((scale: number) => ({
     width: (
@@ -1866,6 +2068,35 @@ const Board = memo(function Board({
     window.setTimeout(() => { suppressTileClickRef.current = false }, 0)
   }
 
+  function startTileDrag(event: React.PointerEvent<HTMLButtonElement>, tile: RoomTile, index: number) {
+    if (!onTileMove || event.button !== 0) return
+    event.stopPropagation()
+    tileDragRef.current = { pointerId: event.pointerId, tile, index, startX: event.clientX, startY: event.clientY, moved: false }
+    event.currentTarget.setPointerCapture(event.pointerId)
+  }
+
+  function moveTileDrag(event: React.PointerEvent<HTMLButtonElement>) {
+    const drag = tileDragRef.current
+    if (!drag || drag.pointerId !== event.pointerId) return
+    event.stopPropagation()
+    if (Math.abs(event.clientX - drag.startX) > 3 || Math.abs(event.clientY - drag.startY) > 3) drag.moved = true
+  }
+
+  function stopTileDrag(event: React.PointerEvent<HTMLButtonElement>) {
+    const drag = tileDragRef.current
+    if (!drag || drag.pointerId !== event.pointerId) return
+    event.stopPropagation()
+    tileDragRef.current = null
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+    if (!drag.moved || !onTileMove) return
+    const origin = getRoomTileGridPosition(drag.tile, drag.index, tiles.length)
+    const stepX = (BOARD_TILE_WIDTH + BOARD_GAP) * viewRef.current.scale
+    const stepY = (BOARD_TILE_HEIGHT + BOARD_GAP) * viewRef.current.scale
+    const nextX = Math.max(0, origin.gridColumn - 1 + Math.round((event.clientX - drag.startX) / stepX))
+    const nextY = Math.max(0, origin.gridRow - 1 + Math.round((event.clientY - drag.startY) / stepY))
+    onTileMove(drag.tile, nextX, nextY)
+  }
+
   return (
     <div className={`board-viewport ${className === 'admin-board' ? 'admin-board-viewport' : ''}`}>
       <div className="board-toolbar" aria-label="棋盘缩放工具">
@@ -1885,7 +2116,7 @@ const Board = memo(function Board({
       >
         <div
           aria-label={`${roundLabel(displayRound)}行动棋盘`}
-          className={`board board-size-${tiles.length} ${denseLayout ? 'board-route-grid' : ''} ${className}`.trim()}
+          className={`board board-size-${tiles.length} ${denseLayout ? 'board-multi-ring' : ''} ${className}`.trim()}
           ref={boardRef}
           style={{
             '--board-columns': dimensions.columns,
@@ -1893,6 +2124,18 @@ const Board = memo(function Board({
             '--board-scale': 1,
           } as React.CSSProperties}
         >
+          <svg aria-hidden="true" className="board-routes" viewBox={`0 0 ${dimensions.columns * BOARD_TILE_WIDTH + (dimensions.columns - 1) * BOARD_GAP + BOARD_PADDING * 2} ${dimensions.rows * BOARD_TILE_HEIGHT + (dimensions.rows - 1) * BOARD_GAP + BOARD_PADDING * 2}`}>
+            <defs>
+              <marker id={`route-arrow-${displayRound}-${className || 'player'}`} markerHeight="10" markerUnits="userSpaceOnUse" markerWidth="10" orient="auto-start-reverse" refX="8" refY="5" viewBox="0 0 10 10"><path d="M 0 0 L 10 5 L 0 10 z" /></marker>
+            </defs>
+            {edgeLines.map(({ edge, x1, y1, x2, y2 }) => <line
+              className={edge.is_bidirectional ? 'route-line bidirectional' : 'route-line'}
+              key={edge.id}
+              markerEnd={`url(#route-arrow-${displayRound}-${className || 'player'})`}
+              markerStart={edge.is_bidirectional ? `url(#route-arrow-${displayRound}-${className || 'player'})` : undefined}
+              x1={x1} x2={x2} y1={y1} y2={y2}
+            />)}
+          </svg>
           {tiles.map((tile, index) => {
             const playersHere = players
               .map((player, playerIndex) => ({ player, playerIndex }))
@@ -1917,32 +2160,36 @@ const Board = memo(function Board({
                 aria-pressed={selectedTileId === tile.id}
                 className={tileClassName}
                 key={tile.id}
+                onPointerCancel={stopTileDrag}
+                onPointerDown={(event) => startTileDrag(event, tile, index)}
+                onPointerMove={moveTileDrag}
+                onPointerUp={stopTileDrag}
                 onClick={() => {
-                  if (!suppressTileClickRef.current) onTileSelect(tile)
+                  if (!suppressTileClickRef.current && !tileDragRef.current) onTileSelect(tile)
                 }}
-                style={{ ...getBoardGridPosition(index, tiles.length), ...tileColorStyle(tile) }}
+                style={{ ...getRoomTileGridPosition(tile, index, tiles.length), ...tileColorStyle(tile) }}
                 type="button"
               >
                 {tileContent}
               </button>
             ) : (
-              <div className={tileClassName} key={tile.id} style={{ ...getBoardGridPosition(index, tiles.length), ...tileColorStyle(tile) }}>
+              <div className={tileClassName} key={tile.id} style={{ ...getRoomTileGridPosition(tile, index, tiles.length), ...tileColorStyle(tile) }}>
                 {tileContent}
               </div>
             )
           })}
-          {!denseLayout && (
-            <div
-              className="board-center"
-              data-round={displayRound}
-              style={{ gridColumn: `2 / ${dimensions.columns}`, gridRow: `2 / ${dimensions.rows}` }}
-            >
-              <span className="center-mark"><span /></span>
-              <p>{roundLabel(displayRound)} · {tiles.length} CELLS</p>
-              <strong>护航协议局</strong>
-              <small>每个房间使用独立随机棋盘</small>
-            </div>
-          )}
+          <div
+            className="board-center"
+            data-round={displayRound}
+            style={denseLayout
+              ? { gridColumn: `${denseCenterStart} / span 3`, gridRow: `${denseCenterStart} / span 3` }
+              : { gridColumn: `2 / ${dimensions.columns}`, gridRow: `2 / ${dimensions.rows}` }}
+          >
+            <span className="center-mark"><span /></span>
+            <p>{roundLabel(displayRound)} · {tiles.length} CELLS</p>
+            <strong>护航协议局</strong>
+            <small>每个房间使用独立随机棋盘</small>
+          </div>
         </div>
       </div>
     </div>
@@ -1954,6 +2201,7 @@ function GameView({
   busy,
   dice,
   onRoll,
+  onChooseRoute,
   onAddDemoDice,
   onRestart,
   onExit,
@@ -1962,6 +2210,7 @@ function GameView({
   busy: boolean
   dice: number | null
   onRoll: () => void
+  onChooseRoute: (route: RouteOption) => void
   onAddDemoDice: () => void
   onRestart: () => void
   onExit: () => void
@@ -1971,6 +2220,8 @@ function GameView({
   const winner = snapshot.players.find((player) => player.user_id === snapshot.room.winner_id)
   const isMyTurn = snapshot.room.current_turn === snapshot.userId
   const waitingForDice = snapshot.room.status === 'playing' && snapshot.room.current_turn === null
+  const routePending = snapshot.room.pending_player_id !== null
+  const isChoosingRoute = snapshot.room.pending_player_id === snapshot.userId
   const sortedPlayers = useMemo(
     () => [...snapshot.players].sort((a, b) => b.distance - a.distance || a.turn_order - b.turn_order),
     [snapshot.players],
@@ -1988,7 +2239,22 @@ function GameView({
             </div>
             <span>{roundLabel(snapshot.room.current_round)} · {snapshot.room.board_size} 格 · 当前骰子 {ownPlayer?.dice_count ?? 0} 个</span>
           </div>
-          <Board players={snapshot.players} room={snapshot.room} tiles={snapshot.tiles} />
+          <Board edges={snapshot.edges} players={snapshot.players} room={snapshot.room} tiles={snapshot.tiles} />
+          {routePending && (
+            <section className="route-choice-panel" aria-live="polite">
+              <div><Route size={19} /><strong>{isChoosingRoute ? `骰子为 ${snapshot.room.pending_dice}，请选择路线` : `等待 ${currentPlayer?.nickname ?? '当前玩家'} 选择路线`}</strong></div>
+              {isChoosingRoute && <div className="route-options">
+                {snapshot.room.pending_route_options.map((option, index) => {
+                  const destination = snapshot.tiles.find((tile) => tile.id === option.tile_id)
+                  const pathLabels = option.path.slice(1).map((tileId) => {
+                    const tile = snapshot.tiles.find((item) => item.id === tileId)
+                    return tile ? String(tile.position + 1) : '?'
+                  }).join(' → ')
+                  return <button disabled={busy} key={`${option.tile_id}-${index}`} onClick={() => onChooseRoute(option)} type="button"><span>路线 {index + 1}</span><strong>前往第 {option.position + 1} 格 · {destination?.short_name ?? '未知格'}</strong><small>{pathLabels}</small></button>
+                })}
+              </div>}
+            </section>
+          )}
         </section>
 
         <aside className="game-sidebar">
@@ -1997,7 +2263,7 @@ function GameView({
               {dice ?? <Dice5 size={34} />}
             </div>
             <div className="dice-actions">
-              <button className="button primary roll-button" disabled={busy || snapshot.room.is_paused || !isMyTurn || snapshot.room.status !== 'playing' || (ownPlayer?.dice_count ?? 0) <= 0} onClick={onRoll} type="button">
+              <button className="button primary roll-button" disabled={busy || routePending || snapshot.room.is_paused || !isMyTurn || snapshot.room.status !== 'playing' || (ownPlayer?.dice_count ?? 0) <= 0} onClick={onRoll} type="button">
                 {busy ? <LoaderCircle className="spin" size={19} /> : <Dice5 size={19} />}
                 <span>{snapshot.room.is_paused ? '等待管理员继续' : waitingForDice ? '等待补充骰子' : isMyTurn ? `掷骰行动 · 剩余 ${ownPlayer?.dice_count ?? 0}` : '等待回合'}</span>
               </button>
@@ -2140,6 +2406,7 @@ export default function App() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'room_players', filter: `room_id=eq.${roomId}` }, () => void refreshRoom(roomId, userId))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'game_events', filter: `room_id=eq.${roomId}` }, () => void refreshRoom(roomId, userId))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'room_tiles', filter: `room_id=eq.${roomId}` }, () => void refreshRoom(roomId, userId))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'room_tile_edges', filter: `room_id=eq.${roomId}` }, () => void refreshRoom(roomId, userId))
       .subscribe()
 
     return () => {
@@ -2262,6 +2529,19 @@ export default function App() {
     })
   }
 
+  function chooseRoute(route: RouteOption) {
+    if (!snapshot || snapshot.isDemo || !supabase) return
+    const client = supabase
+    void runAction(async () => {
+      const { error: rpcError } = await client.rpc('choose_route', {
+        p_room_id: snapshot.room.id,
+        p_path: route.path,
+      })
+      if (rpcError) throw rpcError
+      await refreshRoom(snapshot.room.id, snapshot.userId)
+    })
+  }
+
   function clearLocalRoom() {
     localStorage.removeItem(ACTIVE_ROOM_KEY)
     setSnapshot(null)
@@ -2324,7 +2604,7 @@ export default function App() {
         <LobbyView busy={busy} onProfileUpdate={updateLobbyProfile} onReady={toggleReady} onStart={startGame} snapshot={snapshot} />
       )}
       {snapshot && snapshot.room.status !== 'lobby' && (
-        <GameView busy={busy} dice={dice} onAddDemoDice={addDemoDice} onExit={exitRoom} onRestart={restartDemo} onRoll={rollDice} snapshot={snapshot} />
+        <GameView busy={busy} dice={dice} onAddDemoDice={addDemoDice} onChooseRoute={chooseRoute} onExit={exitRoom} onRestart={restartDemo} onRoll={rollDice} snapshot={snapshot} />
       )}
       {error && (
         <div className="toast" role="alert">

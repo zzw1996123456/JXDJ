@@ -1434,6 +1434,17 @@ button.mode-card {
   margin-bottom: 0;
 }
 
+.board-editor-actions,
+.tile-form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.tile-form-actions .button {
+  flex: 1 1 160px;
+}
+
 .round-tabs {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(105px, 1fr));
@@ -1479,10 +1490,93 @@ button.mode-card {
 .admin-board .tile {
   appearance: none;
   color: var(--ink);
-  cursor: pointer;
+  cursor: move;
   font: inherit;
   text-align: left;
 }
+
+.edge-editor {
+  margin-top: 14px;
+  border-top: 1px solid #343a31;
+  padding-top: 13px;
+}
+
+.edge-editor-title,
+.edge-list > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.edge-editor-title {
+  color: var(--acid);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.edge-create-row {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.edge-create-row select {
+  width: 100%;
+  height: 40px;
+  border: 1px solid #42483d;
+  border-radius: 4px;
+  background: #11130f;
+  color: var(--ink);
+  padding: 0 10px;
+}
+
+.edge-direction {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+
+.edge-direction button {
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border: 1px solid #42483d;
+  background: #141711;
+  color: #91998b;
+  cursor: pointer;
+}
+
+.edge-direction button + button { border-left: 0; }
+.edge-direction button.active { background: var(--acid); color: #14170d; }
+
+.edge-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.edge-list > div {
+  min-height: 34px;
+  border: 1px solid #343a31;
+  padding: 5px 7px 5px 10px;
+  color: #a9b1a1;
+  font-size: 10px;
+}
+
+.edge-list button {
+  width: 26px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: #ff7569;
+  cursor: pointer;
+}
+
+.edge-list > small { color: #71796d; }
 
 .admin-board .tile.selected {
   z-index: 2;
@@ -1913,6 +2007,45 @@ button.mode-card {
   box-shadow: 0 0 0 5px rgba(217, 255, 79, 0.09);
 }
 
+.route-choice-panel {
+  border-top: 1px solid #3b4237;
+  background: #151912;
+  padding: 12px;
+}
+
+.route-choice-panel > div:first-child {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--acid);
+  font-size: 12px;
+}
+
+.route-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.route-options button {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+  border: 1px solid #46503d;
+  border-radius: 4px;
+  background: #1c2118;
+  color: var(--ink);
+  padding: 10px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.route-options button:hover:not(:disabled) { border-color: var(--acid); }
+.route-options span { color: var(--acid); font-size: 9px; font-weight: 800; }
+.route-options strong { font-size: 11px; }
+.route-options small { overflow-wrap: anywhere; color: #8c9585; font-size: 9px; }
+
 .board-viewport {
   min-width: 0;
   min-height: 0;
@@ -2000,23 +2133,53 @@ button.mode-card {
   display: grid;
   grid-template-columns: repeat(var(--board-columns), calc(120px * var(--board-scale)));
   grid-template-rows: repeat(var(--board-rows), calc(92px * var(--board-scale)));
-  gap: calc(4px * var(--board-scale));
+  gap: calc(18px * var(--board-scale));
   border: 1px solid #3a4033;
   background: #0b0d0a;
   padding: calc(4px * var(--board-scale));
   will-change: transform;
 }
 
-.board-route-grid {
+.board-routes {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.route-line {
+  stroke: #80e7ff;
+  stroke-width: 3;
+  stroke-linecap: round;
+  opacity: 0.85;
+  vector-effect: non-scaling-stroke;
+}
+
+.route-line.bidirectional {
+  stroke: #dbff4b;
+}
+
+.board-routes marker path { fill: #80e7ff; }
+.board-routes .bidirectional { color: #dbff4b; }
+
+.board-multi-ring {
   background-color: #11140f;
   background-image: linear-gradient(#171b14 1px, transparent 1px), linear-gradient(90deg, #171b14 1px, transparent 1px);
-  background-size: calc(124px * var(--board-scale)) calc(96px * var(--board-scale));
+  background-size: calc(138px * var(--board-scale)) calc(110px * var(--board-scale));
+}
+
+.board-multi-ring .board-center {
+  box-shadow: inset 0 0 0 1px rgba(217, 255, 79, 0.04);
 }
 
 .tile {
   min-width: 0;
   min-height: 0;
   position: relative;
+  z-index: 1;
   display: flex;
   flex-direction: column;
   justify-content: center;

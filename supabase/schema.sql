@@ -1617,6 +1617,462 @@ end $$;
 
 select pg_notify('pgrst', 'reload schema');
 
+-- Advanced graph board: free tile placement, directed routes, and player route choice.
+alter table public.room_tiles add column if not exists grid_x integer;
+alter table public.room_tiles add column if not exists grid_y integer;
+alter table public.room_tiles drop constraint if exists room_tiles_grid_x_check;
+alter table public.room_tiles add constraint room_tiles_grid_x_check check (grid_x is null or grid_x between 0 and 200);
+alter table public.room_tiles drop constraint if exists room_tiles_grid_y_check;
+alter table public.room_tiles add constraint room_tiles_grid_y_check check (grid_y is null or grid_y between 0 and 200);
+
+alter table public.rooms add column if not exists pending_dice integer;
+alter table public.rooms add column if not exists pending_player_id uuid;
+alter table public.rooms add column if not exists pending_route_options jsonb not null default '[]'::jsonb;
+
+create table if not exists public.room_tile_edges (
+  id uuid primary key default gen_random_uuid(),
+  room_id uuid not null references public.rooms(id) on delete cascade,
+  round_number integer not null check (round_number between 1 and 10),
+  from_tile_id uuid not null references public.room_tiles(id) on delete cascade,
+  to_tile_id uuid not null references public.room_tiles(id) on delete cascade,
+  is_bidirectional boolean not null default false,
+  created_at timestamptz not null default now(),
+  check (from_tile_id <> to_tile_id),
+  unique (from_tile_id, to_tile_id)
+);
+
+create index if not exists room_tile_edges_room_round_idx on public.room_tile_edges(room_id, round_number);
+create index if not exists room_tile_edges_from_idx on public.room_tile_edges(from_tile_id);
+create index if not exists room_tile_edges_to_idx on public.room_tile_edges(to_tile_id);
+
+alter table public.room_tile_edges enable row level security;
+drop policy if exists "room members can read tile edges" on public.room_tile_edges;
+create policy "room members can read tile edges" on public.room_tile_edges for select to authenticated
+  using (public.is_room_member(room_id));
+drop policy if exists "admins can read tile edges" on public.room_tile_edges;
+create policy "admins can read tile edges" on public.room_tile_edges for select to authenticated
+  using (public.is_admin());
+
+create or replace function public.ensure_room_edges_internal(p_room_id uuid, p_round integer)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+begin
+  if exists (select 1 from public.room_tile_edges where room_id = p_room_id and round_number = p_round) then return; end if;
+  insert into public.room_tile_edges(room_id, round_number, from_tile_id, to_tile_id, is_bidirectional)
+  select p_room_id, p_round, current_tile.id, next_tile.id, false
+  from public.room_tiles current_tile
+  join public.room_tiles next_tile on next_tile.room_id = current_tile.room_id
+    and next_tile.round_number = current_tile.round_number
+    and next_tile.position = mod(current_tile.position + 1, (
+      select count(*) from public.room_tiles size_tiles
+      where size_tiles.room_id = p_room_id and size_tiles.round_number = p_round
+    ))
+  where current_tile.room_id = p_room_id and current_tile.round_number = p_round
+  on conflict (from_tile_id, to_tile_id) do nothing;
+end;
+$$;
+
+do $$
+declare v_board record;
+begin
+  for v_board in select distinct room_id, round_number from public.room_tiles loop
+    perform public.ensure_room_edges_internal(v_board.room_id, v_board.round_number);
+  end loop;
+end $$;
+
+create or replace function public.admin_update_tile_layout(p_tile_id uuid, p_grid_x integer, p_grid_y integer)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+declare v_tile public.room_tiles%rowtype;
+begin
+  if not public.is_admin() then raise exception '只有管理员可以移动格子'; end if;
+  if p_grid_x not between 0 and 200 or p_grid_y not between 0 and 200 then raise exception '格子坐标必须在 0 到 200 之间'; end if;
+  select rt.* into v_tile from public.room_tiles rt join public.rooms r on r.id = rt.room_id
+  where rt.id = p_tile_id and r.status = 'lobby' for update of rt;
+  if not found then raise exception '格子不存在，或房间已经开始'; end if;
+  if exists (select 1 from public.room_tiles where room_id = v_tile.room_id and round_number = v_tile.round_number
+    and id <> p_tile_id and grid_x = p_grid_x and grid_y = p_grid_y) then raise exception '该位置已经有格子'; end if;
+  update public.room_tiles set grid_x = p_grid_x, grid_y = p_grid_y where id = p_tile_id;
+end;
+$$;
+
+create or replace function public.admin_add_room_tiles(p_room_id uuid, p_round integer)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_room public.rooms%rowtype;
+  v_size integer;
+  v_start uuid;
+  v_previous uuid;
+  v_first uuid;
+  v_second uuid;
+begin
+  if not public.is_admin() then raise exception '只有管理员可以添加格子'; end if;
+  select * into v_room from public.rooms where id = p_room_id and status = 'lobby' for update;
+  if not found then raise exception '只能在开局前添加格子'; end if;
+  if p_round not between 1 and v_room.total_rounds then raise exception '轮次无效'; end if;
+  v_size := (v_room.round_board_sizes ->> (p_round - 1))::integer;
+  if v_size > 98 then raise exception '每轮最多 100 格'; end if;
+  perform public.ensure_room_edges_internal(p_room_id, p_round);
+  select id into v_start from public.room_tiles where room_id = p_room_id and round_number = p_round and position = 0;
+  select id into v_previous from public.room_tiles where room_id = p_room_id and round_number = p_round and position = v_size - 1;
+  insert into public.room_tiles(room_id, round_number, position, name, short_name, tile_type, detail, effect_type, effect_value, is_randomized)
+  values (p_room_id, p_round, v_size, '空格', '空格', 'empty', '平安经过，本格不触发额外效果', 'none', 0, true)
+  returning id into v_first;
+  insert into public.room_tiles(room_id, round_number, position, name, short_name, tile_type, detail, effect_type, effect_value, is_randomized)
+  values (p_room_id, p_round, v_size + 1, '空格', '空格', 'empty', '平安经过，本格不触发额外效果', 'none', 0, true)
+  returning id into v_second;
+  delete from public.room_tile_edges where from_tile_id = v_previous and to_tile_id = v_start and not is_bidirectional;
+  insert into public.room_tile_edges(room_id, round_number, from_tile_id, to_tile_id)
+  values (p_room_id, p_round, v_previous, v_first), (p_room_id, p_round, v_first, v_second), (p_room_id, p_round, v_second, v_start)
+  on conflict (from_tile_id, to_tile_id) do nothing;
+  update public.rooms set
+    round_board_sizes = jsonb_set(round_board_sizes, array[(p_round - 1)::text], to_jsonb(v_size + 2)),
+    round1_board_size = case when p_round = 1 then v_size + 2 else round1_board_size end,
+    round2_board_size = case when p_round = 2 then v_size + 2 else round2_board_size end,
+    round3_board_size = case when p_round = 3 then v_size + 2 else round3_board_size end,
+    board_size = case when p_round = 1 then v_size + 2 else board_size end
+  where id = p_room_id;
+  insert into public.game_events(room_id, message) values (p_room_id, '管理员在第' || p_round || '轮添加了 2 个格子');
+end;
+$$;
+
+create or replace function public.admin_delete_room_tile_pair(p_tile_id uuid)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_tile public.room_tiles%rowtype;
+  v_room public.rooms%rowtype;
+  v_size integer;
+  v_partner uuid;
+  v_item record;
+  v_position integer := 0;
+begin
+  if not public.is_admin() then raise exception '只有管理员可以删除格子'; end if;
+  select rt.* into v_tile from public.room_tiles rt join public.rooms r on r.id = rt.room_id
+  where rt.id = p_tile_id and r.status = 'lobby' for update of rt;
+  if not found then raise exception '格子不存在，或房间已经开始'; end if;
+  if v_tile.position = 0 then raise exception '起点格不能删除'; end if;
+  select * into v_room from public.rooms where id = v_tile.room_id for update;
+  v_size := (v_room.round_board_sizes ->> (v_tile.round_number - 1))::integer;
+  if v_size <= 2 then raise exception '每轮至少保留 2 格'; end if;
+  select id into v_partner from public.room_tiles where room_id = v_tile.room_id and round_number = v_tile.round_number
+    and position > 0 and id <> p_tile_id order by position desc limit 1;
+  delete from public.room_tiles where id in (p_tile_id, v_partner);
+  update public.room_tiles set position = position + 1000
+  where room_id = v_tile.room_id and round_number = v_tile.round_number;
+  for v_item in select id from public.room_tiles where room_id = v_tile.room_id and round_number = v_tile.round_number order by position loop
+    update public.room_tiles set position = v_position where id = v_item.id;
+    v_position := v_position + 1;
+  end loop;
+  update public.rooms set
+    round_board_sizes = jsonb_set(round_board_sizes, array[(v_tile.round_number - 1)::text], to_jsonb(v_size - 2)),
+    round1_board_size = case when v_tile.round_number = 1 then v_size - 2 else round1_board_size end,
+    round2_board_size = case when v_tile.round_number = 2 then v_size - 2 else round2_board_size end,
+    round3_board_size = case when v_tile.round_number = 3 then v_size - 2 else round3_board_size end,
+    board_size = case when v_tile.round_number = 1 then v_size - 2 else board_size end
+  where id = v_tile.room_id;
+  insert into public.game_events(room_id, message) values (v_tile.room_id, '管理员在第' || v_tile.round_number || '轮删除了 2 个格子');
+end;
+$$;
+
+create or replace function public.admin_upsert_tile_edge(p_from_tile_id uuid, p_to_tile_id uuid, p_is_bidirectional boolean)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+declare v_from public.room_tiles%rowtype; v_to public.room_tiles%rowtype;
+begin
+  if not public.is_admin() then raise exception '只有管理员可以编辑路线'; end if;
+  select * into v_from from public.room_tiles where id = p_from_tile_id;
+  select * into v_to from public.room_tiles where id = p_to_tile_id;
+  if v_from.id is null or v_to.id is null or v_from.room_id <> v_to.room_id or v_from.round_number <> v_to.round_number or v_from.id = v_to.id then
+    raise exception '路线两端必须是同一轮的两个不同格子';
+  end if;
+  if not exists (select 1 from public.rooms where id = v_from.room_id and status = 'lobby') then raise exception '只能在开局前编辑路线'; end if;
+  if not exists (select 1 from public.room_tile_edges where from_tile_id = p_from_tile_id and to_tile_id = p_to_tile_id)
+    and (select count(*) from public.room_tile_edges where from_tile_id = p_from_tile_id or (is_bidirectional and to_tile_id = p_from_tile_id)) >= 4
+  then raise exception '每个格子最多设置 4 个出口'; end if;
+  if p_is_bidirectional and not exists (select 1 from public.room_tile_edges where from_tile_id = p_from_tile_id and to_tile_id = p_to_tile_id and is_bidirectional)
+    and (select count(*) from public.room_tile_edges where from_tile_id = p_to_tile_id or (is_bidirectional and to_tile_id = p_to_tile_id)) >= 4
+  then raise exception '双向路线的终点已有 4 个出口'; end if;
+  if p_is_bidirectional then delete from public.room_tile_edges where from_tile_id = p_to_tile_id and to_tile_id = p_from_tile_id; end if;
+  insert into public.room_tile_edges(room_id, round_number, from_tile_id, to_tile_id, is_bidirectional)
+  values (v_from.room_id, v_from.round_number, p_from_tile_id, p_to_tile_id, p_is_bidirectional)
+  on conflict (from_tile_id, to_tile_id) do update set is_bidirectional = excluded.is_bidirectional;
+end;
+$$;
+
+create or replace function public.admin_delete_tile_edge(p_edge_id uuid)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+begin
+  if not public.is_admin() then raise exception '只有管理员可以删除路线'; end if;
+  delete from public.room_tile_edges edge using public.rooms room
+  where edge.id = p_edge_id and room.id = edge.room_id and room.status = 'lobby';
+  if not found then raise exception '路线不存在，或房间已经开始'; end if;
+end;
+$$;
+
+create or replace function public.get_room_route_options_internal(p_room_id uuid, p_round integer, p_start_tile_id uuid, p_steps integer)
+returns jsonb
+language sql security definer set search_path = public
+as $$
+  with recursive adjacency(from_id, to_id) as (
+    select from_tile_id, to_tile_id from public.room_tile_edges where room_id = p_room_id and round_number = p_round
+    union
+    select to_tile_id, from_tile_id from public.room_tile_edges where room_id = p_room_id and round_number = p_round and is_bidirectional
+  ), walk(step, tile_id, path) as (
+    select 0, p_start_tile_id, array[p_start_tile_id]::uuid[]
+    union all
+    select walk.step + 1, next_edge.to_id, walk.path || next_edge.to_id
+    from walk cross join lateral (
+      select adjacency.to_id from adjacency where adjacency.from_id = walk.tile_id order by adjacency.to_id limit 4
+    ) next_edge
+    where walk.step < p_steps
+  ), options as (
+    select walk.tile_id, tile.position, walk.path
+    from walk join public.room_tiles tile on tile.id = walk.tile_id
+    where walk.step = p_steps
+    order by tile.position, walk.path::text
+    limit 64
+  )
+  select coalesce(jsonb_agg(jsonb_build_object('tile_id', tile_id, 'position', position, 'path', to_jsonb(path))), '[]'::jsonb) from options;
+$$;
+
+create or replace function public.resolve_room_landing_internal(p_room_id uuid, p_player_id uuid, p_dice integer, p_tile_id uuid)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_room public.rooms%rowtype;
+  v_player public.room_players%rowtype;
+  v_tile public.room_tiles%rowtype;
+  v_position integer;
+  v_distance integer;
+  v_remaining integer;
+  v_skip integer;
+  v_modifier integer;
+  v_change integer := 0;
+  v_advanced boolean := false;
+  v_finished boolean := false;
+  v_next_round integer;
+  v_next_size integer;
+  v_guarantee_before integer;
+  v_guarantee integer;
+begin
+  select * into v_room from public.rooms where id = p_room_id for update;
+  select * into v_player from public.room_players where id = p_player_id and room_id = p_room_id for update;
+  select * into v_tile from public.room_tiles where id = p_tile_id and room_id = p_room_id and round_number = v_room.current_round;
+  if v_player.id is null or v_tile.id is null then raise exception '路线终点无效'; end if;
+  v_position := v_tile.position;
+  v_distance := v_player.distance + p_dice;
+  v_remaining := v_player.dice_count;
+  v_skip := v_player.skip_turns;
+  v_modifier := v_player.next_roll_modifier;
+  case v_tile.effect_type
+    when 'move' then
+      v_position := mod(mod(v_position + v_tile.effect_value::integer, v_room.board_size) + v_room.board_size, v_room.board_size);
+      v_distance := greatest(0, v_distance + v_tile.effect_value::integer);
+    when 'skip' then v_skip := least(3, v_skip + v_tile.effect_value::integer);
+    when 'extra_roll' then v_remaining := least(20, v_remaining + v_tile.effect_value::integer);
+    when 'lose_roll' then v_modifier := greatest(-4, v_modifier - v_tile.effect_value::integer);
+    when 'advance_chance' then v_advanced := v_room.current_round < v_room.total_rounds and v_player.role = 'boss' and v_player.round_roll_count > 2;
+    when 'advance_round' then v_advanced := v_room.current_round < v_room.total_rounds and v_player.role = 'boss' and v_player.round_roll_count > 2;
+    when 'finish' then v_finished := v_room.current_round = v_room.total_rounds;
+    else null;
+  end case;
+  update public.room_players set position = v_position, distance = v_distance, skip_turns = v_skip,
+    next_roll_modifier = v_modifier, dice_count = v_remaining where id = v_player.id;
+  insert into public.game_events(room_id, message, event_type, metadata) values (
+    p_room_id, v_player.nickname || ' 掷出 ' || p_dice || '，沿所选路线落到「' || v_tile.name || '」：' || v_tile.detail,
+    'roll', jsonb_build_object('player_id', v_player.id, 'player_name', v_player.nickname, 'role', v_player.role,
+      'round', v_room.current_round, 'dice', p_dice, 'landed_position', v_tile.position, 'tile_name', v_tile.name,
+      'tile_detail', v_tile.detail, 'tile_type', v_tile.tile_type, 'effect_type', v_tile.effect_type, 'effect_value', v_tile.effect_value)
+  );
+  if v_tile.effect_type in ('guarantee_add','guarantee_subtract','guarantee_multiply','guarantee_divide') then
+    select coins into v_guarantee_before from public.room_players where room_id = p_room_id and role = 'boss' for update;
+    if not found then raise exception '当前房间没有老板，无法结算保底'; end if;
+    v_guarantee := case v_tile.effect_type
+      when 'guarantee_add' then least(1000000::numeric, v_guarantee_before::numeric + v_tile.effect_value)::integer
+      when 'guarantee_subtract' then greatest(0, v_guarantee_before - v_tile.effect_value)::integer
+      when 'guarantee_multiply' then round(least(1000000::numeric, v_guarantee_before::numeric * v_tile.effect_value))::integer
+      when 'guarantee_divide' then case when v_tile.effect_value = 0 then 0 else round(v_guarantee_before::numeric / v_tile.effect_value)::integer end
+    end;
+    v_change := v_guarantee - v_guarantee_before;
+    update public.room_players set coins = v_guarantee where room_id = p_room_id and role = 'boss';
+    insert into public.game_events(room_id, message) values (p_room_id, '老板保底变化：' || v_guarantee_before || ' 万 → ' || v_guarantee || ' 万');
+  end if;
+  if v_tile.effect_type = 'move' then
+    insert into public.game_events(room_id, message) values (p_room_id, v_player.nickname || case when v_tile.effect_value > 0 then ' 前进 ' else ' 后退 ' end || abs(v_tile.effect_value) || ' 格，到达第 ' || (v_position + 1) || ' 格');
+  end if;
+  if v_finished then
+    if not exists (select 1 from public.room_players where room_id = p_room_id and dice_count > 0) then perform public.create_zero_dice_rule_internal(p_room_id); end if;
+    update public.rooms set status = 'finished', is_paused = false, winner_id = v_player.user_id, current_turn = null,
+      rolls_remaining = 0, pending_dice = null, pending_player_id = null, pending_route_options = '[]'::jsonb where id = p_room_id;
+    insert into public.game_events(room_id, message) values (p_room_id, v_player.nickname || ' 完成最终结算，本局结束');
+  else
+    if v_advanced then
+      v_next_round := v_room.current_round + 1;
+      v_next_size := (v_room.round_board_sizes ->> (v_next_round - 1))::integer;
+      update public.rooms set current_round = v_next_round, board_size = v_next_size where id = p_room_id;
+      update public.room_players set position = 0, round_roll_count = 0 where room_id = p_room_id;
+      insert into public.game_events(room_id, message) values (p_room_id, '队伍进入第 ' || v_next_round || ' 轮 ' || v_next_size || ' 格棋盘');
+    end if;
+    perform public.advance_room_turn_internal(p_room_id, v_player.turn_order);
+  end if;
+end;
+$$;
+
+drop function if exists public.roll_dice(uuid);
+create function public.roll_dice(p_room_id uuid)
+returns table(dice_value integer, landed_position integer, coin_change integer, winner boolean)
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_room public.rooms%rowtype;
+  v_player public.room_players%rowtype;
+  v_start_tile uuid;
+  v_dice integer;
+  v_options jsonb;
+  v_option jsonb;
+  v_landed uuid;
+  v_remaining integer;
+  v_chance integer;
+  v_should_advance boolean := false;
+  v_candidate integer;
+  v_candidate_options jsonb;
+  v_candidate_dice integer[] := array[]::integer[];
+begin
+  select * into v_room from public.rooms where id = p_room_id for update;
+  if not found or v_room.status <> 'playing' then raise exception '当前没有进行中的行动'; end if;
+  if v_room.is_paused then raise exception '本局已被管理员暂停，暂时不能掷骰'; end if;
+  if v_room.pending_player_id is not null then raise exception '请先完成当前路线选择'; end if;
+  if v_room.current_turn <> auth.uid() then raise exception '还没有轮到你'; end if;
+  select * into v_player from public.room_players where room_id = p_room_id and user_id = auth.uid() for update;
+  if not found or v_player.dice_count <= 0 then raise exception '当前没有可用骰子'; end if;
+  perform public.ensure_room_edges_internal(p_room_id, v_room.current_round);
+  select id into v_start_tile from public.room_tiles where room_id = p_room_id and round_number = v_room.current_round and position = v_player.position;
+  if v_room.current_round < v_room.total_rounds then
+    v_chance := (v_room.round_advance_chances ->> (v_room.current_round - 1))::integer;
+    v_should_advance := v_player.role = 'boss' and v_player.round_roll_count >= 2
+      and floor(random() * 100)::integer < v_chance;
+    for v_candidate in 1..6 loop
+      v_candidate_options := public.get_room_route_options_internal(p_room_id, v_room.current_round, v_start_tile, v_candidate);
+      if exists (
+        select 1 from jsonb_array_elements(v_candidate_options) option(value)
+        join public.room_tiles tile on tile.id = (option.value ->> 'tile_id')::uuid
+        where (tile.effect_type in ('advance_chance', 'advance_round')) = v_should_advance
+      ) then v_candidate_dice := array_append(v_candidate_dice, v_candidate); end if;
+    end loop;
+  end if;
+  if coalesce(array_length(v_candidate_dice, 1), 0) > 0 then
+    v_dice := v_candidate_dice[1 + floor(random() * array_length(v_candidate_dice, 1))::integer];
+  else
+    v_dice := floor(random() * 6 + 1)::integer;
+  end if;
+  v_options := public.get_room_route_options_internal(p_room_id, v_room.current_round, v_start_tile, v_dice);
+  if v_room.current_round < v_room.total_rounds then
+    select coalesce(jsonb_agg(option.value), '[]'::jsonb) into v_candidate_options
+    from jsonb_array_elements(v_options) option(value)
+    join public.room_tiles tile on tile.id = (option.value ->> 'tile_id')::uuid
+    where (tile.effect_type in ('advance_chance', 'advance_round')) = v_should_advance;
+    if jsonb_array_length(v_candidate_options) > 0 then v_options := v_candidate_options; end if;
+  end if;
+  if jsonb_array_length(v_options) = 0 then raise exception '当前格子在 % 步内没有完整路线，请管理员检查箭头连接', v_dice; end if;
+  v_remaining := greatest(0, v_player.dice_count - 1);
+  update public.room_players set dice_count = v_remaining, round_roll_count = round_roll_count + 1 where id = v_player.id;
+  if jsonb_array_length(v_options) > 1 then
+    update public.rooms set pending_dice = v_dice, pending_player_id = v_player.user_id,
+      pending_route_options = v_options, rolls_remaining = v_remaining where id = p_room_id;
+    insert into public.game_events(room_id, message) values (p_room_id, v_player.nickname || ' 掷出 ' || v_dice || '，遇到分叉路线，等待选择走向');
+    return query select v_dice, -1, 0, false;
+    return;
+  end if;
+  v_option := v_options -> 0;
+  v_landed := (v_option ->> 'tile_id')::uuid;
+  perform public.resolve_room_landing_internal(p_room_id, v_player.id, v_dice, v_landed);
+  return query select v_dice, (v_option ->> 'position')::integer, 0, false;
+end;
+$$;
+
+create or replace function public.choose_route(p_room_id uuid, p_path jsonb)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+declare v_room public.rooms%rowtype; v_player public.room_players%rowtype; v_option jsonb; v_landed uuid; v_dice integer;
+begin
+  select * into v_room from public.rooms where id = p_room_id for update;
+  if not found or v_room.status <> 'playing' or v_room.pending_player_id is null then raise exception '当前没有待选择的路线'; end if;
+  if v_room.pending_player_id <> auth.uid() or v_room.current_turn <> auth.uid() then raise exception '这不是你的路线选择'; end if;
+  select value into v_option from jsonb_array_elements(v_room.pending_route_options) option(value) where value -> 'path' = p_path limit 1;
+  if v_option is null then raise exception '所选路线已失效，请刷新后重试'; end if;
+  select * into v_player from public.room_players where room_id = p_room_id and user_id = auth.uid() for update;
+  v_landed := (v_option ->> 'tile_id')::uuid;
+  v_dice := v_room.pending_dice;
+  update public.rooms set pending_dice = null, pending_player_id = null, pending_route_options = '[]'::jsonb where id = p_room_id;
+  perform public.resolve_room_landing_internal(p_room_id, v_player.id, v_dice, v_landed);
+end;
+$$;
+
+create or replace function public.validate_graph_before_start()
+returns trigger
+language plpgsql security definer set search_path = public
+as $$
+declare v_round integer; v_tile record;
+begin
+  if old.status = 'lobby' and new.status = 'playing' then
+    for v_round in 1..new.total_rounds loop
+      perform public.ensure_room_edges_internal(new.id, v_round);
+      for v_tile in select id, position from public.room_tiles where room_id = new.id and round_number = v_round loop
+        if not exists (
+          select 1 from public.room_tile_edges edge where edge.room_id = new.id and edge.round_number = v_round
+            and (edge.from_tile_id = v_tile.id or (edge.is_bidirectional and edge.to_tile_id = v_tile.id))
+        ) then raise exception '第 % 轮第 % 格没有出口路线', v_round, v_tile.position + 1; end if;
+      end loop;
+    end loop;
+    new.pending_dice := null; new.pending_player_id := null; new.pending_route_options := '[]'::jsonb;
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists validate_graph_before_start_trigger on public.rooms;
+create trigger validate_graph_before_start_trigger before update of status on public.rooms
+for each row execute function public.validate_graph_before_start();
+
+revoke all on function public.ensure_room_edges_internal(uuid, integer) from public;
+revoke all on function public.get_room_route_options_internal(uuid, integer, uuid, integer) from public;
+revoke all on function public.resolve_room_landing_internal(uuid, uuid, integer, uuid) from public;
+revoke all on function public.admin_update_tile_layout(uuid, integer, integer) from public;
+revoke all on function public.admin_add_room_tiles(uuid, integer) from public;
+revoke all on function public.admin_delete_room_tile_pair(uuid) from public;
+revoke all on function public.admin_upsert_tile_edge(uuid, uuid, boolean) from public;
+revoke all on function public.admin_delete_tile_edge(uuid) from public;
+revoke all on function public.roll_dice(uuid) from public;
+revoke all on function public.choose_route(uuid, jsonb) from public;
+grant execute on function public.admin_update_tile_layout(uuid, integer, integer) to authenticated;
+grant execute on function public.admin_add_room_tiles(uuid, integer) to authenticated;
+grant execute on function public.admin_delete_room_tile_pair(uuid) to authenticated;
+grant execute on function public.admin_upsert_tile_edge(uuid, uuid, boolean) to authenticated;
+grant execute on function public.admin_delete_tile_edge(uuid) to authenticated;
+grant execute on function public.roll_dice(uuid) to authenticated;
+grant execute on function public.choose_route(uuid, jsonb) to authenticated;
+
+do $$
+begin
+  begin
+    alter publication supabase_realtime add table public.room_tile_edges;
+  exception when duplicate_object then null;
+  end;
+end $$;
+
+select pg_notify('pgrst', 'reload schema');
+
 -- 2026-10: scale configurable boards to 10 rounds and 100 cells.
 alter table public.rooms add column if not exists total_rounds integer not null default 3;
 alter table public.rooms add column if not exists round1_board_size integer not null default 8;
@@ -2180,7 +2636,7 @@ begin
   v_version := (p_config ->> 'version')::integer;
   if jsonb_typeof(p_config) <> 'object'
     or p_config ->> 'format' <> 'jingxu-delta-monopoly-room'
-    or v_version not in (1, 2, 3)
+    or v_version not in (1, 2, 3, 4)
   then raise exception '房间设置文件格式或版本无效'; end if;
 
   v_settings := p_config -> 'settings';
@@ -2561,5 +3017,137 @@ revoke all on function public.admin_update_board_structure(uuid, integer, jsonb)
 revoke all on function public.admin_update_room_tile(uuid, text, text, text, text, text, numeric, text, boolean) from public;
 grant execute on function public.admin_update_board_structure(uuid, integer, jsonb) to authenticated;
 grant execute on function public.admin_update_room_tile(uuid, text, text, text, text, text, numeric, text, boolean) to authenticated;
+
+-- Keep these graph-aware overrides last: this schema intentionally contains upgrade layers above.
+create or replace function public.admin_import_room_graph(p_room_id uuid, p_config jsonb)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+declare v_tile jsonb; v_edge jsonb; v_from uuid; v_to uuid; v_round integer;
+begin
+  if not public.is_admin() then raise exception '只有管理员可以导入棋盘路线'; end if;
+  if not exists (select 1 from public.rooms where id = p_room_id and status = 'lobby') then raise exception '只能向等待中的房间导入路线'; end if;
+  if coalesce((p_config ->> 'version')::integer, 0) >= 4 then
+    for v_tile in select value from jsonb_array_elements(p_config -> 'tiles') loop
+      update public.room_tiles set grid_x = case when v_tile ? 'grid_x' and v_tile ->> 'grid_x' is not null then (v_tile ->> 'grid_x')::integer else null end,
+        grid_y = case when v_tile ? 'grid_y' and v_tile ->> 'grid_y' is not null then (v_tile ->> 'grid_y')::integer else null end
+      where room_id = p_room_id and round_number = (v_tile ->> 'round_number')::integer and position = (v_tile ->> 'position')::integer;
+    end loop;
+  end if;
+  delete from public.room_tile_edges where room_id = p_room_id;
+  if coalesce((p_config ->> 'version')::integer, 0) >= 4 and jsonb_typeof(p_config -> 'edges') = 'array' then
+    for v_edge in select value from jsonb_array_elements(p_config -> 'edges') loop
+      v_round := (v_edge ->> 'round_number')::integer;
+      select id into v_from from public.room_tiles where room_id = p_room_id and round_number = v_round and position = (v_edge ->> 'from_position')::integer;
+      select id into v_to from public.room_tiles where room_id = p_room_id and round_number = v_round and position = (v_edge ->> 'to_position')::integer;
+      if v_from is null or v_to is null or v_from = v_to then raise exception '导入路线包含无效格子'; end if;
+      insert into public.room_tile_edges(room_id, round_number, from_tile_id, to_tile_id, is_bidirectional)
+      values (p_room_id, v_round, v_from, v_to, coalesce((v_edge ->> 'is_bidirectional')::boolean, false))
+      on conflict (from_tile_id, to_tile_id) do update set is_bidirectional = excluded.is_bidirectional;
+    end loop;
+  end if;
+  if exists (
+    with exits as (
+      select from_tile_id as tile_id from public.room_tile_edges where room_id = p_room_id
+      union all
+      select to_tile_id from public.room_tile_edges where room_id = p_room_id and is_bidirectional
+    ) select 1 from exits group by tile_id having count(*) > 4
+  ) then raise exception '导入棋盘中每个格子最多只能有 4 个出口'; end if;
+  for v_round in 1..(select total_rounds from public.rooms where id = p_room_id) loop
+    perform public.ensure_room_edges_internal(p_room_id, v_round);
+  end loop;
+end;
+$$;
+
+create or replace function public.roll_dice(p_room_id uuid)
+returns table(dice_value integer, landed_position integer, coin_change integer, winner boolean)
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_room public.rooms%rowtype;
+  v_player public.room_players%rowtype;
+  v_start_tile uuid;
+  v_dice integer;
+  v_options jsonb;
+  v_option jsonb;
+  v_landed uuid;
+  v_remaining integer;
+  v_chance integer;
+  v_should_advance boolean := false;
+  v_candidate integer;
+  v_candidate_options jsonb;
+  v_candidate_dice integer[] := array[]::integer[];
+begin
+  select * into v_room from public.rooms where id = p_room_id for update;
+  if not found or v_room.status <> 'playing' then raise exception '当前没有进行中的行动'; end if;
+  if v_room.is_paused then raise exception '本局已被管理员暂停，暂时不能掷骰'; end if;
+  if v_room.pending_player_id is not null then raise exception '请先完成当前路线选择'; end if;
+  if v_room.current_turn <> auth.uid() then raise exception '还没有轮到你'; end if;
+  select * into v_player from public.room_players where room_id = p_room_id and user_id = auth.uid() for update;
+  if not found or v_player.dice_count <= 0 then raise exception '当前没有可用骰子'; end if;
+  perform public.ensure_room_edges_internal(p_room_id, v_room.current_round);
+  select id into v_start_tile from public.room_tiles where room_id = p_room_id and round_number = v_room.current_round and position = v_player.position;
+  if v_room.current_round < v_room.total_rounds then
+    v_chance := (v_room.round_advance_chances ->> (v_room.current_round - 1))::integer;
+    v_should_advance := v_player.role = 'boss' and v_player.round_roll_count >= 2
+      and floor(random() * 100)::integer < v_chance;
+    for v_candidate in 1..6 loop
+      v_candidate_options := public.get_room_route_options_internal(p_room_id, v_room.current_round, v_start_tile, v_candidate);
+      if exists (
+        select 1 from jsonb_array_elements(v_candidate_options) option(value)
+        join public.room_tiles tile on tile.id = (option.value ->> 'tile_id')::uuid
+        where (tile.effect_type in ('advance_chance', 'advance_round')) = v_should_advance
+      ) then v_candidate_dice := array_append(v_candidate_dice, v_candidate); end if;
+    end loop;
+  end if;
+  if coalesce(array_length(v_candidate_dice, 1), 0) > 0 then
+    v_dice := v_candidate_dice[1 + floor(random() * array_length(v_candidate_dice, 1))::integer];
+  else
+    v_dice := floor(random() * 6 + 1)::integer;
+  end if;
+  v_options := public.get_room_route_options_internal(p_room_id, v_room.current_round, v_start_tile, v_dice);
+  if v_room.current_round < v_room.total_rounds then
+    select coalesce(jsonb_agg(option.value), '[]'::jsonb) into v_candidate_options
+    from jsonb_array_elements(v_options) option(value)
+    join public.room_tiles tile on tile.id = (option.value ->> 'tile_id')::uuid
+    where (tile.effect_type in ('advance_chance', 'advance_round')) = v_should_advance;
+    if jsonb_array_length(v_candidate_options) > 0 then v_options := v_candidate_options; end if;
+  end if;
+  if jsonb_array_length(v_options) = 0 then raise exception '当前格子在 % 步内没有完整路线，请管理员检查箭头连接', v_dice; end if;
+  v_remaining := greatest(0, v_player.dice_count - 1);
+  update public.room_players set dice_count = v_remaining, round_roll_count = round_roll_count + 1 where id = v_player.id;
+  if jsonb_array_length(v_options) > 1 then
+    update public.rooms set pending_dice = v_dice, pending_player_id = v_player.user_id,
+      pending_route_options = v_options, rolls_remaining = v_remaining where id = p_room_id;
+    insert into public.game_events(room_id, message) values (p_room_id, v_player.nickname || ' 掷出 ' || v_dice || '，遇到分叉路线，等待选择走向');
+    return query select v_dice, -1, 0, false;
+    return;
+  end if;
+  v_option := v_options -> 0;
+  v_landed := (v_option ->> 'tile_id')::uuid;
+  perform public.resolve_room_landing_internal(p_room_id, v_player.id, v_dice, v_landed);
+  return query select v_dice, (v_option ->> 'position')::integer, 0, false;
+end;
+$$;
+
+revoke all on function public.admin_import_room_graph(uuid, jsonb) from public;
+revoke all on function public.roll_dice(uuid) from public;
+grant execute on function public.admin_import_room_graph(uuid, jsonb) to authenticated;
+grant execute on function public.roll_dice(uuid) to authenticated;
+
+create or replace function public.admin_ensure_room_edges(p_room_id uuid)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+declare v_room public.rooms%rowtype; v_round integer;
+begin
+  if not public.is_admin() then raise exception '只有管理员可以初始化棋盘路线'; end if;
+  select * into v_room from public.rooms where id = p_room_id;
+  if not found then raise exception '房间不存在'; end if;
+  for v_round in 1..v_room.total_rounds loop perform public.ensure_room_edges_internal(p_room_id, v_round); end loop;
+end;
+$$;
+revoke all on function public.admin_ensure_room_edges(uuid) from public;
+grant execute on function public.admin_ensure_room_edges(uuid) to authenticated;
 
 select pg_notify('pgrst', 'reload schema');

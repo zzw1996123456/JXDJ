@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { createRandomRoomTiles, getBoardDimensions, getBoardGridPosition, RULE_TEMPLATES, usesDenseBoardLayout } from '../src/lib/board'
+import { createDefaultTileEdges, createRandomRoomTiles, getBoardDimensions, getBoardGridPosition, getRoomBoardDimensions, getRoomTileGridPosition, RULE_TEMPLATES, usesDenseBoardLayout } from '../src/lib/board'
 import { chooseDemoDice, createDemoRoom, resolveDemoDice, startDemoGame } from '../src/lib/demoGame'
 import type { GameRound, RoomTile, TileEffect } from '../src/types'
 
@@ -266,13 +266,40 @@ for (let size = 2; size <= 100; size += 2) {
     assert.ok(position.gridRow >= 1 && position.gridRow <= dimensions.rows, `${size} 格棋盘行坐标越界`)
   }
   if (usesDenseBoardLayout(size)) {
-    assert.ok(dimensions.columns * dimensions.rows <= Math.ceil(size * 1.25), `${size} 格紧凑棋盘空位过多`)
+    const centerStart = (dimensions.columns - 1) / 2
+    const routeCapacity = dimensions.columns * dimensions.rows - 9
+    assert.ok(routeCapacity >= size, `${size} 格多环棋盘容量不足`)
+    assert.ok((dimensions.columns - 2) ** 2 - 9 < size, `${size} 格多环棋盘使用了多余外环`)
     for (let index = 1; index < positions.length; index += 1) {
       const columnDistance = Math.abs(positions[index].gridColumn - positions[index - 1].gridColumn)
       const rowDistance = Math.abs(positions[index].gridRow - positions[index - 1].gridRow)
       assert.equal(columnDistance + rowDistance, 1, `${size} 格棋盘路线必须连续`)
     }
+    for (const position of positions) {
+      const insideCenter = position.gridColumn >= centerStart
+        && position.gridColumn < centerStart + 3
+        && position.gridRow >= centerStart
+        && position.gridRow < centerStart + 3
+      assert.equal(insideCenter, false, `${size} 格棋盘不能覆盖中心协议区`)
+    }
   }
 }
 
-console.log('效果回归测试通过：全部落格效果、分轮规则、50 组三轮随机棋盘与 2–100 偶数格布局')
+const graphTiles = createRandomRoomTiles('graph-test-room')
+const graphEdges = createDefaultTileEdges(graphTiles)
+assert.equal(graphEdges.length, graphTiles.length, '默认图必须为每个格子创建一条出口')
+for (const round of [1, 2, 3] as const) {
+  const roundTiles = graphTiles.filter((tile) => tile.round_number === round)
+  const roundEdges = graphEdges.filter((edge) => edge.round_number === round)
+  assert.equal(roundEdges.length, roundTiles.length)
+  roundTiles.forEach((tile, index) => {
+    const edge = roundEdges.find((candidate) => candidate.from_tile_id === tile.id)
+    assert.equal(edge?.to_tile_id, roundTiles[(index + 1) % roundTiles.length].id, '默认路线必须形成单向闭环')
+  })
+}
+const movedTiles = graphTiles.filter((tile) => tile.round_number === 1).map((tile, index) => index === 0 ? { ...tile, grid_x: 14, grid_y: 9 } : tile)
+assert.deepEqual(getRoomTileGridPosition(movedTiles[0], 0, movedTiles.length), { gridColumn: 15, gridRow: 10 })
+const movedDimensions = getRoomBoardDimensions(movedTiles)
+assert.ok(movedDimensions.columns >= 15 && movedDimensions.rows >= 10, '自由移动后的棋盘边界必须随格子扩张')
+
+console.log('效果回归测试通过：落格效果、分轮规则、随机棋盘、2–100 偶数格布局与默认路线图')
