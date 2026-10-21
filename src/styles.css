@@ -378,12 +378,12 @@ button.mode-card {
 }
 
 .hero-copy::after {
-  content: 'Δ';
+  content: 'JX';
   position: absolute;
   z-index: -1;
   right: -1vw;
   bottom: -112px;
-  color: #1b1f18;
+  color: rgb(244 184 207 / 7%);
   font-family: 'Barlow Condensed', sans-serif;
   font-size: 440px;
   font-weight: 800;
@@ -722,18 +722,16 @@ button.mode-card {
 .brand-mark {
   width: 34px;
   height: 34px;
-  position: relative;
-  display: inline-block;
-  overflow: hidden;
-  background: var(--acid);
-  clip-path: polygon(50% 0, 100% 100%, 0 100%);
-}
-
-.brand-mark span {
-  position: absolute;
-  inset: 9px 7px 5px;
-  background: #11130f;
-  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #f4b8cf;
+  font-family: 'Barlow Condensed', 'Noto Sans SC', sans-serif;
+  font-size: 27px;
+  font-weight: 900;
+  line-height: 1;
+  letter-spacing: 0;
+  text-shadow: 0 0 18px rgb(244 184 207 / 34%);
 }
 
 .brand-copy {
@@ -3392,10 +3390,7 @@ button.mode-card {
   .brand-mark {
     width: 27px;
     height: 27px;
-  }
-
-  .brand-mark span {
-    inset: 7px 6px 4px;
+    font-size: 22px;
   }
 
   .lobby-layout {
@@ -3561,8 +3556,7 @@ body::after {
 }
 
 .brand-mark {
-  border-color: rgb(217 255 94 / 82%);
-  filter: drop-shadow(0 0 12px rgb(217 255 94 / 28%));
+  filter: drop-shadow(0 0 12px rgb(244 184 207 / 28%));
   animation: brand-breathe 3.6s ease-in-out infinite;
 }
 
@@ -4217,7 +4211,7 @@ textarea:focus {
 }
 
 @keyframes ambient-grid { to { background-position: 52px 52px; } }
-@keyframes brand-breathe { 50% { filter: drop-shadow(0 0 20px rgb(217 255 94 / 48%)); transform: scale(1.04); } }
+@keyframes brand-breathe { 50% { filter: drop-shadow(0 0 20px rgb(244 184 207 / 48%)); transform: scale(1.04); } }
 @keyframes content-rise { from { opacity: 0; transform: translateY(18px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes panel-arrive { from { opacity: 0; transform: translateY(24px) scale(.985); } to { opacity: 1; transform: translateY(0) scale(1); } }
 @keyframes preview-cells { 50% { border-color: rgb(100 220 255 / 28%); filter: brightness(1.16); } }

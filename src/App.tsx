@@ -387,9 +387,7 @@ async function fetchSnapshot(roomId: string, userId: string): Promise<GameSnapsh
 function Logo() {
   return (
     <div className="brand" aria-label="景序电竞三角洲趣味">
-      <span className="brand-mark" aria-hidden="true">
-        <span />
-      </span>
+      <span className="brand-mark" aria-hidden="true">JX</span>
       <span className="brand-copy">
         <strong>景序电竞三角洲趣味</strong>
         <small>JINGXU ESPORTS</small>
