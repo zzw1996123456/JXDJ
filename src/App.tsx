@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import Cropper, { type Area } from 'react-easy-crop'
 import {
   ArrowLeft,
   ArrowRight,
@@ -10,6 +11,7 @@ import {
   Crown,
   Dice5,
   Download,
+  Images,
   Flag,
   LoaderCircle,
   LockKeyhole,
@@ -43,16 +45,19 @@ import {
 } from 'lucide-react'
 import {
   BOARD_LAYOUT_PRESETS,
+  BOARD_TILE_HEIGHT,
+  BOARD_TILE_WIDTH,
   createBoardLayout,
   EFFECT_LABELS,
-  getRoomBoardDimensions,
-  getRoomTileGridPosition,
+  getRoomBoardBounds,
+  getRoomTileCanvasPosition,
+  gridPointToCanvas,
   getRoundTiles,
-  usesDenseBoardLayout,
   PLAYER_COLORS,
   TILE_TYPE_LABELS,
 } from './lib/board'
-import type { BoardLayoutPoint, BoardLayoutPresetId } from './lib/board'
+import type { BoardCanvasPoint, BoardLayoutPresetId } from './lib/board'
+import { cropTileImage, TILE_IMAGE_ASPECT, TILE_IMAGE_MAX_SOURCE_BYTES } from './lib/tileImages'
 import { createDemoRoom, rollDemoDice, startDemoGame } from './lib/demoGame'
 import { isSupabaseConfigured, supabase } from './lib/supabase'
 import type {
@@ -65,6 +70,7 @@ import type {
   Room,
   RoomTile,
   RoomTileEdge,
+  RoomTileImage,
   RouteOption,
   SettlementRule,
   TileEffect,
@@ -85,15 +91,10 @@ const TILE_TYPES = Object.keys(TILE_TYPE_LABELS) as TileType[]
 const TILE_EFFECTS = Object.keys(EFFECT_LABELS) as TileEffect[]
 const GUARANTEE_EFFECTS: GuaranteeEffect[] = ['guarantee_add', 'guarantee_subtract', 'guarantee_multiply', 'guarantee_divide']
 const ROOM_CONFIG_FORMAT = 'jingxu-delta-monopoly-room'
-const ROOM_CONFIG_VERSION = 4
+const ROOM_CONFIG_VERSION = 5
 const MIN_BOARD_ZOOM = 0.1
 const MAX_BOARD_ZOOM = 2
 const BOARD_VIEW_PADDING = 12
-const BOARD_TILE_WIDTH = 120
-const BOARD_TILE_HEIGHT = 92
-const BOARD_GAP = 18
-const BOARD_PADDING = 4
-const BOARD_BORDER = 1
 
 interface RoomConfigFile {
   format: typeof ROOM_CONFIG_FORMAT
@@ -109,7 +110,7 @@ interface RoomConfigFile {
     round_sizes: number[]
     round_advance_chances: number[]
   }
-  tiles: Array<Pick<RoomTile, 'round_number' | 'position' | 'name' | 'short_name' | 'tile_type' | 'detail' | 'effect_type' | 'effect_value' | 'tile_color' | 'is_randomized' | 'grid_x' | 'grid_y'>>
+  tiles: Array<Pick<RoomTile, 'round_number' | 'position' | 'name' | 'short_name' | 'tile_type' | 'detail' | 'effect_type' | 'effect_value' | 'tile_color' | 'is_randomized' | 'grid_x' | 'grid_y' | 'layout_x' | 'layout_y'>>
   edges: Array<{
     round_number: GameRound
     from_position: number
@@ -552,6 +553,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
   const [settlementRules, setSettlementRules] = useState<SettlementRule[]>([])
   const [roomTiles, setRoomTiles] = useState<RoomTile[]>([])
   const [roomEdges, setRoomEdges] = useState<RoomTileEdge[]>([])
+  const [roomImages, setRoomImages] = useState<RoomTileImage[]>([])
   const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null)
   const [roomPendingDelete, setRoomPendingDelete] = useState<string | null>(null)
   const [advanceChances, setAdvanceChances] = useState<string[]>(DEFAULT_ADVANCE_CHANCES.map(String))
@@ -570,11 +572,13 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
   const [suffixDrafts, setSuffixDrafts] = useState<Record<number, string>>({})
   const [configNotice, setConfigNotice] = useState('')
   const configInputRef = useRef<HTMLInputElement>(null)
+  const imageInputRef = useRef<HTMLInputElement>(null)
+  const [cropSource, setCropSource] = useState<{ url: string; name: string } | null>(null)
   const tileRefreshTimerRef = useRef<number | null>(null)
-  const pendingTileMovesRef = useRef(new Map<string, { gridX: number; gridY: number; revision: number }>())
+  const pendingTileMovesRef = useRef(new Map<string, { x: number; y: number; revision: number }>())
   const tileMoveQueueRef = useRef(new Map<string, Promise<void>>())
   const tileMoveRevisionRef = useRef(0)
-  const layoutUndoRef = useRef(new Map<GameRound, BoardLayoutPoint[]>())
+  const layoutUndoRef = useRef(new Map<GameRound, BoardCanvasPoint[]>())
 
   const selectedRoom = rooms.find((room) => room.id === selectedRoomId) ?? null
   const selectedPlayers = players.filter((player) => player.room_id === selectedRoomId)
@@ -607,8 +611,19 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
     if (tilesError) throw tilesError
     setRoomTiles((data as RoomTile[]).map((tile) => {
       const pending = pendingTileMovesRef.current.get(tile.id)
-      return pending ? { ...tile, grid_x: pending.gridX, grid_y: pending.gridY } : tile
+      return pending ? { ...tile, layout_x: pending.x, layout_y: pending.y } : tile
     }))
+  }, [])
+
+  const loadRoomImages = useCallback(async (roomId: string) => {
+    if (!supabase) return
+    const { data, error: imagesError } = await supabase
+      .from('room_tile_images')
+      .select('*')
+      .eq('room_id', roomId)
+      .order('created_at', { ascending: false })
+    if (imagesError) throw imagesError
+    setRoomImages(data as RoomTileImage[])
   }, [])
 
   const loadRoomEdges = useCallback(async (roomId: string) => {
@@ -718,6 +733,9 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'room_tile_edges' }, () => {
         if (selectedRoomId) void loadRoomEdges(selectedRoomId)
       })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'room_tile_images' }, () => {
+        if (selectedRoomId) void loadRoomImages(selectedRoomId)
+      })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'room_settlement_rules' }, () => {
         if (selectedRoomId) void loadSettlementRules(selectedRoomId)
       })
@@ -730,7 +748,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       }
       void client.removeChannel(channel)
     }
-  }, [authorized, loadDashboard, loadRoomEdges, loadRoomEvents, loadRoomTiles, loadSettlementRules, selectedRoomId])
+  }, [authorized, loadDashboard, loadRoomEdges, loadRoomEvents, loadRoomImages, loadRoomTiles, loadSettlementRules, selectedRoomId])
 
   useEffect(() => {
     if (!authorized) return
@@ -739,11 +757,12 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       setSettlementRules([])
       setRoomTiles([])
       setRoomEdges([])
+      setRoomImages([])
       return
     }
-    void Promise.all([loadRoomEvents(selectedRoomId), loadRoomTiles(selectedRoomId), loadRoomEdges(selectedRoomId), loadSettlementRules(selectedRoomId)])
+    void Promise.all([loadRoomEvents(selectedRoomId), loadRoomTiles(selectedRoomId), loadRoomEdges(selectedRoomId), loadRoomImages(selectedRoomId), loadSettlementRules(selectedRoomId)])
       .catch((loadError) => setError(formatError(loadError)))
-  }, [authorized, loadRoomEdges, loadRoomEvents, loadRoomTiles, loadSettlementRules, selectedRoomId])
+  }, [authorized, loadRoomEdges, loadRoomEvents, loadRoomImages, loadRoomTiles, loadSettlementRules, selectedRoomId])
 
   useEffect(() => {
     if (!selectedRoom) return
@@ -776,7 +795,15 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
     setDiceDrafts({})
     setGuaranteeDrafts({})
     setSuffixDrafts({})
+    setCropSource((current) => {
+      if (current) URL.revokeObjectURL(current.url)
+      return null
+    })
   }, [selectedRoomId])
+
+  useEffect(() => () => {
+    if (cropSource) URL.revokeObjectURL(cropSource.url)
+  }, [cropSource])
 
   useEffect(() => {
     const nextTile = selectedRoundTiles.find((tile) => tile.id === selectedTileId) ?? selectedRoundTiles[0] ?? null
@@ -956,17 +983,11 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
         p_is_randomized: tileDraft.tile_type === 'start' ? false : tileDraft.is_randomized,
       })
       if (rpcError) throw rpcError
-      if (tileDraft.grid_x !== null && tileDraft.grid_y !== null) {
-        const occupied = selectedRoundTiles.some((tile, index) => {
-          if (tile.id === tileDraft.id) return false
-          const position = getRoomTileGridPosition(tile, index, selectedRoundTiles.length)
-          return position.gridColumn - 1 === tileDraft.grid_x && position.gridRow - 1 === tileDraft.grid_y
-        })
-        if (occupied) throw new Error('该坐标已有格子，请换一个位置')
-        const { error: layoutError } = await supabase.rpc('admin_update_tile_layout', {
+      if (tileDraft.layout_x !== null && tileDraft.layout_y !== null) {
+        const { error: layoutError } = await supabase.rpc('admin_update_tile_position', {
           p_tile_id: tileDraft.id,
-          p_grid_x: tileDraft.grid_x,
-          p_grid_y: tileDraft.grid_y,
+          p_layout_x: tileDraft.layout_x,
+          p_layout_y: tileDraft.layout_y,
         })
         if (layoutError) throw layoutError
       }
@@ -974,40 +995,31 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
     })
   }
 
-  const moveTile = useCallback((tile: RoomTile, gridX: number, gridY: number) => {
+  const moveTile = useCallback((tile: RoomTile, x: number, y: number) => {
     if (!selectedRoom || selectedRoom.status !== 'lobby') return
-    const occupied = selectedRoundTiles.some((candidate, index) => {
-      if (candidate.id === tile.id) return false
-      const position = getRoomTileGridPosition(candidate, index, selectedRoundTiles.length)
-      return position.gridColumn - 1 === gridX && position.gridRow - 1 === gridY
-    })
-    if (occupied) {
-      setError('该位置已有格子，请拖到空白网格')
-      return
-    }
     const currentIndex = selectedRoundTiles.findIndex((candidate) => candidate.id === tile.id)
-    const currentPosition = getRoomTileGridPosition(tile, currentIndex, selectedRoundTiles.length)
-    const previousX = tile.grid_x
-    const previousY = tile.grid_y
-    if (currentPosition.gridColumn - 1 === gridX && currentPosition.gridRow - 1 === gridY) return
+    const currentPosition = getRoomTileCanvasPosition(tile, currentIndex, selectedRoundTiles.length)
+    const previousX = tile.layout_x
+    const previousY = tile.layout_y
+    if (currentPosition.x === x && currentPosition.y === y) return
 
     const revision = tileMoveRevisionRef.current + 1
     tileMoveRevisionRef.current = revision
-    pendingTileMovesRef.current.set(tile.id, { gridX, gridY, revision })
+    pendingTileMovesRef.current.set(tile.id, { x, y, revision })
     setError('')
     setRoomTiles((current) => current.map((candidate) => candidate.id === tile.id
-      ? { ...candidate, grid_x: gridX, grid_y: gridY }
+      ? { ...candidate, layout_x: x, layout_y: y }
       : candidate))
-    setTileDraft((current) => current?.id === tile.id ? { ...current, grid_x: gridX, grid_y: gridY } : current)
+    setTileDraft((current) => current?.id === tile.id ? { ...current, layout_x: x, layout_y: y } : current)
 
     const priorTask = tileMoveQueueRef.current.get(tile.id) ?? Promise.resolve()
     let task: Promise<void>
     task = priorTask.catch(() => undefined).then(async () => {
       if (!supabase) return
-      const { error: rpcError } = await supabase.rpc('admin_update_tile_layout', {
+      const { error: rpcError } = await supabase.rpc('admin_update_tile_position', {
         p_tile_id: tile.id,
-        p_grid_x: gridX,
-        p_grid_y: gridY,
+        p_layout_x: x,
+        p_layout_y: y,
       })
       if (rpcError) throw rpcError
     }).then(() => {
@@ -1016,9 +1028,9 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       if (pendingTileMovesRef.current.get(tile.id)?.revision !== revision) return
       pendingTileMovesRef.current.delete(tile.id)
       setRoomTiles((current) => current.map((candidate) => candidate.id === tile.id
-        ? { ...candidate, grid_x: previousX, grid_y: previousY }
+        ? { ...candidate, layout_x: previousX, layout_y: previousY }
         : candidate))
-      setTileDraft((current) => current?.id === tile.id ? { ...current, grid_x: previousX, grid_y: previousY } : current)
+      setTileDraft((current) => current?.id === tile.id ? { ...current, layout_x: previousX, layout_y: previousY } : current)
       setError(formatError(moveError))
     }).finally(() => {
       if (tileMoveQueueRef.current.get(tile.id) === task) tileMoveQueueRef.current.delete(tile.id)
@@ -1026,22 +1038,22 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
     tileMoveQueueRef.current.set(tile.id, task)
   }, [selectedRoom, selectedRoundTiles])
 
-  function updateRoundLayout(points: BoardLayoutPoint[]) {
+  function updateRoundLayout(points: BoardCanvasPoint[]) {
     const coordinates = new Map(selectedRoundTiles.map((tile, index) => [tile.id, points[index]]))
     setRoomTiles((current) => current.map((tile) => {
       const point = coordinates.get(tile.id)
-      return point ? { ...tile, grid_x: point.gridX, grid_y: point.gridY } : tile
+      return point ? { ...tile, layout_x: point.x, layout_y: point.y } : tile
     }))
     setTileDraft((current) => {
       if (!current) return current
       const point = coordinates.get(current.id)
-      return point ? { ...current, grid_x: point.gridX, grid_y: point.gridY } : current
+      return point ? { ...current, layout_x: point.x, layout_y: point.y } : current
     })
   }
 
   function persistRoundLayout(
-    points: BoardLayoutPoint[],
-    rollback: BoardLayoutPoint[],
+    points: BoardCanvasPoint[],
+    rollback: BoardCanvasPoint[],
     notice: string,
     onSuccess?: () => void,
     onError?: () => void,
@@ -1053,7 +1065,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       const { error: rpcError } = await supabase.rpc('admin_apply_board_layout', {
         p_room_id: selectedRoom.id,
         p_round: editorRound,
-        p_positions: points.map((point, position) => ({ position, grid_x: point.gridX, grid_y: point.gridY })),
+        p_positions: points.map((point, position) => ({ position, layout_x: point.x, layout_y: point.y })),
       })
       if (rpcError) {
         updateRoundLayout(rollback)
@@ -1067,12 +1079,9 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
   }
 
   function applyLayoutPreset(preset: BoardLayoutPresetId) {
-    const previous = selectedRoundTiles.map((tile, index) => {
-      const position = getRoomTileGridPosition(tile, index, selectedRoundTiles.length)
-      return { gridX: position.gridColumn - 1, gridY: position.gridRow - 1 }
-    })
+    const previous = selectedRoundTiles.map((tile, index) => getRoomTileCanvasPosition(tile, index, selectedRoundTiles.length))
     layoutUndoRef.current.set(editorRound, previous)
-    const next = createBoardLayout(selectedRoundTiles.length, preset)
+    const next = createBoardLayout(selectedRoundTiles.length, preset).map(gridPointToCanvas)
     const presetName = BOARD_LAYOUT_PRESETS.find((item) => item.id === preset)?.name ?? '地图'
     persistRoundLayout(
       next,
@@ -1086,10 +1095,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
   function undoLayoutPreset() {
     const previous = layoutUndoRef.current.get(editorRound)
     if (!previous) return
-    const current = selectedRoundTiles.map((tile, index) => {
-      const position = getRoomTileGridPosition(tile, index, selectedRoundTiles.length)
-      return { gridX: position.gridColumn - 1, gridY: position.gridRow - 1 }
-    })
+    const current = selectedRoundTiles.map((tile, index) => getRoomTileCanvasPosition(tile, index, selectedRoundTiles.length))
     persistRoundLayout(
       previous,
       current,
@@ -1098,13 +1104,94 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
     )
   }
 
-  function addTiles() {
-    if (!selectedRoom) return
+  function chooseImageFile(file: File | undefined) {
+    if (!file) return
+    if (!file.type.startsWith('image/')) {
+      setError('请选择 JPEG、PNG 或 WebP 图片')
+      return
+    }
+    if (file.size > TILE_IMAGE_MAX_SOURCE_BYTES) {
+      setError('原图不能超过 20 MB')
+      return
+    }
+    setError('')
+    setCropSource((current) => {
+      if (current) URL.revokeObjectURL(current.url)
+      return { url: URL.createObjectURL(file), name: file.name.replace(/\.[^.]+$/, '').slice(0, 60) || '格子图片' }
+    })
+    if (imageInputRef.current) imageInputRef.current.value = ''
+  }
+
+  function cancelImageCrop() {
+    setCropSource((current) => {
+      if (current) URL.revokeObjectURL(current.url)
+      return null
+    })
+  }
+
+  async function uploadCroppedImage(blob: Blob, width: number, height: number, name: string) {
+    if (!selectedRoom || !supabase) return
+    const storagePath = `${selectedRoom.id}/${crypto.randomUUID()}.webp`
+    const { error: uploadError } = await supabase.storage.from('tile-images').upload(storagePath, blob, {
+      contentType: 'image/webp',
+      cacheControl: '31536000',
+      upsert: false,
+    })
+    if (uploadError) throw uploadError
+    const publicUrl = supabase.storage.from('tile-images').getPublicUrl(storagePath).data.publicUrl
+    const { error: createError } = await supabase.rpc('admin_create_tile_image', {
+      p_room_id: selectedRoom.id,
+      p_name: name,
+      p_storage_path: storagePath,
+      p_public_url: publicUrl,
+      p_width: width,
+      p_height: height,
+      p_byte_size: blob.size,
+      p_mime_type: 'image/webp',
+    })
+    if (createError) {
+      await supabase.storage.from('tile-images').remove([storagePath])
+      throw createError
+    }
+    cancelImageCrop()
+    await loadRoomImages(selectedRoom.id)
+    setConfigNotice(`图片已裁剪并压缩至 ${(blob.size / 1024).toFixed(1)} KB`)
+  }
+
+  function assignTileImage(image: RoomTileImage | null) {
+    if (!selectedRoom || !tileDraft) return
     void runAdminAction(async () => {
       if (!supabase) return
-      const { error: rpcError } = await supabase.rpc('admin_add_room_tiles', {
-        p_room_id: selectedRoom.id,
-        p_round: editorRound,
+      const { error: rpcError } = await supabase.rpc('admin_set_tile_image', {
+        p_tile_id: tileDraft.id,
+        p_image_id: image?.id ?? null,
+      })
+      if (rpcError) throw rpcError
+      await loadRoomTiles(selectedRoom.id)
+    })
+  }
+
+  function deleteLibraryImage(image: RoomTileImage) {
+    if (!selectedRoom || !window.confirm(`删除图片“${image.name}”？所有使用它的格子会恢复为无图片。`)) return
+    void runAdminAction(async () => {
+      if (!supabase) return
+      const { error: storageError } = await supabase.storage.from('tile-images').remove([image.storage_path])
+      if (storageError) throw storageError
+      const { error: rpcError } = await supabase.rpc('admin_delete_tile_image', { p_image_id: image.id })
+      if (rpcError) throw rpcError
+      await Promise.all([loadRoomImages(selectedRoom.id), loadRoomTiles(selectedRoom.id)])
+    })
+  }
+
+  function addTiles() {
+    if (!selectedRoom || !tileDraft) return
+    void runAdminAction(async () => {
+      if (!supabase) return
+      const anchor = getRoomTileCanvasPosition(tileDraft, selectedRoundTiles.findIndex((tile) => tile.id === tileDraft.id), selectedRoundTiles.length)
+      const { error: rpcError } = await supabase.rpc('admin_add_room_tiles_around', {
+        p_tile_id: tileDraft.id,
+        p_anchor_x: anchor.x,
+        p_anchor_y: anchor.y,
       })
       if (rpcError) throw rpcError
       await Promise.all([loadDashboard(), loadRoomTiles(selectedRoom.id), loadRoomEdges(selectedRoom.id)])
@@ -1306,6 +1393,8 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
           is_randomized: tile.is_randomized,
           grid_x: tile.grid_x,
           grid_y: tile.grid_y,
+          layout_x: tile.layout_x,
+          layout_y: tile.layout_y,
         })),
         edges: (edgesResult.data as RoomTileEdge[]).map((edge) => ({
           round_number: edge.round_number,
@@ -1339,7 +1428,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       }
       if (!config || typeof config !== 'object') throw new Error('导入文件内容无效')
       const candidate = config as Partial<RoomConfigFile> & { version?: number }
-      if (candidate.format !== ROOM_CONFIG_FORMAT || ![1, 2, 3, ROOM_CONFIG_VERSION].includes(candidate.version ?? 0)) {
+      if (candidate.format !== ROOM_CONFIG_FORMAT || ![1, 2, 3, 4, ROOM_CONFIG_VERSION].includes(candidate.version ?? 0)) {
         throw new Error('不支持的房间设置文件格式或版本')
       }
       if (!candidate.settings || !Array.isArray(candidate.tiles) || candidate.tiles.length < MIN_BOARD_SIZE) {
@@ -1635,7 +1724,6 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                   <div className="board-editor-heading">
                     <div className="section-title"><p className="kicker">随机棋盘与逐格编辑</p><SquarePen size={18} /></div>
                     <div className="board-editor-actions">
-                      <button className="button secondary" disabled={busy || selectedRoom.status !== 'lobby' || selectedRoundTiles.length > MAX_BOARD_SIZE - 2} onClick={addTiles} type="button"><Plus size={17} /> 添加 2 格</button>
                       <button className="button secondary" disabled={busy || selectedRoom.status !== 'lobby'} onClick={randomizeBoard} type="button"><Shuffle size={17} /> 重新随机全部 {selectedRoom.total_rounds ?? 3} 轮</button>
                     </div>
                   </div>
@@ -1672,7 +1760,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                       ))}
                     </div>
                   </div>
-                  <p className="probability-note">每轮第 1 格固定为起点。格子始终成对增删以保持偶数；可直接拖动格子，再用右侧路线工具连接。</p>
+                  <p className="probability-note">画布可无限平移缩放，格子支持任意像素位置与重叠。先选择格子，再在右侧围绕它新增两格或编辑路线。</p>
                   <div className="round-tabs" role="tablist" aria-label="选择编辑轮次">
                     {Array.from({ length: selectedRoom.total_rounds ?? 3 }, (_, index) => index + 1).map((round) => (
                       <button aria-selected={editorRound === round} className={editorRound === round ? 'active' : ''} key={round} onClick={() => setEditorRound(round)} role="tab" type="button">
@@ -1698,7 +1786,10 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                       <div className="tile-edit-form">
                         <div className="tile-edit-title">
                           <span>第 {tileDraft.position + 1} 格</span>
-                          <strong>{roundLabel(tileDraft.round_number)}</strong>
+                          <span className="tile-edit-title-actions">
+                            <strong>{roundLabel(tileDraft.round_number)}</strong>
+                            <button disabled={busy || selectedRoom.status !== 'lobby' || selectedRoundTiles.length > MAX_BOARD_SIZE - 2} onClick={addTiles} type="button"><Plus size={14} /> 围绕此格添加 2 格</button>
+                          </span>
                         </div>
                         <div className="tile-form-grid">
                           <label><span>完整名称</span><input disabled={selectedRoom.status !== 'lobby' || tileDraft.tile_type === 'start'} maxLength={40} onChange={(event) => setTileDraft({ ...tileDraft, name: event.target.value })} value={tileDraft.name} /></label>
@@ -1755,13 +1846,29 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                               <button aria-label="恢复默认颜色" disabled={selectedRoom.status !== 'lobby' || !tileDraft.tile_color} onClick={() => setTileDraft({ ...tileDraft, tile_color: null })} title="恢复默认颜色" type="button"><RotateCcw size={14} /></button>
                             </span>
                           </label>
-                          <label><span>横向坐标</span><input disabled={selectedRoom.status !== 'lobby'} min="0" onChange={(event) => setTileDraft({ ...tileDraft, grid_x: Math.max(0, Number(event.target.value)) })} type="number" value={tileDraft.grid_x ?? ''} placeholder="自动" /></label>
-                          <label><span>纵向坐标</span><input disabled={selectedRoom.status !== 'lobby'} min="0" onChange={(event) => setTileDraft({ ...tileDraft, grid_y: Math.max(0, Number(event.target.value)) })} type="number" value={tileDraft.grid_y ?? ''} placeholder="自动" /></label>
+                          <label><span>画布 X 坐标</span><input disabled={selectedRoom.status !== 'lobby'} max="100000" min="-100000" onChange={(event) => setTileDraft({ ...tileDraft, layout_x: Number(event.target.value) })} step="0.1" type="number" value={tileDraft.layout_x ?? getRoomTileCanvasPosition(tileDraft, selectedRoundTiles.findIndex((tile) => tile.id === tileDraft.id), selectedRoundTiles.length).x} /></label>
+                          <label><span>画布 Y 坐标</span><input disabled={selectedRoom.status !== 'lobby'} max="100000" min="-100000" onChange={(event) => setTileDraft({ ...tileDraft, layout_y: Number(event.target.value) })} step="0.1" type="number" value={tileDraft.layout_y ?? getRoomTileCanvasPosition(tileDraft, selectedRoundTiles.findIndex((tile) => tile.id === tileDraft.id), selectedRoundTiles.length).y} /></label>
                           <label className="randomize-toggle">
                             <input checked={tileDraft.is_randomized} disabled={selectedRoom.status !== 'lobby' || tileDraft.tile_type === 'start'} onChange={(event) => setTileDraft({ ...tileDraft, is_randomized: event.target.checked })} type="checkbox" />
                             <span>重新随机时替换此格</span>
                             <small>导入设置后，未勾选的格子始终保持不变</small>
                           </label>
+                        </div>
+                        <div className="tile-image-library">
+                          <div className="tile-image-library-heading">
+                            <span><Images size={15} /> 图片库</span>
+                            <button disabled={busy || selectedRoom.status !== 'lobby'} onClick={() => imageInputRef.current?.click()} type="button"><Plus size={14} /> 添加图片</button>
+                            <input accept="image/jpeg,image/png,image/webp" className="sr-only" onChange={(event) => chooseImageFile(event.target.files?.[0])} ref={imageInputRef} type="file" />
+                          </div>
+                          <div className="tile-image-list">
+                            <button aria-pressed={!tileDraft.image_id} className={!tileDraft.image_id ? 'selected' : ''} disabled={busy || selectedRoom.status !== 'lobby'} onClick={() => assignTileImage(null)} type="button"><span className="tile-image-none"><X size={18} /></span><small>无图片</small></button>
+                            {roomImages.map((image) => (
+                              <div className={`tile-image-option ${tileDraft.image_id === image.id ? 'selected' : ''}`} key={image.id}>
+                                <button aria-label={`使用图片 ${image.name}`} aria-pressed={tileDraft.image_id === image.id} disabled={busy || selectedRoom.status !== 'lobby'} onClick={() => assignTileImage(image)} type="button"><img alt="" src={image.public_url} /><small>{image.name}</small></button>
+                                <button aria-label={`删除图片 ${image.name}`} className="tile-image-delete" disabled={busy || selectedRoom.status !== 'lobby'} onClick={() => deleteLibraryImage(image)} title="删除图片" type="button"><Trash2 size={13} /></button>
+                              </div>
+                            ))}
+                          </div>
                         </div>
                         <div className="tile-form-actions">
                           <button className="button primary" disabled={busy || selectedRoom.status !== 'lobby'} onClick={saveTile} type="button"><Save size={17} /> 保存格子内容</button>
@@ -1793,6 +1900,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                       </div>
                     ) : <p className="admin-empty">这一轮还没有生成棋盘格。</p>}
                   </div>
+                  {cropSource && <TileImageCropDialog name={cropSource.name} onCancel={cancelImageCrop} onConfirm={uploadCroppedImage} sourceUrl={cropSource.url} />}
                 </section>
 
                 <section className="admin-player-panel">
@@ -1994,6 +2102,67 @@ function LobbyView({
   )
 }
 
+function TileImageCropDialog({
+  sourceUrl,
+  name,
+  onCancel,
+  onConfirm,
+}: {
+  sourceUrl: string
+  name: string
+  onCancel: () => void
+  onConfirm: (blob: Blob, width: number, height: number, name: string) => Promise<void>
+}) {
+  const [crop, setCrop] = useState({ x: 0, y: 0 })
+  const [zoom, setZoom] = useState(1)
+  const [pixels, setPixels] = useState<Area | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  async function confirmCrop() {
+    if (!pixels) return
+    setBusy(true)
+    setError('')
+    try {
+      const result = await cropTileImage(sourceUrl, pixels)
+      await onConfirm(result.blob, result.width, result.height, name)
+    } catch (cropError) {
+      setError(formatError(cropError))
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="modal-backdrop crop-dialog-backdrop" role="presentation">
+      <section aria-labelledby="crop-dialog-title" aria-modal="true" className="crop-dialog" role="dialog">
+        <div className="crop-dialog-title">
+          <span><Images size={18} /></span>
+          <div><p className="kicker">图片库 · 上传前处理</p><h2 id="crop-dialog-title">裁剪格子图片</h2></div>
+          <button aria-label="关闭裁剪" disabled={busy} onClick={onCancel} title="关闭" type="button"><X size={18} /></button>
+        </div>
+        <div className="crop-workspace">
+          <Cropper
+            aspect={TILE_IMAGE_ASPECT}
+            crop={crop}
+            image={sourceUrl}
+            onCropChange={setCrop}
+            onCropComplete={(_, croppedPixels) => setPixels(croppedPixels)}
+            onZoomChange={setZoom}
+            showGrid
+            zoom={zoom}
+          />
+        </div>
+        <label className="crop-zoom"><span>缩放</span><input max="3" min="1" onChange={(event) => setZoom(Number(event.target.value))} step="0.01" type="range" value={zoom} /></label>
+        {error && <p className="form-error">{error}</p>}
+        <div className="crop-actions">
+          <button className="button ghost" disabled={busy} onClick={onCancel} type="button"><X size={16} /> 取消</button>
+          <button className="button primary" disabled={busy || !pixels} onClick={() => void confirmCrop()} type="button">{busy ? <LoaderCircle className="spin" size={16} /> : <Upload size={16} />} 裁剪、压缩并上传</button>
+        </div>
+      </section>
+    </div>
+  )
+}
+
 const Board = memo(function Board({
   players,
   room,
@@ -2013,13 +2182,11 @@ const Board = memo(function Board({
   className?: string
   selectedTileId?: string | null
   onTileSelect?: (tile: RoomTile) => void
-  onTileMove?: (tile: RoomTile, gridX: number, gridY: number) => void
+  onTileMove?: (tile: RoomTile, x: number, y: number) => void
 }) {
   const tiles = getRoundTiles(allTiles, displayRound)
   const edges = allEdges.filter((edge) => edge.round_number === displayRound)
-  const dimensions = getRoomBoardDimensions(tiles)
-  const denseLayout = usesDenseBoardLayout(tiles.length)
-  const denseCenterStart = Math.floor((dimensions.columns - 3) / 2) + 1
+  const bounds = getRoomBoardBounds(tiles)
   const stageRef = useRef<HTMLDivElement>(null)
   const boardRef = useRef<HTMLDivElement>(null)
   const viewRef = useRef({ x: BOARD_VIEW_PADDING, y: BOARD_VIEW_PADDING, scale: 1 })
@@ -2027,7 +2194,6 @@ const Board = memo(function Board({
   const tileDragRef = useRef<{
     pointerId: number
     tile: RoomTile
-    index: number
     element: HTMLButtonElement
     startX: number
     startY: number
@@ -2035,10 +2201,7 @@ const Board = memo(function Board({
     latestY: number
     originX: number
     originY: number
-    targetX: number
-    targetY: number
     moved: boolean
-    invalid: boolean
     frame: number | null
   } | null>(null)
   const suppressTileClickRef = useRef(false)
@@ -2048,11 +2211,10 @@ const Board = memo(function Board({
   const [isDragging, setIsDragging] = useState(false)
 
   const tilePositions = useMemo(() => new Map(tiles.map((tile, index) => {
-    const grid = getRoomTileGridPosition(tile, index, tiles.length)
+    const point = getRoomTileCanvasPosition(tile, index, tiles.length)
     return [tile.id, {
-      ...grid,
-      x: BOARD_PADDING + (grid.gridColumn - 1) * (BOARD_TILE_WIDTH + BOARD_GAP) + BOARD_TILE_WIDTH / 2,
-      y: BOARD_PADDING + (grid.gridRow - 1) * (BOARD_TILE_HEIGHT + BOARD_GAP) + BOARD_TILE_HEIGHT / 2,
+      x: point.x + BOARD_TILE_WIDTH / 2,
+      y: point.y + BOARD_TILE_HEIGHT / 2,
     }]
   })), [tiles])
 
@@ -2072,38 +2234,16 @@ const Board = memo(function Board({
     return [{ edge, x1: from.x + unitX * inset, y1: from.y + unitY * inset, x2: to.x - unitX * inset, y2: to.y - unitY * inset }]
   }), [edges, tilePositions])
 
-  const getScaledBoardSize = useCallback((scale: number) => ({
-    width: (
-      dimensions.columns * BOARD_TILE_WIDTH
-      + (dimensions.columns - 1) * BOARD_GAP
-      + BOARD_PADDING * 2
-    ) * scale + BOARD_BORDER * 2,
-    height: (
-      dimensions.rows * BOARD_TILE_HEIGHT
-      + (dimensions.rows - 1) * BOARD_GAP
-      + BOARD_PADDING * 2
-    ) * scale + BOARD_BORDER * 2,
-  }), [dimensions.columns, dimensions.rows])
-
-  const clampBoardView = useCallback((view: { x: number; y: number; scale: number }) => {
-    const stage = stageRef.current
-    if (!stage) return view
-    const { width, height } = getScaledBoardSize(view.scale)
-    const x = width <= stage.clientWidth
-      ? (stage.clientWidth - width) / 2
-      : Math.min(BOARD_VIEW_PADDING, Math.max(stage.clientWidth - width - BOARD_VIEW_PADDING, view.x))
-    const y = height <= stage.clientHeight
-      ? (stage.clientHeight - height) / 2
-      : Math.min(BOARD_VIEW_PADDING, Math.max(stage.clientHeight - height - BOARD_VIEW_PADDING, view.y))
-    return { ...view, x: Math.round(x), y: Math.round(y) }
-  }, [getScaledBoardSize])
-
   const applyBoardView = useCallback((view: { x: number; y: number; scale: number }, updateZoom = false) => {
-    const nextView = clampBoardView(view)
+    const nextView = view
     viewRef.current = nextView
     if (boardRef.current) {
-      boardRef.current.style.setProperty('--board-scale', String(nextView.scale))
-      boardRef.current.style.transform = `translate3d(${nextView.x}px, ${nextView.y}px, 0)`
+      boardRef.current.style.transform = `translate3d(${nextView.x}px, ${nextView.y}px, 0) scale(${nextView.scale})`
+    }
+    if (stageRef.current) {
+      const gridSize = 24 * nextView.scale
+      stageRef.current.style.backgroundSize = `${gridSize}px ${gridSize}px`
+      stageRef.current.style.backgroundPosition = `${nextView.x}px ${nextView.y}px`
     }
     if (updateZoom) {
       const percent = Math.round(nextView.scale * 100)
@@ -2111,7 +2251,7 @@ const Board = memo(function Board({
       if (zoomOutButtonRef.current) zoomOutButtonRef.current.disabled = percent <= MIN_BOARD_ZOOM * 100
       if (zoomInButtonRef.current) zoomInButtonRef.current.disabled = percent >= MAX_BOARD_ZOOM * 100
     }
-  }, [clampBoardView])
+  }, [])
 
   const zoomBoard = useCallback((nextScale: number, clientX?: number, clientY?: number) => {
     const stage = stageRef.current
@@ -2129,35 +2269,44 @@ const Board = memo(function Board({
   }, [applyBoardView])
 
   const resetBoardView = useCallback(() => {
-    applyBoardView({ x: BOARD_VIEW_PADDING, y: BOARD_VIEW_PADDING, scale: 1 }, true)
-  }, [applyBoardView])
+    const stage = stageRef.current
+    if (!stage) return
+    applyBoardView({
+      x: Math.round((stage.clientWidth - bounds.width) / 2 - bounds.minX),
+      y: Math.round((stage.clientHeight - bounds.height) / 2 - bounds.minY),
+      scale: 1,
+    }, true)
+  }, [applyBoardView, bounds.height, bounds.minX, bounds.minY, bounds.width])
 
   const fitBoardView = useCallback(() => {
     const stage = stageRef.current
     if (!stage) return
-    const baseSize = getScaledBoardSize(1)
     const scale = Math.min(
       1,
       Math.max(
         MIN_BOARD_ZOOM,
         Math.min(
-          (stage.clientWidth - BOARD_VIEW_PADDING * 2 - BOARD_BORDER * 2) / (baseSize.width - BOARD_BORDER * 2),
-          (stage.clientHeight - BOARD_VIEW_PADDING * 2 - BOARD_BORDER * 2) / (baseSize.height - BOARD_BORDER * 2),
+          (stage.clientWidth - BOARD_VIEW_PADDING * 2) / bounds.width,
+          (stage.clientHeight - BOARD_VIEW_PADDING * 2) / bounds.height,
         ),
       ),
     )
-    applyBoardView({ x: BOARD_VIEW_PADDING, y: BOARD_VIEW_PADDING, scale }, true)
-  }, [applyBoardView, getScaledBoardSize])
+    applyBoardView({
+      x: Math.round((stage.clientWidth - bounds.width * scale) / 2 - bounds.minX * scale),
+      y: Math.round((stage.clientHeight - bounds.height * scale) / 2 - bounds.minY * scale),
+      scale,
+    }, true)
+  }, [applyBoardView, bounds.height, bounds.minX, bounds.minY, bounds.width])
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(resetBoardView)
     return () => window.cancelAnimationFrame(frame)
-  }, [displayRound, resetBoardView, tiles.length])
+  }, [displayRound, tiles.length])
 
   useEffect(() => {
     const stage = stageRef.current
     if (!stage || typeof ResizeObserver === 'undefined') return
-    const observer = new ResizeObserver(() => applyBoardView(viewRef.current))
+    const observer = new ResizeObserver(() => applyBoardView(viewRef.current, true))
     observer.observe(stage)
     return () => observer.disconnect()
   }, [applyBoardView])
@@ -2219,22 +2368,18 @@ const Board = memo(function Board({
   function startTileDrag(event: React.PointerEvent<HTMLButtonElement>, tile: RoomTile, index: number) {
     if (!onTileMove || event.button !== 0) return
     event.stopPropagation()
-    const origin = getRoomTileGridPosition(tile, index, tiles.length)
+    const origin = getRoomTileCanvasPosition(tile, index, tiles.length)
     tileDragRef.current = {
       pointerId: event.pointerId,
       tile,
-      index,
       element: event.currentTarget,
       startX: event.clientX,
       startY: event.clientY,
       latestX: event.clientX,
       latestY: event.clientY,
-      originX: origin.gridColumn - 1,
-      originY: origin.gridRow - 1,
-      targetX: origin.gridColumn - 1,
-      targetY: origin.gridRow - 1,
+      originX: origin.x,
+      originY: origin.y,
       moved: false,
-      invalid: false,
       frame: null,
     }
     suppressTileClickRef.current = false
@@ -2255,18 +2400,8 @@ const Board = memo(function Board({
     if (!drag.moved || drag.frame !== null) return
     drag.frame = window.requestAnimationFrame(() => {
       drag.frame = null
-      const deltaX = drag.latestX - drag.startX
-      const deltaY = drag.latestY - drag.startY
-      const stepX = (BOARD_TILE_WIDTH + BOARD_GAP) * viewRef.current.scale
-      const stepY = (BOARD_TILE_HEIGHT + BOARD_GAP) * viewRef.current.scale
-      drag.targetX = Math.max(0, drag.originX + Math.round(deltaX / stepX))
-      drag.targetY = Math.max(0, drag.originY + Math.round(deltaY / stepY))
-      drag.invalid = tiles.some((candidate, candidateIndex) => {
-        if (candidate.id === drag.tile.id) return false
-        const position = getRoomTileGridPosition(candidate, candidateIndex, tiles.length)
-        return position.gridColumn - 1 === drag.targetX && position.gridRow - 1 === drag.targetY
-      })
-      drag.element.classList.toggle('drop-invalid', drag.invalid)
+      const deltaX = (drag.latestX - drag.startX) / viewRef.current.scale
+      const deltaY = (drag.latestY - drag.startY) / viewRef.current.scale
       drag.element.style.transform = `translate3d(${deltaX}px, ${deltaY}px, 0)`
     })
   }
@@ -2282,23 +2417,13 @@ const Board = memo(function Board({
     }
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
     if (!drag.moved || !onTileMove) return
-    const deltaX = event.clientX - drag.startX
-    const deltaY = event.clientY - drag.startY
-    const stepX = (BOARD_TILE_WIDTH + BOARD_GAP) * viewRef.current.scale
-    const stepY = (BOARD_TILE_HEIGHT + BOARD_GAP) * viewRef.current.scale
-    const nextX = Math.max(0, drag.originX + Math.round(deltaX / stepX))
-    const nextY = Math.max(0, drag.originY + Math.round(deltaY / stepY))
-    const invalid = tiles.some((candidate, candidateIndex) => {
-      if (candidate.id === drag.tile.id) return false
-      const position = getRoomTileGridPosition(candidate, candidateIndex, tiles.length)
-      return position.gridColumn - 1 === nextX && position.gridRow - 1 === nextY
-    })
-    if (!invalid) {
-      drag.element.style.transform = `translate3d(${(nextX - drag.originX) * stepX}px, ${(nextY - drag.originY) * stepY}px, 0)`
-      onTileMove(drag.tile, nextX, nextY)
-    }
+    const deltaX = (event.clientX - drag.startX) / viewRef.current.scale
+    const deltaY = (event.clientY - drag.startY) / viewRef.current.scale
+    const nextX = Math.round((drag.originX + deltaX) * 10) / 10
+    const nextY = Math.round((drag.originY + deltaY) * 10) / 10
+    onTileMove(drag.tile, nextX, nextY)
     window.requestAnimationFrame(() => {
-      drag.element.classList.remove('tile-dragging', 'drop-invalid')
+      drag.element.classList.remove('tile-dragging')
       drag.element.style.transform = ''
     })
     window.setTimeout(() => { suppressTileClickRef.current = false }, 0)
@@ -2310,7 +2435,7 @@ const Board = memo(function Board({
     event.stopPropagation()
     tileDragRef.current = null
     if (drag.frame !== null) window.cancelAnimationFrame(drag.frame)
-    drag.element.classList.remove('tile-dragging', 'drop-invalid')
+    drag.element.classList.remove('tile-dragging')
     drag.element.style.transform = ''
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
     suppressTileClickRef.current = true
@@ -2336,15 +2461,10 @@ const Board = memo(function Board({
       >
         <div
           aria-label={`${roundLabel(displayRound)}行动棋盘`}
-          className={`board board-size-${tiles.length} ${denseLayout ? 'board-multi-ring' : ''} ${className}`.trim()}
+          className={`board ${className}`.trim()}
           ref={boardRef}
-          style={{
-            '--board-columns': dimensions.columns,
-            '--board-rows': dimensions.rows,
-            '--board-scale': 1,
-          } as React.CSSProperties}
         >
-          <svg aria-hidden="true" className="board-routes" viewBox={`0 0 ${dimensions.columns * BOARD_TILE_WIDTH + (dimensions.columns - 1) * BOARD_GAP + BOARD_PADDING * 2} ${dimensions.rows * BOARD_TILE_HEIGHT + (dimensions.rows - 1) * BOARD_GAP + BOARD_PADDING * 2}`}>
+          <svg aria-hidden="true" className="board-routes">
             <defs>
               <marker id={`route-arrow-${displayRound}-${className || 'player'}`} markerHeight="10" markerUnits="userSpaceOnUse" markerWidth="10" orient="auto-start-reverse" refX="8" refY="5" viewBox="0 0 10 10"><path d="M 0 0 L 10 5 L 0 10 z" /></marker>
             </defs>
@@ -2362,6 +2482,7 @@ const Board = memo(function Board({
               .filter(({ player }) => player.position === tile.position)
             const tileContent = (
               <>
+                {tile.image_url && <><img alt="" className="tile-image" draggable={false} src={tile.image_url} /><span className="tile-image-shade" /></>}
                 <span className="tile-number">{String(tile.position + 1).padStart(2, '0')}</span>
                 <span className="tile-owner">{TILE_TYPE_LABELS[tile.tile_type]}</span>
                 <strong>{tile.short_name}</strong>
@@ -2374,6 +2495,8 @@ const Board = memo(function Board({
               </>
             )
             const tileClassName = `tile tile-${tile.tile_type} ${selectedTileId === tile.id ? 'selected' : ''}`.trim()
+            const canvasPosition = getRoomTileCanvasPosition(tile, index, tiles.length)
+            const positionStyle = { left: canvasPosition.x, top: canvasPosition.y, ...tileColorStyle(tile) }
             return onTileSelect ? (
               <button
                 aria-label={`编辑第 ${index + 1} 格：${tile.short_name}`}
@@ -2387,29 +2510,17 @@ const Board = memo(function Board({
                 onClick={() => {
                   if (!suppressTileClickRef.current && !tileDragRef.current) onTileSelect(tile)
                 }}
-                style={{ ...getRoomTileGridPosition(tile, index, tiles.length), ...tileColorStyle(tile) }}
+                style={positionStyle}
                 type="button"
               >
                 {tileContent}
               </button>
             ) : (
-              <div className={tileClassName} key={tile.id} style={{ ...getRoomTileGridPosition(tile, index, tiles.length), ...tileColorStyle(tile) }}>
+              <div className={tileClassName} key={tile.id} style={positionStyle}>
                 {tileContent}
               </div>
             )
           })}
-          <div
-            className="board-center"
-            data-round={displayRound}
-            style={denseLayout
-              ? { gridColumn: `${denseCenterStart} / span 3`, gridRow: `${denseCenterStart} / span 3` }
-              : { gridColumn: `2 / ${dimensions.columns}`, gridRow: `2 / ${dimensions.rows}` }}
-          >
-            <span className="center-mark"><span /></span>
-            <p>{roundLabel(displayRound)} · {tiles.length} CELLS</p>
-            <strong>护航协议局</strong>
-            <small>每个房间使用独立随机棋盘</small>
-          </div>
         </div>
       </div>
     </div>

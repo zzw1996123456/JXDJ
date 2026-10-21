@@ -70,6 +70,23 @@ export interface RoomTile {
   is_randomized: boolean
   grid_x: number | null
   grid_y: number | null
+  layout_x: number | null
+  layout_y: number | null
+  image_id: string | null
+  image_url: string | null
+  created_at: string
+}
+
+export interface RoomTileImage {
+  id: string
+  room_id: string
+  name: string
+  storage_path: string
+  public_url: string
+  width: number
+  height: number
+  byte_size: number
+  mime_type: string
   created_at: string
 }
 

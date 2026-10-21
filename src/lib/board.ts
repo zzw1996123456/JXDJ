@@ -150,7 +150,8 @@ export function createRandomRoomTiles(roomId: string): RoomTile[] {
     tiles.push({
       id: crypto.randomUUID(), room_id: roomId, template_id: null, round_number: round, position: 0,
       name: '起点', short_name: '起点', tile_type: 'start', detail: '本轮行动从这里开始',
-      effect_type: 'none', effect_value: 0, tile_color: null, is_randomized: false, grid_x: null, grid_y: null, created_at: createdAt,
+      effect_type: 'none', effect_value: 0, tile_color: null, is_randomized: false, grid_x: null, grid_y: null,
+      layout_x: null, layout_y: null, image_id: null, image_url: null, created_at: createdAt,
     })
 
     groups.forEach((group, groupPosition) => {
@@ -164,7 +165,8 @@ export function createRandomRoomTiles(roomId: string): RoomTile[] {
         id: crypto.randomUUID(), room_id: roomId, template_id: null, round_number: round, position,
         name: selected.name, short_name: selected.short_name, tile_type: selected.tile_type,
         detail: selected.detail, effect_type: selected.effect_type, effect_value: selected.effect_value,
-        tile_color: null, is_randomized: true, grid_x: null, grid_y: null, created_at: createdAt,
+        tile_color: null, is_randomized: true, grid_x: null, grid_y: null,
+        layout_x: null, layout_y: null, image_id: null, image_url: null, created_at: createdAt,
       })
     })
   }
@@ -186,6 +188,26 @@ export interface BoardLayoutPoint {
   gridX: number
   gridY: number
 }
+
+export interface BoardCanvasPoint {
+  x: number
+  y: number
+}
+
+export interface BoardCanvasBounds {
+  minX: number
+  minY: number
+  maxX: number
+  maxY: number
+  width: number
+  height: number
+}
+
+export const BOARD_TILE_WIDTH = 120
+export const BOARD_TILE_HEIGHT = 92
+export const BOARD_TILE_GAP = 30
+export const BOARD_TILE_STEP_X = BOARD_TILE_WIDTH + BOARD_TILE_GAP
+export const BOARD_TILE_STEP_Y = BOARD_TILE_HEIGHT + BOARD_TILE_GAP
 
 export interface BoardLayoutPreset {
   id: BoardLayoutPresetId
@@ -341,6 +363,30 @@ export function getRoomTileGridPosition(tile: RoomTile, index: number, size: num
     return { gridColumn: tile.grid_x + 1, gridRow: tile.grid_y + 1 }
   }
   return getBoardGridPosition(index, size)
+}
+
+export function gridPointToCanvas(point: BoardLayoutPoint): BoardCanvasPoint {
+  return { x: point.gridX * BOARD_TILE_STEP_X, y: point.gridY * BOARD_TILE_STEP_Y }
+}
+
+export function getRoomTileCanvasPosition(tile: RoomTile, index: number, size: number): BoardCanvasPoint {
+  if (Number.isFinite(tile.layout_x) && Number.isFinite(tile.layout_y)) {
+    return { x: Number(tile.layout_x), y: Number(tile.layout_y) }
+  }
+  const grid = getRoomTileGridPosition(tile, index, size)
+  return gridPointToCanvas({ gridX: grid.gridColumn - 1, gridY: grid.gridRow - 1 })
+}
+
+export function getRoomBoardBounds(tiles: RoomTile[]): BoardCanvasBounds {
+  if (tiles.length === 0) {
+    return { minX: 0, minY: 0, maxX: BOARD_TILE_WIDTH, maxY: BOARD_TILE_HEIGHT, width: BOARD_TILE_WIDTH, height: BOARD_TILE_HEIGHT }
+  }
+  const positions = tiles.map((tile, index) => getRoomTileCanvasPosition(tile, index, tiles.length))
+  const minX = Math.min(...positions.map((point) => point.x))
+  const minY = Math.min(...positions.map((point) => point.y))
+  const maxX = Math.max(...positions.map((point) => point.x)) + BOARD_TILE_WIDTH
+  const maxY = Math.max(...positions.map((point) => point.y)) + BOARD_TILE_HEIGHT
+  return { minX, minY, maxX, maxY, width: maxX - minX, height: maxY - minY }
 }
 
 export function getRoomBoardDimensions(tiles: RoomTile[]) {

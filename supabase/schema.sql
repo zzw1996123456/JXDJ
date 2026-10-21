@@ -1620,6 +1620,8 @@ select pg_notify('pgrst', 'reload schema');
 -- Advanced graph board: free tile placement, directed routes, and player route choice.
 alter table public.room_tiles add column if not exists grid_x integer;
 alter table public.room_tiles add column if not exists grid_y integer;
+alter table public.room_tiles add column if not exists layout_x numeric;
+alter table public.room_tiles add column if not exists layout_y numeric;
 alter table public.room_tiles drop constraint if exists room_tiles_grid_x_check;
 alter table public.room_tiles add constraint room_tiles_grid_x_check check (grid_x is null or grid_x between 0 and 200);
 alter table public.room_tiles drop constraint if exists room_tiles_grid_y_check;
@@ -2636,7 +2638,7 @@ begin
   v_version := (p_config ->> 'version')::integer;
   if jsonb_typeof(p_config) <> 'object'
     or p_config ->> 'format' <> 'jingxu-delta-monopoly-room'
-    or v_version not in (1, 2, 3, 4)
+    or v_version not in (1, 2, 3, 4, 5)
   then raise exception '房间设置文件格式或版本无效'; end if;
 
   v_settings := p_config -> 'settings';
@@ -3030,7 +3032,9 @@ begin
   if coalesce((p_config ->> 'version')::integer, 0) >= 4 then
     for v_tile in select value from jsonb_array_elements(p_config -> 'tiles') loop
       update public.room_tiles set grid_x = case when v_tile ? 'grid_x' and v_tile ->> 'grid_x' is not null then (v_tile ->> 'grid_x')::integer else null end,
-        grid_y = case when v_tile ? 'grid_y' and v_tile ->> 'grid_y' is not null then (v_tile ->> 'grid_y')::integer else null end
+        grid_y = case when v_tile ? 'grid_y' and v_tile ->> 'grid_y' is not null then (v_tile ->> 'grid_y')::integer else null end,
+        layout_x = case when coalesce((p_config ->> 'version')::integer, 0) >= 5 and v_tile ? 'layout_x' and v_tile ->> 'layout_x' is not null then (v_tile ->> 'layout_x')::numeric else null end,
+        layout_y = case when coalesce((p_config ->> 'version')::integer, 0) >= 5 and v_tile ? 'layout_y' and v_tile ->> 'layout_y' is not null then (v_tile ->> 'layout_y')::numeric else null end
       where room_id = p_room_id and round_number = (v_tile ->> 'round_number')::integer and position = (v_tile ->> 'position')::integer;
     end loop;
   end if;
@@ -3158,7 +3162,6 @@ declare
   v_tile_count integer;
   v_layout_count integer;
   v_unique_positions integer;
-  v_unique_coordinates integer;
   v_invalid_count integer;
   v_min_position integer;
   v_max_position integer;
@@ -3172,29 +3175,210 @@ begin
   select count(*) into v_tile_count from public.room_tiles
   where room_id = p_room_id and round_number = p_round;
 
-  select count(*), count(distinct layout.position), count(distinct (layout.grid_x, layout.grid_y)),
-    count(*) filter (where layout.position is null or layout.grid_x is null or layout.grid_y is null
-      or layout.grid_x not between 0 and 200 or layout.grid_y not between 0 and 200),
+  select count(*), count(distinct layout.position),
+    count(*) filter (where layout.position is null or layout.layout_x is null or layout.layout_y is null
+      or layout.layout_x not between -100000 and 100000 or layout.layout_y not between -100000 and 100000),
     min(layout.position), max(layout.position)
-  into v_layout_count, v_unique_positions, v_unique_coordinates, v_invalid_count, v_min_position, v_max_position
-  from jsonb_to_recordset(p_positions) as layout(position integer, grid_x integer, grid_y integer);
+  into v_layout_count, v_unique_positions, v_invalid_count, v_min_position, v_max_position
+  from jsonb_to_recordset(p_positions) as layout(position integer, layout_x numeric, layout_y numeric);
 
   if v_layout_count <> v_tile_count or v_unique_positions <> v_tile_count
-    or v_unique_coordinates <> v_tile_count or v_invalid_count > 0
+    or v_invalid_count > 0
     or v_min_position <> 0 or v_max_position <> v_tile_count - 1 then
     raise exception '地图预设必须为本轮每个格子提供唯一且有效的坐标';
   end if;
 
   with layout as (
-    select * from jsonb_to_recordset(p_positions) as item(position integer, grid_x integer, grid_y integer)
+    select * from jsonb_to_recordset(p_positions) as item(position integer, layout_x numeric, layout_y numeric)
   )
   update public.room_tiles as tile
-  set grid_x = layout.grid_x, grid_y = layout.grid_y
+  set layout_x = layout.layout_x, layout_y = layout.layout_y
   from layout
   where tile.room_id = p_room_id and tile.round_number = p_round and tile.position = layout.position;
 end;
 $$;
 revoke all on function public.admin_apply_board_layout(uuid, integer, jsonb) from public;
 grant execute on function public.admin_apply_board_layout(uuid, integer, jsonb) to authenticated;
+
+-- Infinite canvas positions and reusable, aggressively compressed tile images.
+alter table public.room_tiles drop constraint if exists room_tiles_layout_x_check;
+alter table public.room_tiles add constraint room_tiles_layout_x_check check (layout_x is null or layout_x between -100000 and 100000);
+alter table public.room_tiles drop constraint if exists room_tiles_layout_y_check;
+alter table public.room_tiles add constraint room_tiles_layout_y_check check (layout_y is null or layout_y between -100000 and 100000);
+
+create table if not exists public.room_tile_images (
+  id uuid primary key default gen_random_uuid(),
+  room_id uuid not null references public.rooms(id) on delete cascade,
+  name text not null check (char_length(name) between 1 and 60),
+  storage_path text not null unique,
+  public_url text not null,
+  width integer not null check (width between 1 and 2000),
+  height integer not null check (height between 1 and 2000),
+  byte_size integer not null check (byte_size between 1 and 81920),
+  mime_type text not null check (mime_type = 'image/webp'),
+  created_at timestamptz not null default now()
+);
+
+create index if not exists room_tile_images_room_idx on public.room_tile_images(room_id, created_at desc);
+alter table public.room_tile_images enable row level security;
+drop policy if exists "room members can read tile images" on public.room_tile_images;
+create policy "room members can read tile images" on public.room_tile_images for select to authenticated using (public.is_room_member(room_id));
+drop policy if exists "admins can read tile images" on public.room_tile_images;
+create policy "admins can read tile images" on public.room_tile_images for select to authenticated using (public.is_admin());
+
+alter table public.room_tiles add column if not exists image_id uuid;
+alter table public.room_tiles add column if not exists image_url text;
+alter table public.room_tiles drop constraint if exists room_tiles_image_id_fkey;
+alter table public.room_tiles add constraint room_tiles_image_id_fkey foreign key (image_id) references public.room_tile_images(id) on delete set null;
+
+insert into storage.buckets(id, name, public, file_size_limit, allowed_mime_types)
+values ('tile-images', 'tile-images', true, 131072, array['image/webp'])
+on conflict (id) do update set public = true, file_size_limit = excluded.file_size_limit, allowed_mime_types = excluded.allowed_mime_types;
+
+drop policy if exists "admins upload tile images" on storage.objects;
+create policy "admins upload tile images" on storage.objects for insert to authenticated
+  with check (bucket_id = 'tile-images' and public.is_admin());
+drop policy if exists "admins update tile images" on storage.objects;
+create policy "admins update tile images" on storage.objects for update to authenticated
+  using (bucket_id = 'tile-images' and public.is_admin()) with check (bucket_id = 'tile-images' and public.is_admin());
+drop policy if exists "admins delete tile images" on storage.objects;
+create policy "admins delete tile images" on storage.objects for delete to authenticated
+  using (bucket_id = 'tile-images' and public.is_admin());
+
+create or replace function public.admin_update_tile_position(p_tile_id uuid, p_layout_x numeric, p_layout_y numeric)
+returns void language plpgsql security definer set search_path = public
+as $$
+begin
+  if not public.is_admin() then raise exception '只有管理员可以移动格子'; end if;
+  if p_layout_x not between -100000 and 100000 or p_layout_y not between -100000 and 100000 then
+    raise exception '格子坐标超出无限画布的安全范围';
+  end if;
+  update public.room_tiles tile set layout_x = p_layout_x, layout_y = p_layout_y
+  from public.rooms room where tile.id = p_tile_id and room.id = tile.room_id and room.status = 'lobby';
+  if not found then raise exception '格子不存在，或房间已经开始'; end if;
+end;
+$$;
+
+create or replace function public.admin_add_room_tiles_around(p_tile_id uuid, p_anchor_x numeric, p_anchor_y numeric)
+returns void language plpgsql security definer set search_path = public
+as $$
+declare
+  v_tile public.room_tiles%rowtype;
+  v_room public.rooms%rowtype;
+  v_room_id uuid;
+  v_size integer;
+  v_position integer;
+  v_old_next uuid;
+  v_first uuid;
+  v_second uuid;
+begin
+  if not public.is_admin() then raise exception '只有管理员可以添加格子'; end if;
+  if p_anchor_x not between -100000 and 100000 or p_anchor_y not between -100000 and 100000 then raise exception '格子坐标无效'; end if;
+  select room_id into v_room_id from public.room_tiles where id = p_tile_id;
+  select * into v_room from public.rooms where id = v_room_id and status = 'lobby' for update;
+  if not found then raise exception '格子不存在，或房间已经开始'; end if;
+  select * into v_tile from public.room_tiles where id = p_tile_id for update;
+  v_size := (v_room.round_board_sizes ->> (v_tile.round_number - 1))::integer;
+  if v_size > 98 then raise exception '每轮最多 100 格'; end if;
+  perform public.ensure_room_edges_internal(v_tile.room_id, v_tile.round_number);
+  select id into v_old_next from public.room_tiles where room_id = v_tile.room_id and round_number = v_tile.round_number
+    and position = case when v_tile.position = v_size - 1 then 0 else v_tile.position + 1 end;
+
+  for v_position in reverse (v_size - 1)..(v_tile.position + 1) loop
+    update public.room_tiles set position = v_position + 2
+    where room_id = v_tile.room_id and round_number = v_tile.round_number and position = v_position;
+  end loop;
+  update public.room_tiles set layout_x = p_anchor_x, layout_y = p_anchor_y where id = p_tile_id;
+  insert into public.room_tiles(room_id, round_number, position, name, short_name, tile_type, detail, effect_type, effect_value, is_randomized, layout_x, layout_y)
+  values (v_tile.room_id, v_tile.round_number, v_tile.position + 1, '空格', '空格', 'empty', '平安经过，本格不触发额外效果', 'none', 0, true, p_anchor_x + 150, p_anchor_y - 122)
+  returning id into v_first;
+  insert into public.room_tiles(room_id, round_number, position, name, short_name, tile_type, detail, effect_type, effect_value, is_randomized, layout_x, layout_y)
+  values (v_tile.room_id, v_tile.round_number, v_tile.position + 2, '空格', '空格', 'empty', '平安经过，本格不触发额外效果', 'none', 0, true, p_anchor_x + 150, p_anchor_y + 122)
+  returning id into v_second;
+
+  delete from public.room_tile_edges where from_tile_id = p_tile_id and to_tile_id = v_old_next and not is_bidirectional;
+  insert into public.room_tile_edges(room_id, round_number, from_tile_id, to_tile_id)
+  values (v_tile.room_id, v_tile.round_number, p_tile_id, v_first),
+    (v_tile.room_id, v_tile.round_number, v_first, v_second),
+    (v_tile.room_id, v_tile.round_number, v_second, v_old_next)
+  on conflict (from_tile_id, to_tile_id) do update set is_bidirectional = false;
+
+  update public.rooms set
+    round_board_sizes = jsonb_set(round_board_sizes, array[(v_tile.round_number - 1)::text], to_jsonb(v_size + 2)),
+    round1_board_size = case when v_tile.round_number = 1 then v_size + 2 else round1_board_size end,
+    round2_board_size = case when v_tile.round_number = 2 then v_size + 2 else round2_board_size end,
+    round3_board_size = case when v_tile.round_number = 3 then v_size + 2 else round3_board_size end,
+    board_size = case when v_tile.round_number = 1 then v_size + 2 else board_size end
+  where id = v_tile.room_id;
+  insert into public.game_events(room_id, message) values (v_tile.room_id, '管理员围绕第' || (v_tile.position + 1) || '格添加了 2 个格子');
+end;
+$$;
+
+create or replace function public.admin_create_tile_image(
+  p_room_id uuid, p_name text, p_storage_path text, p_public_url text,
+  p_width integer, p_height integer, p_byte_size integer, p_mime_type text
+) returns uuid language plpgsql security definer set search_path = public
+as $$
+declare v_id uuid;
+begin
+  if not public.is_admin() then raise exception '只有管理员可以添加图片'; end if;
+  if not exists (select 1 from public.rooms where id = p_room_id and status = 'lobby') then raise exception '只能在开局前添加图片'; end if;
+  if p_byte_size not between 1 and 81920 or p_mime_type <> 'image/webp' then raise exception '图片必须是 80 KB 以内的 WebP'; end if;
+  if p_storage_path not like (p_room_id::text || '/%') then raise exception '图片存储路径无效'; end if;
+  insert into public.room_tile_images(room_id, name, storage_path, public_url, width, height, byte_size, mime_type)
+  values (p_room_id, left(trim(p_name), 60), p_storage_path, p_public_url, p_width, p_height, p_byte_size, p_mime_type)
+  returning id into v_id;
+  return v_id;
+end;
+$$;
+
+create or replace function public.admin_set_tile_image(p_tile_id uuid, p_image_id uuid)
+returns void language plpgsql security definer set search_path = public
+as $$
+declare v_url text;
+begin
+  if not public.is_admin() then raise exception '只有管理员可以设置格子图片'; end if;
+  if p_image_id is not null then
+    select image.public_url into v_url from public.room_tile_images image join public.room_tiles tile on tile.room_id = image.room_id
+      where image.id = p_image_id and tile.id = p_tile_id;
+    if not found then raise exception '图片不属于当前房间'; end if;
+  end if;
+  update public.room_tiles tile set image_id = p_image_id, image_url = v_url
+  from public.rooms room where tile.id = p_tile_id and room.id = tile.room_id and room.status = 'lobby';
+  if not found then raise exception '格子不存在，或房间已经开始'; end if;
+end;
+$$;
+
+create or replace function public.admin_delete_tile_image(p_image_id uuid)
+returns void language plpgsql security definer set search_path = public
+as $$
+declare v_room_id uuid;
+begin
+  if not public.is_admin() then raise exception '只有管理员可以删除图片'; end if;
+  select image.room_id into v_room_id from public.room_tile_images image join public.rooms room on room.id = image.room_id
+    where image.id = p_image_id and room.status = 'lobby' for update of image;
+  if not found then raise exception '图片不存在，或房间已经开始'; end if;
+  update public.room_tiles set image_id = null, image_url = null where image_id = p_image_id;
+  delete from public.room_tile_images where id = p_image_id;
+end;
+$$;
+
+revoke all on function public.admin_update_tile_position(uuid, numeric, numeric) from public;
+revoke all on function public.admin_add_room_tiles_around(uuid, numeric, numeric) from public;
+revoke all on function public.admin_create_tile_image(uuid, text, text, text, integer, integer, integer, text) from public;
+revoke all on function public.admin_set_tile_image(uuid, uuid) from public;
+revoke all on function public.admin_delete_tile_image(uuid) from public;
+grant execute on function public.admin_update_tile_position(uuid, numeric, numeric) to authenticated;
+grant execute on function public.admin_add_room_tiles_around(uuid, numeric, numeric) to authenticated;
+grant execute on function public.admin_create_tile_image(uuid, text, text, text, integer, integer, integer, text) to authenticated;
+grant execute on function public.admin_set_tile_image(uuid, uuid) to authenticated;
+grant execute on function public.admin_delete_tile_image(uuid) to authenticated;
+
+do $$
+begin
+  begin alter publication supabase_realtime add table public.room_tile_images;
+  exception when duplicate_object then null;
+  end;
+end $$;
 
 select pg_notify('pgrst', 'reload schema');

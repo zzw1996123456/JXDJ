@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { BOARD_LAYOUT_PRESETS, createBoardLayout, createDefaultTileEdges, createRandomRoomTiles, getBoardDimensions, getBoardGridPosition, getRoomBoardDimensions, getRoomTileGridPosition, RULE_TEMPLATES, usesDenseBoardLayout } from '../src/lib/board'
+import { BOARD_LAYOUT_PRESETS, BOARD_TILE_STEP_X, BOARD_TILE_STEP_Y, createBoardLayout, createDefaultTileEdges, createRandomRoomTiles, getBoardDimensions, getBoardGridPosition, getRoomBoardBounds, getRoomBoardDimensions, getRoomTileCanvasPosition, getRoomTileGridPosition, gridPointToCanvas, RULE_TEMPLATES, usesDenseBoardLayout } from '../src/lib/board'
 import { chooseDemoDice, createDemoRoom, resolveDemoDice, startDemoGame } from '../src/lib/demoGame'
 import type { GameRound, RoomTile, TileEffect } from '../src/types'
 
@@ -280,7 +280,7 @@ for (let size = 2; size <= 100; size += 2) {
         && position.gridColumn < centerStart + 3
         && position.gridRow >= centerStart
         && position.gridRow < centerStart + 3
-      assert.equal(insideCenter, false, `${size} 格棋盘不能覆盖中心协议区`)
+      assert.equal(insideCenter, false, `${size} 格默认同心路线应保留中心留白`)
     }
   }
 }
@@ -318,4 +318,16 @@ assert.deepEqual(getRoomTileGridPosition(movedTiles[0], 0, movedTiles.length), {
 const movedDimensions = getRoomBoardDimensions(movedTiles)
 assert.ok(movedDimensions.columns >= 15 && movedDimensions.rows >= 10, '自由移动后的棋盘边界必须随格子扩张')
 
-console.log('效果回归测试通过：落格效果、分轮规则、随机棋盘、5 种自适应预设与默认路线图')
+const legacyCanvasPosition = getRoomTileCanvasPosition(movedTiles[0], 0, movedTiles.length)
+assert.deepEqual(legacyCanvasPosition, { x: 14 * BOARD_TILE_STEP_X, y: 9 * BOARD_TILE_STEP_Y }, '旧网格坐标必须自动转换为画布像素坐标')
+const freelyMovedTiles = movedTiles.map((tile, index) => index === 0 ? { ...tile, layout_x: -137.5, layout_y: 42.25 } : tile)
+assert.deepEqual(getRoomTileCanvasPosition(freelyMovedTiles[0], 0, freelyMovedTiles.length), { x: -137.5, y: 42.25 }, '连续坐标必须支持负数和小数并优先于旧网格')
+const freeBounds = getRoomBoardBounds(freelyMovedTiles)
+assert.equal(freeBounds.minX, -137.5, '画布边界必须包含负坐标')
+assert.ok(freeBounds.width > 120 && freeBounds.height >= 92, '画布边界必须覆盖全部格子')
+for (const preset of BOARD_LAYOUT_PRESETS) {
+  const canvasPoints = createBoardLayout(24, preset.id).map(gridPointToCanvas)
+  assert.ok(canvasPoints.every((point) => point.x % BOARD_TILE_STEP_X === 0 && point.y % BOARD_TILE_STEP_Y === 0), `${preset.name}必须转换为稳定的像素间距`)
+}
+
+console.log('效果回归测试通过：落格效果、分轮规则、无限画布、5 种自适应预设与默认路线图')
