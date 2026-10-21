@@ -180,7 +180,7 @@ function tileColorStyle(tile: RoomTile): React.CSSProperties {
   const blue = Number.parseInt(value.slice(4, 6), 16)
   const light = (red * 299 + green * 587 + blue * 114) / 1000 > 145
   return {
-    backgroundColor: `rgb(${red} ${green} ${blue} / 58%)`,
+    backgroundColor: `rgb(${red} ${green} ${blue} / 42%)`,
     borderTopColor: light ? '#11140f' : '#f4f6ef',
     color: light ? '#11140f' : '#f4f6ef',
     '--tile-detail-color': light ? '#30362d' : '#e3e8dc',
@@ -337,6 +337,10 @@ function formatError(error: unknown) {
   if (error instanceof Error) return error.message
   if (typeof error === 'object' && error && 'message' in error) return String(error.message)
   return '操作失败，请稍后重试'
+}
+
+function waitForAnimation(milliseconds: number) {
+  return new Promise<void>((resolve) => window.setTimeout(resolve, milliseconds))
 }
 
 function roomStatusLabel(room: Room) {
@@ -608,6 +612,55 @@ function PlayerAvatar({ player, index, className = '' }: { player: Player; index
     <span className={`player-avatar ${className}`.trim()} style={{ '--player-color': PLAYER_COLORS[index % PLAYER_COLORS.length] } as React.CSSProperties}>
       {player.nickname.slice(0, 1).toUpperCase()}
     </span>
+  )
+}
+
+type DiceAnimationState = {
+  phase: 'rolling' | 'result'
+  value: number | null
+}
+
+const DICE_PIPS: Record<number, number[]> = {
+  1: [5],
+  2: [1, 9],
+  3: [1, 5, 9],
+  4: [1, 3, 7, 9],
+  5: [1, 3, 5, 7, 9],
+  6: [1, 3, 4, 6, 7, 9],
+}
+
+function DicePips({ value }: { value: number }) {
+  const visiblePips = DICE_PIPS[value] ?? DICE_PIPS[1]
+  return (
+    <span className="dice-pips" aria-hidden="true">
+      {Array.from({ length: 9 }, (_, index) => <i className={visiblePips.includes(index + 1) ? 'visible' : ''} key={index} />)}
+    </span>
+  )
+}
+
+function DiceRollOverlay({ state }: { state: DiceAnimationState }) {
+  return (
+    <div aria-live="assertive" className={`dice-roll-overlay ${state.phase}`} role="status">
+      <div className="dice-roll-glow" />
+      {state.phase === 'rolling' ? (
+        <div className="dice-cube-scene" aria-label="正在摇骰子">
+          <div className="dice-cube">
+            <span className="dice-cube-face face-front"><DicePips value={1} /></span>
+            <span className="dice-cube-face face-back"><DicePips value={6} /></span>
+            <span className="dice-cube-face face-right"><DicePips value={3} /></span>
+            <span className="dice-cube-face face-left"><DicePips value={4} /></span>
+            <span className="dice-cube-face face-top"><DicePips value={2} /></span>
+            <span className="dice-cube-face face-bottom"><DicePips value={5} /></span>
+          </div>
+        </div>
+      ) : (
+        <div className="dice-result-face" aria-label={`最终点数 ${state.value}`}>
+          <DicePips value={state.value ?? 1} />
+        </div>
+      )}
+      <p>{state.phase === 'rolling' ? '命运流转中' : '最终点数'}</p>
+      {state.phase === 'result' && <strong>{state.value}</strong>}
+    </div>
   )
 }
 
@@ -3271,6 +3324,8 @@ export default function App() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [dice, setDice] = useState<number | null>(null)
+  const [diceAnimation, setDiceAnimation] = useState<DiceAnimationState | null>(null)
+  const deferRoomUpdatesRef = useRef(false)
 
   const refreshRoom = useCallback(async (roomId: string, userId: string) => {
     try {
@@ -3283,9 +3338,11 @@ export default function App() {
         setSelectedMode('monopoly')
         setSnapshot(null)
         setDice(null)
+        setDiceAnimation(null)
         setError('本局已被管理员暂停，继续后可使用原行动代号重新进入')
         return
       }
+      if (deferRoomUpdatesRef.current) return
       setSnapshot(next)
     } catch (refreshError) {
       const message = formatError(refreshError)
@@ -3435,23 +3492,58 @@ export default function App() {
     if (!snapshot) return
     if (snapshot.isDemo) {
       setBusy(true)
-      window.setTimeout(() => {
-        const result = rollDemoDice(snapshot)
-        setDice(result.dice)
-        setSnapshot(result.snapshot)
-        setBusy(false)
-      }, 520)
+      setError('')
+      setDiceAnimation({ phase: 'rolling', value: null })
+      void (async () => {
+        try {
+          await waitForAnimation(900)
+          const result = rollDemoDice(snapshot)
+          setDice(result.dice)
+          setDiceAnimation({ phase: 'result', value: result.dice })
+          await waitForAnimation(720)
+          setDiceAnimation(null)
+          await waitForAnimation(160)
+          setSnapshot(result.snapshot)
+        } catch (rollError) {
+          setDiceAnimation(null)
+          setError(formatError(rollError))
+        } finally {
+          setBusy(false)
+        }
+      })()
       return
     }
     if (!supabase) return
     const client = supabase
-    void runAction(async () => {
-      const { data, error: rpcError } = await client.rpc('roll_dice', { p_room_id: snapshot.room.id })
-      if (rpcError) throw rpcError
-      const result = Array.isArray(data) ? data[0] : data
-      setDice(result?.dice_value ?? null)
-      await refreshRoom(snapshot.room.id, snapshot.userId)
-    })
+    setBusy(true)
+    setError('')
+    setDiceAnimation({ phase: 'rolling', value: null })
+    deferRoomUpdatesRef.current = true
+    void (async () => {
+      const startedAt = performance.now()
+      try {
+        const { data, error: rpcError } = await client.rpc('roll_dice', { p_room_id: snapshot.room.id })
+        if (rpcError) throw rpcError
+        const result = Array.isArray(data) ? data[0] : data
+        const diceValue = Number(result?.dice_value)
+        if (!Number.isInteger(diceValue) || diceValue < 1 || diceValue > 6) throw new Error('服务器没有返回有效的骰子点数')
+        const remainingRollTime = Math.max(0, 900 - (performance.now() - startedAt))
+        if (remainingRollTime > 0) await waitForAnimation(remainingRollTime)
+        setDice(diceValue)
+        setDiceAnimation({ phase: 'result', value: diceValue })
+        await waitForAnimation(720)
+        setDiceAnimation(null)
+        await waitForAnimation(160)
+        deferRoomUpdatesRef.current = false
+        await refreshRoom(snapshot.room.id, snapshot.userId)
+      } catch (rollError) {
+        deferRoomUpdatesRef.current = false
+        setDiceAnimation(null)
+        setError(formatError(rollError))
+      } finally {
+        setBusy(false)
+      }
+    })()
   }
 
   function chooseRoute(route: RouteOption) {
@@ -3468,9 +3560,11 @@ export default function App() {
   }
 
   function clearLocalRoom() {
+    deferRoomUpdatesRef.current = false
     localStorage.removeItem(ACTIVE_ROOM_KEY)
     setSnapshot(null)
     setDice(null)
+    setDiceAnimation(null)
     setError('')
   }
 
@@ -3484,6 +3578,7 @@ export default function App() {
     const fresh = createDemoRoom(player.nickname, player.role)
     setSnapshot(startDemoGame(fresh))
     setDice(null)
+    setDiceAnimation(null)
   }
 
   function addDemoDice() {
@@ -3531,6 +3626,7 @@ export default function App() {
       {snapshot && snapshot.room.status !== 'lobby' && (
         <GameView busy={busy} dice={dice} onAddDemoDice={addDemoDice} onChooseRoute={chooseRoute} onExit={exitRoom} onRestart={restartDemo} onRoll={rollDice} snapshot={snapshot} />
       )}
+      {diceAnimation && <DiceRollOverlay state={diceAnimation} />}
       {error && (
         <div className="toast" role="alert">
           <span>{error}</span>
