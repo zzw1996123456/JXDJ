@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { createRandomRoomTiles, getBoardDimensions, getBoardGridPosition, RULE_TEMPLATES } from '../src/lib/board'
+import { createRandomRoomTiles, getBoardDimensions, getBoardGridPosition, RULE_TEMPLATES, usesDenseBoardLayout } from '../src/lib/board'
 import { chooseDemoDice, createDemoRoom, resolveDemoDice, startDemoGame } from '../src/lib/demoGame'
 import type { GameRound, RoomTile, TileEffect } from '../src/types'
 
@@ -264,6 +264,14 @@ for (let size = 2; size <= 100; size += 2) {
   for (const position of positions) {
     assert.ok(position.gridColumn >= 1 && position.gridColumn <= dimensions.columns, `${size} 格棋盘列坐标越界`)
     assert.ok(position.gridRow >= 1 && position.gridRow <= dimensions.rows, `${size} 格棋盘行坐标越界`)
+  }
+  if (usesDenseBoardLayout(size)) {
+    assert.ok(dimensions.columns * dimensions.rows <= Math.ceil(size * 1.25), `${size} 格紧凑棋盘空位过多`)
+    for (let index = 1; index < positions.length; index += 1) {
+      const columnDistance = Math.abs(positions[index].gridColumn - positions[index - 1].gridColumn)
+      const rowDistance = Math.abs(positions[index].gridRow - positions[index - 1].gridRow)
+      assert.equal(columnDistance + rowDistance, 1, `${size} 格棋盘路线必须连续`)
+    }
   }
 }
 

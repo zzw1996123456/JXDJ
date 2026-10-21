@@ -44,6 +44,7 @@ import {
   getBoardDimensions,
   getBoardGridPosition,
   getRoundTiles,
+  usesDenseBoardLayout,
   PLAYER_COLORS,
   TILE_TYPE_LABELS,
 } from './lib/board'
@@ -1715,6 +1716,7 @@ const Board = memo(function Board({
 }) {
   const tiles = getRoundTiles(allTiles, displayRound)
   const dimensions = getBoardDimensions(tiles.length)
+  const denseLayout = usesDenseBoardLayout(tiles.length)
   const stageRef = useRef<HTMLDivElement>(null)
   const boardRef = useRef<HTMLDivElement>(null)
   const viewRef = useRef({ x: BOARD_VIEW_PADDING, y: BOARD_VIEW_PADDING, scale: 1 })
@@ -1815,6 +1817,18 @@ const Board = memo(function Board({
     return () => observer.disconnect()
   }, [applyBoardView])
 
+  useEffect(() => {
+    const stage = stageRef.current
+    if (!stage) return
+    const handleWheel = (event: WheelEvent) => {
+      event.preventDefault()
+      event.stopPropagation()
+      zoomBoard(viewRef.current.scale + (event.deltaY < 0 ? 0.1 : -0.1), event.clientX, event.clientY)
+    }
+    stage.addEventListener('wheel', handleWheel, { passive: false })
+    return () => stage.removeEventListener('wheel', handleWheel)
+  }, [zoomBoard])
+
   function startBoardDrag(event: React.PointerEvent<HTMLDivElement>) {
     if (event.button !== 0) return
     dragRef.current = {
@@ -1852,11 +1866,6 @@ const Board = memo(function Board({
     window.setTimeout(() => { suppressTileClickRef.current = false }, 0)
   }
 
-  function handleBoardWheel(event: React.WheelEvent<HTMLDivElement>) {
-    event.preventDefault()
-    zoomBoard(viewRef.current.scale + (event.deltaY < 0 ? 0.1 : -0.1), event.clientX, event.clientY)
-  }
-
   return (
     <div className={`board-viewport ${className === 'admin-board' ? 'admin-board-viewport' : ''}`}>
       <div className="board-toolbar" aria-label="棋盘缩放工具">
@@ -1872,12 +1881,11 @@ const Board = memo(function Board({
         onPointerDown={startBoardDrag}
         onPointerMove={moveBoard}
         onPointerUp={stopBoardDrag}
-        onWheel={handleBoardWheel}
         ref={stageRef}
       >
         <div
           aria-label={`${roundLabel(displayRound)}行动棋盘`}
-          className={`board board-size-${tiles.length} ${className}`.trim()}
+          className={`board board-size-${tiles.length} ${denseLayout ? 'board-route-grid' : ''} ${className}`.trim()}
           ref={boardRef}
           style={{
             '--board-columns': dimensions.columns,
@@ -1923,16 +1931,18 @@ const Board = memo(function Board({
               </div>
             )
           })}
-          <div
-            className="board-center"
-            data-round={displayRound}
-            style={{ gridColumn: `2 / ${dimensions.columns}`, gridRow: `2 / ${dimensions.rows}` }}
-          >
-            <span className="center-mark"><span /></span>
-            <p>{roundLabel(displayRound)} · {tiles.length} CELLS</p>
-            <strong>护航协议局</strong>
-            <small>每个房间使用独立随机棋盘</small>
-          </div>
+          {!denseLayout && (
+            <div
+              className="board-center"
+              data-round={displayRound}
+              style={{ gridColumn: `2 / ${dimensions.columns}`, gridRow: `2 / ${dimensions.rows}` }}
+            >
+              <span className="center-mark"><span /></span>
+              <p>{roundLabel(displayRound)} · {tiles.length} CELLS</p>
+              <strong>护航协议局</strong>
+              <small>每个房间使用独立随机棋盘</small>
+            </div>
+          )}
         </div>
       </div>
     </div>

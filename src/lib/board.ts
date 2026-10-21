@@ -176,10 +176,31 @@ export function getRoundTiles(tiles: RoomTile[], round: GameRound) {
   return tiles.filter((tile) => tile.round_number === round).sort((a, b) => a.position - b.position)
 }
 
+export function usesDenseBoardLayout(size: number) {
+  return size > 24
+}
+
 export function getBoardDimensions(size: number) {
   if (size === 8) return { columns: 3, rows: 3 }
   if (size === 12) return { columns: 4, rows: 4 }
   if (size === 24) return { columns: 8, rows: 6 }
+
+  if (usesDenseBoardLayout(size)) {
+    let best = { columns: 5, rows: Math.ceil(size / 5) }
+    let bestScore = Number.POSITIVE_INFINITY
+    for (let columns = 4; columns <= size; columns += 1) {
+      const rows = Math.ceil(size / columns)
+      if (rows < 4) continue
+      const emptyRatio = (columns * rows - size) / size
+      const physicalAspect = (columns * 120) / (rows * 92)
+      const score = Math.abs(Math.log(physicalAspect)) + emptyRatio * 0.4
+      if (score < bestScore) {
+        best = { columns, rows }
+        bestScore = score
+      }
+    }
+    return best
+  }
 
   let best = { columns: Math.max(3, Math.ceil(size / 2)), rows: 3 }
   let bestScore = Number.POSITIVE_INFINITY
@@ -199,6 +220,14 @@ export function getBoardDimensions(size: number) {
 
 export function getBoardGridPosition(index: number, size: number) {
   const { columns, rows } = getBoardDimensions(size)
+  if (usesDenseBoardLayout(size)) {
+    const row = Math.floor(index / columns)
+    const offset = index % columns
+    return {
+      gridColumn: row % 2 === 0 ? offset + 1 : columns - offset,
+      gridRow: row + 1,
+    }
+  }
   if (index < columns) return { gridColumn: index + 1, gridRow: 1 }
   const rightEnd = columns + rows - 2
   if (index < rightEnd) return { gridColumn: columns, gridRow: index - columns + 2 }
