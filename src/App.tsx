@@ -219,6 +219,10 @@ function safeFilename(value: string) {
 
 function downloadTextFile(filename: string, content: string, type: string, withBom = false) {
   const blob = new Blob([withBom ? '\uFEFF' : '', content], { type })
+  downloadBlobFile(filename, blob)
+}
+
+function downloadBlobFile(filename: string, blob: Blob) {
   const url = URL.createObjectURL(blob)
   const anchor = document.createElement('a')
   anchor.href = url
@@ -2007,52 +2011,55 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
     if (!selectedRoom || selectedRoom.status !== 'finished') return
     void runAdminAction(async () => {
       if (!supabase) return
+      const client = supabase
+      const roomForExport = selectedRoom
       const pageSize = 1000
-      const allEvents: GameEvent[] = []
-      for (let from = 0; ; from += pageSize) {
-        const { data, error: eventsError } = await supabase
-          .from('game_events')
-          .select('*')
-          .eq('room_id', selectedRoom.id)
-          .order('created_at', { ascending: true })
-          .range(from, from + pageSize - 1)
-        if (eventsError) throw eventsError
-        const batch = data as GameEvent[]
-        allEvents.push(...batch)
-        if (batch.length < pageSize) break
+      async function loadAllRoomRows<T>(table: 'game_events' | 'dice_requests' | 'guarantee_requests' | 'room_settlement_rules', primaryOrder: string) {
+        const rows: T[] = []
+        for (let from = 0; ; from += pageSize) {
+          const { data, error: rowsError } = await client
+            .from(table)
+            .select('*')
+            .eq('room_id', roomForExport.id)
+            .order(primaryOrder, { ascending: true })
+            .order('id', { ascending: true })
+            .range(from, from + pageSize - 1)
+          if (rowsError) throw rowsError
+          const batch = data as T[]
+          rows.push(...batch)
+          if (batch.length < pageSize) break
+        }
+        return rows
       }
-      const { data: rulesData, error: rulesError } = await supabase
-        .from('room_settlement_rules')
-        .select('*')
-        .eq('room_id', selectedRoom.id)
-        .order('sequence_number')
-      if (rulesError) throw rulesError
-      const rules = rulesData as SettlementRule[]
-      const rollEvents = allEvents.filter((event) => event.event_type === 'roll' || event.message.includes('掷出'))
-      const rollLines = rollEvents.map((event, index) => {
-        const metadata = event.metadata ?? {}
-        const timestamp = new Date(event.created_at).toLocaleString('zh-CN', { hour12: false })
-        if (!metadata.player_name || !metadata.dice) return `${index + 1}. [${timestamp}] ${event.message}`
-        const role = metadata.role === 'boss' ? '老板' : '打手'
-        return `${index + 1}. [${timestamp}] ${metadata.player_name}（${role}） · 第${metadata.round}轮 · 掷出 ${metadata.dice} · 落到「${metadata.tile_name}」：${metadata.tile_detail}`
+
+      const [roomResult, playersResult, allEvents, allDiceRequests, allGuaranteeRequests, allRules] = await Promise.all([
+        client.from('rooms').select('*').eq('id', roomForExport.id).single(),
+        client.from('room_players').select('*').eq('room_id', roomForExport.id).order('turn_order'),
+        loadAllRoomRows<GameEvent>('game_events', 'created_at'),
+        loadAllRoomRows<DiceRequest>('dice_requests', 'created_at'),
+        loadAllRoomRows<GuaranteeRequest>('guarantee_requests', 'created_at'),
+        loadAllRoomRows<SettlementRule>('room_settlement_rules', 'sequence_number'),
+      ])
+      if (roomResult.error) throw roomResult.error
+      if (playersResult.error) throw playersResult.error
+
+      const { buildRoomAuditWorkbook } = await import('./lib/roomAuditWorkbook')
+      const exportedAt = new Date()
+      const bytes = await buildRoomAuditWorkbook({
+        room: roomResult.data as Room,
+        players: playersResult.data as Player[],
+        events: allEvents,
+        diceRequests: allDiceRequests,
+        guaranteeRequests: allGuaranteeRequests,
+        settlementRules: allRules,
+        exportedAt,
       })
-      const ruleLines = rules.map((rule) => `${rule.sequence_number}. ${rule.base_text}${rule.suffix ? ` ${rule.suffix}` : ''}`)
-      const content = [
-        '景序电竞三角洲趣味 · 全部摇骰记录',
-        `房间：${selectedRoom.name}`,
-        `房间码：${selectedRoom.code}`,
-        `导出时间：${new Date().toLocaleString('zh-CN', { hour12: false })}`,
-        `摇骰次数：${rollEvents.length}`,
-        '',
-        '=== 全部摇骰记录 ===',
-        ...(rollLines.length ? rollLines : ['本局没有摇骰记录。']),
-        '',
-        '=== 全员骰子归零规则 ===',
-        ...(ruleLines.length ? ruleLines : ['本局没有生成归零规则。']),
-        '',
-      ].join('\r\n')
       const date = new Date().toISOString().slice(0, 10)
-      downloadTextFile(`${safeFilename(selectedRoom.name)}_全部摇骰记录_${date}.txt`, content, 'text/plain;charset=utf-8', true)
+      downloadBlobFile(
+        `${safeFilename(roomForExport.name)}_完整对局记录_${date}.xlsx`,
+        new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }),
+      )
+      setConfigNotice(`完整对局表格已导出：${allEvents.length} 条事件、${allDiceRequests.length} 条骰子申请、${allGuaranteeRequests.length} 条保底申请`)
     })
   }
 
@@ -2258,7 +2265,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                       ref={configInputRef}
                       type="file"
                     />
-                    <button className="button secondary" disabled={busy || selectedRoom.status !== 'finished'} onClick={exportRollLog} title={selectedRoom.status === 'finished' ? '导出全部摇骰记录' : '房间结束后可导出'} type="button"><Download size={17} /> 导出记录</button>
+                    <button className="button secondary" disabled={busy || selectedRoom.status !== 'finished'} onClick={exportRollLog} title={selectedRoom.status === 'finished' ? '导出完整对局表格' : '房间结束后可导出'} type="button"><Download size={17} /> 导出记录</button>
                     <button className="button primary" disabled={busy || !canStart} onClick={startRoom} type="button"><Play size={17} /> 开始房间</button>
                     <button className="button secondary" disabled={busy || selectedRoom.status !== 'playing'} onClick={toggleRoomPause} type="button">
                       {selectedRoom.is_paused ? <Play size={17} /> : <Pause size={17} />}
