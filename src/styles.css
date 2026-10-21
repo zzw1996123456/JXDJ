@@ -378,16 +378,7 @@ button.mode-card {
 }
 
 .hero-copy::after {
-  content: 'JX';
-  position: absolute;
-  z-index: -1;
-  right: -1vw;
-  bottom: -112px;
-  color: rgb(244 184 207 / 7%);
-  font-family: 'Barlow Condensed', sans-serif;
-  font-size: 440px;
-  font-weight: 800;
-  line-height: 1;
+  content: none;
 }
 
 .eyebrow,
@@ -4358,7 +4349,7 @@ body::after {
 .lobby-intro h1 span,
 .admin-login-copy h1 span { color: var(--china-jade); text-shadow: 0 0 32px rgb(184 213 201 / 16%); }
 
-.hero-copy::after { color: rgb(217 169 184 / 7%); }
+.hero-copy::after { content: none; }
 
 .mode-catalog,
 .entry-panel,
@@ -4951,4 +4942,74 @@ body * {
 .portal-header::after,
 .room-header::after {
   content: none;
+}
+
+.admin-site-content-panel {
+  margin-bottom: 18px;
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgb(10 23 21 / 62%);
+  box-shadow: 0 16px 36px rgb(3 12 11 / 18%), inset 0 1px 0 rgb(255 255 255 / 7%);
+  backdrop-filter: blur(18px) saturate(112%);
+  -webkit-backdrop-filter: blur(18px) saturate(112%);
+}
+
+.admin-site-content-panel .section-title {
+  margin-bottom: 8px;
+}
+
+.admin-site-content-panel .section-title h2 {
+  margin: 4px 0 0;
+  color: var(--china-moon);
+  font-size: 20px;
+}
+
+.site-content-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin: 16px 0;
+}
+
+.site-content-grid label {
+  display: grid;
+  gap: 6px;
+}
+
+.site-content-grid label > span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.site-content-grid input,
+.site-content-grid textarea {
+  min-width: 0;
+  border: 1px solid rgb(184 213 201 / 22%);
+  border-radius: 6px;
+  padding: 10px 11px;
+  background: rgb(5 16 14 / 58%);
+  color: var(--china-moon);
+  font: inherit;
+  resize: vertical;
+}
+
+.site-content-grid input:focus,
+.site-content-grid textarea:focus {
+  outline: 2px solid rgb(217 169 184 / 40%);
+  border-color: var(--china-lotus);
+}
+
+.site-content-wide {
+  grid-column: span 2;
+}
+
+@media (max-width: 980px) {
+  .site-content-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 680px) {
+  .admin-site-content-panel { padding: 15px; }
+  .site-content-grid { grid-template-columns: 1fr; }
+  .site-content-wide { grid-column: auto; }
 }

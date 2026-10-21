@@ -142,6 +142,39 @@ interface RoomConfigFavorite {
   created_at: string
 }
 
+interface SiteContent {
+  hero_eyebrow: string
+  hero_title_primary: string
+  hero_title_accent: string
+  hero_subtitle: string
+  stat_rounds_value: string
+  stat_rounds_label: string
+  stat_board_value: string
+  stat_board_label: string
+  stat_players_value: string
+  stat_players_label: string
+}
+
+const DEFAULT_SITE_CONTENT: SiteContent = {
+  hero_eyebrow: '趣味单 01 · 大富翁',
+  hero_title_primary: '大富翁',
+  hero_title_accent: '护航协议局。',
+  hero_subtitle: '多轮随机棋盘逐步扩张，每个房间都有不同的移动、回合和护航规则。',
+  stat_rounds_value: '3',
+  stat_rounds_label: '轮推演',
+  stat_board_value: '8/12/24',
+  stat_board_label: '格棋盘',
+  stat_players_value: '3',
+  stat_players_label: '人上限',
+}
+
+function normalizeSiteContent(content: Partial<SiteContent> | null | undefined): SiteContent {
+  return Object.fromEntries(Object.entries(DEFAULT_SITE_CONTENT).map(([key, fallback]) => [
+    key,
+    typeof content?.[key as keyof SiteContent] === 'string' ? content[key as keyof SiteContent] : fallback,
+  ])) as unknown as SiteContent
+}
+
 function roundLabel(round: GameRound) {
   return `第 ${round} 轮`
 }
@@ -479,12 +512,14 @@ function ModeHub({ onSelect }: { onSelect: () => void }) {
 
 function MonopolyEntry({
   busy,
+  content,
   onJoin,
   onDemo,
   onAdmin,
   onBack,
 }: {
   busy: boolean
+  content: SiteContent
   onJoin: (nickname: string, role: PlayerRole, code: string) => void
   onDemo: (nickname: string, role: PlayerRole) => void
   onAdmin: () => void
@@ -530,13 +565,17 @@ function MonopolyEntry({
       </header>
       <main className="home-shell">
         <section className="hero-copy">
-          <p className="eyebrow"><Dice5 size={14} /> 趣味单 01 · 大富翁</p>
-          <h1>大富翁<br /><span>护航协议局。</span></h1>
-          <p className="hero-subtitle">多轮随机棋盘逐步扩张，每个房间都有不同的移动、回合和护航规则。</p>
+          {content.hero_eyebrow && <p className="eyebrow"><Dice5 size={14} /> {content.hero_eyebrow}</p>}
+          <h1>
+            {content.hero_title_primary}
+            {content.hero_title_primary && content.hero_title_accent && <br />}
+            {content.hero_title_accent && <span>{content.hero_title_accent}</span>}
+          </h1>
+          {content.hero_subtitle && <p className="hero-subtitle">{content.hero_subtitle}</p>}
           <div className="mission-stats" aria-label="游戏规则概览">
-            <span><strong>3</strong> 轮推演</span>
-            <span><strong>8/12/24</strong> 格棋盘</span>
-            <span><strong>3</strong> 人上限</span>
+            {(content.stat_rounds_value || content.stat_rounds_label) && <span><strong>{content.stat_rounds_value}</strong> {content.stat_rounds_label}</span>}
+            {(content.stat_board_value || content.stat_board_label) && <span><strong>{content.stat_board_value}</strong> {content.stat_board_label}</span>}
+            {(content.stat_players_value || content.stat_players_label) && <span><strong>{content.stat_players_value}</strong> {content.stat_players_label}</span>}
           </div>
         </section>
 
@@ -708,6 +747,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
   const [roomEdges, setRoomEdges] = useState<RoomTileEdge[]>([])
   const [tileImages, setTileImages] = useState<RoomTileImage[]>([])
   const [configFavorites, setConfigFavorites] = useState<RoomConfigFavorite[]>([])
+  const [siteContentDraft, setSiteContentDraft] = useState<SiteContent>(DEFAULT_SITE_CONTENT)
   const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null)
   const [roomPendingDelete, setRoomPendingDelete] = useState<string | null>(null)
   const [advanceChances, setAdvanceChances] = useState<string[]>(DEFAULT_ADVANCE_CHANCES.map(String))
@@ -808,6 +848,17 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
     setConfigFavorites(data as RoomConfigFavorite[])
   }, [])
 
+  const loadSiteContent = useCallback(async () => {
+    if (!supabase) return
+    const { data, error: contentError } = await supabase
+      .from('site_content')
+      .select('*')
+      .eq('id', 'global')
+      .maybeSingle()
+    if (contentError) throw contentError
+    setSiteContentDraft(normalizeSiteContent(data as Partial<SiteContent> | null))
+  }, [])
+
   const loadRoomEdges = useCallback(async (roomId: string) => {
     if (!supabase) return
     const { error: ensureError } = await supabase.rpc('admin_ensure_room_edges', { p_room_id: roomId })
@@ -884,7 +935,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       if (!adminError && isAdmin === true) {
         setAuthorized(true)
         try {
-          await Promise.all([loadDashboard(), loadConfigFavorites()])
+          await Promise.all([loadDashboard(), loadConfigFavorites(), loadSiteContent()])
         } catch (loadError) {
           setError(formatError(loadError))
         }
@@ -892,7 +943,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       setChecking(false)
     }
     void checkSession()
-  }, [loadConfigFavorites, loadDashboard])
+  }, [loadConfigFavorites, loadDashboard, loadSiteContent])
 
   useEffect(() => {
     if (!authorized || !supabase) return
@@ -1034,7 +1085,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       }
       setAuthorized(true)
       setPassword('')
-      await Promise.all([loadDashboard(), loadConfigFavorites()])
+      await Promise.all([loadDashboard(), loadConfigFavorites(), loadSiteContent()])
     })
   }
 
@@ -1050,6 +1101,19 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       setRoomEdges([])
       setConfigFavorites([])
       setSelectedRoomId(null)
+    })
+  }
+
+  function saveSiteContent() {
+    void runAdminAction(async () => {
+      if (!supabase) return
+      const content = normalizeSiteContent(siteContentDraft)
+      const values = Object.values(content)
+      if (values.some((value) => value.length > 80)) throw new Error('首页文案单项不能超过 80 个字符')
+      const { error: rpcError } = await supabase.rpc('admin_update_site_content', { p_content: content })
+      if (rpcError) throw rpcError
+      setSiteContentDraft(content)
+      setConfigNotice('首页主视觉文案已保存，刷新玩家页面即可看到最新内容')
     })
   }
 
@@ -2107,6 +2171,29 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
           </aside>
 
           <section className="admin-room-detail">
+            <section className="admin-site-content-panel" aria-labelledby="site-content-title">
+              <div className="section-title">
+                <div>
+                  <p className="kicker">首页主视觉</p>
+                  <h2 id="site-content-title">顶部文案设置</h2>
+                </div>
+                <Save size={18} />
+              </div>
+              <p className="probability-note">这里的内容会显示在玩家入口的大富翁主视觉区域。大号 JX 装饰字已移除，以下字段均可完全替换。</p>
+              <div className="site-content-grid">
+                <label><span>顶部标签</span><input maxLength={80} onChange={(event) => setSiteContentDraft({ ...siteContentDraft, hero_eyebrow: event.target.value })} value={siteContentDraft.hero_eyebrow} /></label>
+                <label><span>主标题第一行</span><input maxLength={80} onChange={(event) => setSiteContentDraft({ ...siteContentDraft, hero_title_primary: event.target.value })} value={siteContentDraft.hero_title_primary} /></label>
+                <label><span>主标题第二行</span><input maxLength={80} onChange={(event) => setSiteContentDraft({ ...siteContentDraft, hero_title_accent: event.target.value })} value={siteContentDraft.hero_title_accent} /></label>
+                <label className="site-content-wide"><span>主标题下方说明</span><textarea maxLength={80} onChange={(event) => setSiteContentDraft({ ...siteContentDraft, hero_subtitle: event.target.value })} rows={2} value={siteContentDraft.hero_subtitle} /></label>
+                <label><span>第一项数值</span><input maxLength={20} onChange={(event) => setSiteContentDraft({ ...siteContentDraft, stat_rounds_value: event.target.value })} value={siteContentDraft.stat_rounds_value} /></label>
+                <label><span>第一项文字</span><input maxLength={40} onChange={(event) => setSiteContentDraft({ ...siteContentDraft, stat_rounds_label: event.target.value })} value={siteContentDraft.stat_rounds_label} /></label>
+                <label><span>第二项数值</span><input maxLength={20} onChange={(event) => setSiteContentDraft({ ...siteContentDraft, stat_board_value: event.target.value })} value={siteContentDraft.stat_board_value} /></label>
+                <label><span>第二项文字</span><input maxLength={40} onChange={(event) => setSiteContentDraft({ ...siteContentDraft, stat_board_label: event.target.value })} value={siteContentDraft.stat_board_label} /></label>
+                <label><span>第三项数值</span><input maxLength={20} onChange={(event) => setSiteContentDraft({ ...siteContentDraft, stat_players_value: event.target.value })} value={siteContentDraft.stat_players_value} /></label>
+                <label><span>第三项文字</span><input maxLength={40} onChange={(event) => setSiteContentDraft({ ...siteContentDraft, stat_players_label: event.target.value })} value={siteContentDraft.stat_players_label} /></label>
+              </div>
+              <button className="button primary" disabled={busy} onClick={saveSiteContent} type="button"><Save size={17} /> 保存首页文案</button>
+            </section>
             {selectedRoom ? (
               <>
                 <div className="admin-detail-header">
@@ -3320,12 +3407,35 @@ export default function App() {
   const [selectedMode, setSelectedMode] = useState<'monopoly' | null>(null)
   const [showAdmin, setShowAdmin] = useState(false)
   const [snapshot, setSnapshot] = useState<GameSnapshot | null>(null)
+  const [siteContent, setSiteContent] = useState<SiteContent>(DEFAULT_SITE_CONTENT)
   const [busy, setBusy] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [dice, setDice] = useState<number | null>(null)
   const [diceAnimation, setDiceAnimation] = useState<DiceAnimationState | null>(null)
   const deferRoomUpdatesRef = useRef(false)
+
+  useEffect(() => {
+    if (!supabase) return
+    void supabase
+      .from('site_content')
+      .select('*')
+      .eq('id', 'global')
+      .maybeSingle()
+      .then(({ data }) => setSiteContent(normalizeSiteContent(data as Partial<SiteContent> | null)))
+  }, [])
+
+  useEffect(() => {
+    if (!supabase) return
+    const client = supabase
+    const channel = client
+      .channel('public-site-content')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'site_content', filter: 'id=eq.global' }, (payload) => {
+        setSiteContent(normalizeSiteContent(payload.new as Partial<SiteContent>))
+      })
+      .subscribe()
+    return () => { void client.removeChannel(channel) }
+  }, [])
 
   const refreshRoom = useCallback(async (roomId: string, userId: string) => {
     try {
@@ -3614,6 +3724,7 @@ export default function App() {
       {!snapshot && selectedMode === 'monopoly' && (
         <MonopolyEntry
           busy={busy}
+          content={siteContent}
           onBack={() => setSelectedMode(null)}
           onAdmin={() => setShowAdmin(true)}
           onDemo={createDemo}
