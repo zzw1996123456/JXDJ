@@ -3093,6 +3093,7 @@ button.mode-card {
 .guarantee-request-status p, .guarantee-request-hint { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .guarantee-review-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; margin: 16px 0; }
 .guarantee-request-dialog { max-width: 560px; }
+.dice-request-panel { border-top: 1px solid rgb(255 255 255 / 12%); padding-top: 14px; }
 
 @media (max-width: 600px) {
   .guarantee-form-row, .guarantee-review-grid { grid-template-columns: 1fr; }

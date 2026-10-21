@@ -69,6 +69,7 @@ import type {
   GameEvent,
   GameRound,
   GameSnapshot,
+  DiceRequest,
   GuaranteeRequest,
   GuaranteeEffect,
   Player,
@@ -398,13 +399,14 @@ async function ensureOnlineUser() {
 
 async function fetchSnapshot(roomId: string, userId: string): Promise<GameSnapshot> {
   if (!supabase) throw new Error('尚未配置 Supabase')
-  const [roomResult, playersResult, eventsResult, tilesResult, edgesResult, guaranteeRequestsResult] = await Promise.all([
+  const [roomResult, playersResult, eventsResult, tilesResult, edgesResult, guaranteeRequestsResult, diceRequestsResult] = await Promise.all([
     supabase.from('rooms').select('*').eq('id', roomId).single(),
     supabase.from('room_players').select('*').eq('room_id', roomId).order('turn_order'),
     supabase.from('game_events').select('*').eq('room_id', roomId).order('created_at', { ascending: false }).limit(40),
     supabase.from('room_tiles').select('*').eq('room_id', roomId).order('round_number').order('position'),
     supabase.from('room_tile_edges').select('*').eq('room_id', roomId).order('created_at'),
     supabase.from('guarantee_requests').select('*').eq('room_id', roomId).order('created_at', { ascending: false }).limit(60),
+    supabase.from('dice_requests').select('*').eq('room_id', roomId).order('created_at', { ascending: false }).limit(60),
   ])
 
   if (roomResult.error) throw roomResult.error
@@ -413,6 +415,7 @@ async function fetchSnapshot(roomId: string, userId: string): Promise<GameSnapsh
   if (tilesResult.error) throw tilesResult.error
   if (edgesResult.error) throw edgesResult.error
   if (guaranteeRequestsResult.error) throw guaranteeRequestsResult.error
+  if (diceRequestsResult.error) throw diceRequestsResult.error
 
   return {
     room: roomResult.data as Room,
@@ -421,6 +424,7 @@ async function fetchSnapshot(roomId: string, userId: string): Promise<GameSnapsh
     tiles: tilesResult.data as RoomTile[],
     edges: edgesResult.data as RoomTileEdge[],
     guaranteeRequests: guaranteeRequestsResult.data as GuaranteeRequest[],
+    diceRequests: diceRequestsResult.data as DiceRequest[],
     userId,
     isDemo: false,
   }
@@ -748,6 +752,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
   const [players, setPlayers] = useState<Player[]>([])
   const [events, setEvents] = useState<GameEvent[]>([])
   const [guaranteeRequests, setGuaranteeRequests] = useState<GuaranteeRequest[]>([])
+  const [diceRequests, setDiceRequests] = useState<DiceRequest[]>([])
   const [settlementRules, setSettlementRules] = useState<SettlementRule[]>([])
   const [roomTiles, setRoomTiles] = useState<RoomTile[]>([])
   const [roomEdges, setRoomEdges] = useState<RoomTileEdge[]>([])
@@ -796,6 +801,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
   const selectedPlayers = players.filter((player) => player.room_id === selectedRoomId)
   const selectedEvents = events.filter((event) => event.room_id === selectedRoomId)
   const selectedGuaranteeRequests = guaranteeRequests.filter((request) => request.room_id === selectedRoomId)
+  const selectedDiceRequests = diceRequests.filter((request) => request.room_id === selectedRoomId)
   const selectedSettlementRules = settlementRules
     .filter((rule) => rule.room_id === selectedRoomId)
     .sort((left, right) => left.sequence_number - right.sequence_number)
@@ -909,6 +915,13 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
     setGuaranteeRequests(data as GuaranteeRequest[])
   }, [])
 
+  const loadDiceRequests = useCallback(async (roomId: string) => {
+    if (!supabase) return
+    const { data, error: requestError } = await supabase.from('dice_requests').select('*').eq('room_id', roomId).order('created_at', { ascending: false }).limit(200)
+    if (requestError) throw requestError
+    setDiceRequests(data as DiceRequest[])
+  }, [])
+
   const loadSettlementRules = useCallback(async (roomId: string) => {
     if (!supabase) return
     const { data, error: rulesError } = await supabase
@@ -973,6 +986,9 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'guarantee_requests' }, () => {
         if (selectedRoomId) void loadGuaranteeRequests(selectedRoomId)
       })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'dice_requests' }, () => {
+        if (selectedRoomId) void loadDiceRequests(selectedRoomId)
+      })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'room_tiles' }, (payload) => {
         if (!selectedRoomId) return
         if (payload.eventType === 'UPDATE') {
@@ -1013,21 +1029,22 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       }
       void client.removeChannel(channel)
     }
-  }, [applyPendingTileState, authorized, loadDashboard, loadGuaranteeRequests, loadRoomEdges, loadRoomEvents, loadRoomTiles, loadSettlementRules, loadTileImages, selectedRoomId])
+  }, [applyPendingTileState, authorized, loadDashboard, loadDiceRequests, loadGuaranteeRequests, loadRoomEdges, loadRoomEvents, loadRoomTiles, loadSettlementRules, loadTileImages, selectedRoomId])
 
   useEffect(() => {
     if (!authorized) return
     if (!selectedRoomId) {
       setEvents([])
       setGuaranteeRequests([])
+      setDiceRequests([])
       setSettlementRules([])
       setRoomTiles([])
       setRoomEdges([])
       return
     }
-    void Promise.all([loadRoomEvents(selectedRoomId), loadGuaranteeRequests(selectedRoomId), loadRoomTiles(selectedRoomId), loadRoomEdges(selectedRoomId), loadTileImages(), loadSettlementRules(selectedRoomId)])
+    void Promise.all([loadRoomEvents(selectedRoomId), loadGuaranteeRequests(selectedRoomId), loadDiceRequests(selectedRoomId), loadRoomTiles(selectedRoomId), loadRoomEdges(selectedRoomId), loadTileImages(), loadSettlementRules(selectedRoomId)])
       .catch((loadError) => setError(formatError(loadError)))
-  }, [authorized, loadGuaranteeRequests, loadRoomEdges, loadRoomEvents, loadRoomTiles, loadSettlementRules, loadTileImages, selectedRoomId])
+  }, [authorized, loadDiceRequests, loadGuaranteeRequests, loadRoomEdges, loadRoomEvents, loadRoomTiles, loadSettlementRules, loadTileImages, selectedRoomId])
 
   useEffect(() => {
     if (!selectedRoom) return
@@ -1614,10 +1631,10 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
     void runAdminAction(async () => {
       if (!supabase) return
       const diceCount = Number(diceDrafts[player.id] ?? player.dice_count)
-      if (!Number.isInteger(diceCount) || diceCount < 0 || diceCount > 20) {
-        throw new Error('骰子数量必须是 0–20 的整数')
+      if (!Number.isInteger(diceCount) || diceCount < 0 || diceCount > 1000000000) {
+        throw new Error('骰子数量必须是 0–10 亿的整数')
       }
-      const { error: rpcError } = await supabase.rpc('admin_set_player_dice', {
+      const { error: rpcError } = await supabase.rpc('admin_set_player_dice_unlimited', {
         p_room_id: selectedRoom.id,
         p_player_id: player.id,
         p_dice_count: diceCount,
@@ -2292,6 +2309,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                   <span><small>配置基础保底</small><strong>{selectedRoom.base_guarantee ?? 100} 万</strong></span>
                   <span><small>当前基础余额</small><strong>{selectedRoom.base_guarantee_balance ?? selectedRoom.base_guarantee ?? 100} 万</strong></span>
                   <span><small>待确认申请</small><strong>{selectedGuaranteeRequests.filter((request) => request.status === 'pending').length} 条</strong></span>
+                  <span><small>待确认骰子</small><strong>{selectedDiceRequests.filter((request) => request.status === 'pending').length} 条</strong></span>
                 </div>
 
                 <section className="admin-turn-panel">
@@ -2542,7 +2560,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                           )}
                           <div className="admin-resource-editor">
                             <Dice5 size={13} />
-                            <input aria-label={`${player.nickname} 的骰子数量`} disabled={busy || selectedRoom.status === 'finished'} max="20" min="0" onChange={(event) => setDiceDrafts((current) => ({ ...current, [player.id]: event.target.value }))} type="number" value={diceDrafts[player.id] ?? String(player.dice_count)} />
+                            <input aria-label={`${player.nickname} 的骰子数量`} disabled={busy || selectedRoom.status === 'finished'} max="1000000000" min="0" onChange={(event) => setDiceDrafts((current) => ({ ...current, [player.id]: event.target.value }))} step="1" type="number" value={diceDrafts[player.id] ?? String(player.dice_count)} />
                             <small>个</small>
                             <button aria-label={`保存 ${player.nickname} 的骰子数量`} disabled={busy || selectedRoom.status === 'finished'} onClick={() => savePlayerDice(player)} title="保存骰子数量" type="button"><Save size={14} /></button>
                           </div>
@@ -2571,6 +2589,19 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                       </article>
                     ))}
                     {selectedSettlementRules.length === 0 && <p className="admin-empty">全员骰子第一次归零后，这里会自动生成规则。</p>}
+                  </div>
+                </section>
+
+                <section className="admin-event-panel">
+                  <div className="section-title"><p className="kicker">骰子数量申请审计</p><Dice5 size={18} /></div>
+                  <div className="admin-event-list">
+                    {selectedDiceRequests.map((request) => (
+                      <div className="admin-event-row" key={request.id}>
+                        <time>{new Date(request.created_at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</time>
+                        <p>{request.requester_nickname} 申请{request.operation === 'add' ? '增加' : '减少'} {request.target_player_nickname} 的 {request.amount} 个骰子 · {request.status === 'pending' ? '待老板确认' : request.status === 'approved' ? `已同意（${request.dice_before} → ${request.dice_after}）` : '已拒绝'}</p>
+                      </div>
+                    ))}
+                    {selectedDiceRequests.length === 0 && <p className="admin-empty">暂无骰子数量申请。</p>}
                   </div>
                 </section>
 
@@ -3302,6 +3333,9 @@ function GameView({
   onCreateGuaranteeRequest,
   onApproveGuaranteeRequest,
   onRejectGuaranteeRequest,
+  onCreateDiceRequest,
+  onApproveDiceRequest,
+  onRejectDiceRequest,
 }: {
   snapshot: GameSnapshot
   busy: boolean
@@ -3314,6 +3348,9 @@ function GameView({
   onCreateGuaranteeRequest: (operation: 'add' | 'subtract', target: 'current' | 'base' | 'auto', amount: number) => void
   onApproveGuaranteeRequest: (requestId: string) => void
   onRejectGuaranteeRequest: (requestId: string) => void
+  onCreateDiceRequest: (targetPlayerId: string, operation: 'add' | 'subtract', amount: number) => void
+  onApproveDiceRequest: (requestId: string) => void
+  onRejectDiceRequest: (requestId: string) => void
 }) {
   const [isAnimatingMove, setIsAnimatingMove] = useState(false)
   const [boardRound, setBoardRound] = useState(snapshot.room.current_round)
@@ -3344,10 +3381,16 @@ function GameView({
   const [requestTarget, setRequestTarget] = useState<'current' | 'base' | 'auto'>('auto')
   const [requestAmount, setRequestAmount] = useState('')
   const [activeRequestId, setActiveRequestId] = useState<string | null>(null)
+  const [diceTargetId, setDiceTargetId] = useState('self')
+  const [diceOperation, setDiceOperation] = useState<'add' | 'subtract'>('add')
+  const [diceAmount, setDiceAmount] = useState('')
+  const [activeDiceRequestId, setActiveDiceRequestId] = useState<string | null>(null)
   const boss = snapshot.players.find((player) => player.role === 'boss')
   const ownRequests = snapshot.guaranteeRequests.filter((request) => request.requester_user_id === snapshot.userId)
   const pendingBossRequests = snapshot.guaranteeRequests.filter((request) => request.status === 'pending' && boss?.user_id === snapshot.userId)
   const activeRequest = snapshot.guaranteeRequests.find((request) => request.id === activeRequestId) ?? pendingBossRequests[0] ?? null
+  const pendingBossDiceRequests = snapshot.diceRequests.filter((request) => request.status === 'pending' && boss?.user_id === snapshot.userId)
+  const activeDiceRequest = snapshot.diceRequests.find((request) => request.id === activeDiceRequestId) ?? pendingBossDiceRequests[0] ?? null
   const baseBalance = snapshot.room.base_guarantee_balance ?? snapshot.room.base_guarantee ?? 0
 
   function submitGuaranteeRequest() {
@@ -3355,6 +3398,14 @@ function GameView({
     if (!Number.isInteger(amount) || amount <= 0) return
     onCreateGuaranteeRequest(requestOperation, requestOperation === 'add' && requestTarget === 'auto' ? 'current' : requestTarget, amount)
     setRequestAmount('')
+  }
+
+  function submitDiceRequest() {
+    const amount = Number(diceAmount)
+    const targetId = diceTargetId === 'self' ? ownPlayer?.id : boss?.id
+    if (!targetId || !Number.isInteger(amount) || amount <= 0) return
+    onCreateDiceRequest(targetId, diceOperation, amount)
+    setDiceAmount('')
   }
 
   return (
@@ -3462,6 +3513,16 @@ function GameView({
             {ownPlayer?.role === 'boss' && pendingBossRequests.length > 0 && <p className="guarantee-request-hint">有 {pendingBossRequests.length} 条保底申请待确认</p>}
           </section>
 
+          {ownPlayer?.role === 'runner' && (
+            <section className="guarantee-panel dice-request-panel">
+              <div className="section-title"><div><p className="kicker">骰子数量申请</p><strong>申请增加自己或老板的骰子</strong></div><Dice5 size={18} /></div>
+              <div className="guarantee-form-row"><select aria-label="骰子目标" onChange={(event) => setDiceTargetId(event.target.value)} value={diceTargetId}><option value="self">我的骰子（当前 {ownPlayer.dice_count}）</option>{boss && <option value="boss">老板骰子（当前 {boss.dice_count}）</option>}</select><select aria-label="骰子操作" onChange={(event) => setDiceOperation(event.target.value as 'add' | 'subtract')} value={diceOperation}><option value="add">申请增加</option><option value="subtract">申请减少</option></select></div>
+              <div className="guarantee-form-row"><input aria-label="骰子申请数量" inputMode="numeric" onChange={(event) => setDiceAmount(event.target.value.replace(/[^0-9]/g, ''))} placeholder="输入整数数量" type="text" value={diceAmount} /><button className="button primary" disabled={busy || !diceAmount || snapshot.room.status === 'finished'} onClick={submitDiceRequest} type="button"><Send size={16} /> 提交申请</button></div>
+              <div className="guarantee-request-status">{snapshot.diceRequests.filter((request) => request.requester_user_id === snapshot.userId).slice(0, 3).map((request) => <p key={request.id}>{request.operation === 'add' ? '增加' : '减少'} {request.target_player_nickname} {request.amount} 个 · {request.status === 'pending' ? '等待老板确认' : request.status === 'approved' ? '老板已同意' : '老板已拒绝，请修改后重提'}</p>)}</div>
+            </section>
+          )}
+          {ownPlayer?.role === 'boss' && pendingBossDiceRequests.length > 0 && <p className="guarantee-request-hint">有 {pendingBossDiceRequests.length} 条骰子数量申请待确认</p>}
+
           <section className="log-panel">
             <div className="section-title">
               <p className="kicker">行动记录</p>
@@ -3502,6 +3563,16 @@ function GameView({
             <p>{activeRequest.requester_nickname} 申请{activeRequest.operation === 'add' ? '增加' : '扣减'} {activeRequest.amount} 万，{activeRequest.target === 'auto' ? '按现有保底优先、基础保底补足' : activeRequest.target === 'base' ? '操作基础保底' : '操作现有保底'}。</p>
             <div className="guarantee-review-grid"><span>确认前<small>现有 {activeRequest.current_guarantee_before} · 基础 {activeRequest.base_guarantee_before}</small></span><span>预计变化<small>现有 {activeRequest.current_guarantee_delta >= 0 ? '+' : ''}{activeRequest.current_guarantee_delta} · 基础 {activeRequest.base_guarantee_delta >= 0 ? '+' : ''}{activeRequest.base_guarantee_delta}</small></span><span>确认后<small>现有 {activeRequest.current_guarantee_after} · 基础 {activeRequest.base_guarantee_after}</small></span></div>
             <div className="winner-actions"><button className="button primary" disabled={busy} onClick={() => { onApproveGuaranteeRequest(activeRequest.id); setActiveRequestId(null) }} type="button"><Check size={17} /> 同意并扣减</button><button className="button secondary" disabled={busy} onClick={() => { onRejectGuaranteeRequest(activeRequest.id); setActiveRequestId(null) }} type="button"><X size={17} /> 不同意</button><button className="button ghost" onClick={() => setActiveRequestId(null)} type="button">稍后处理</button></div>
+          </section>
+        </div>
+      )}
+      {activeDiceRequest && !activeRequest && ownPlayer?.role === 'boss' && activeDiceRequest.status === 'pending' && (
+        <div className="modal-backdrop" role="presentation">
+          <section aria-labelledby="dice-request-title" aria-modal="true" className="winner-dialog guarantee-request-dialog" role="dialog">
+            <span className="winner-icon"><Dice5 size={30} /></span><p className="kicker">DICE REVIEW</p><h2 id="dice-request-title">确认骰子数量申请</h2>
+            <p>{activeDiceRequest.requester_nickname} 申请{activeDiceRequest.operation === 'add' ? '增加' : '减少'} {activeDiceRequest.target_player_nickname} 的 {activeDiceRequest.amount} 个骰子。</p>
+            <div className="guarantee-review-grid"><span>当前数量<small>{activeDiceRequest.dice_before} 个</small></span><span>申请变化<small>{activeDiceRequest.dice_delta >= 0 ? '+' : ''}{activeDiceRequest.dice_delta} 个</small></span><span>同意后<small>{activeDiceRequest.dice_after} 个</small></span></div>
+            <div className="winner-actions"><button className="button primary" disabled={busy} onClick={() => { onApproveDiceRequest(activeDiceRequest.id); setActiveDiceRequestId(null) }} type="button"><Check size={17} /> 同意</button><button className="button secondary" disabled={busy} onClick={() => { onRejectDiceRequest(activeDiceRequest.id); setActiveDiceRequestId(null) }} type="button"><X size={17} /> 不同意</button><button className="button ghost" onClick={() => setActiveDiceRequestId(null)} type="button">稍后处理</button></div>
           </section>
         </div>
       )}
@@ -3604,6 +3675,7 @@ export default function App() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'room_players', filter: `room_id=eq.${roomId}` }, () => void refreshRoom(roomId, userId))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'game_events', filter: `room_id=eq.${roomId}` }, () => void refreshRoom(roomId, userId))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'guarantee_requests', filter: `room_id=eq.${roomId}` }, () => void refreshRoom(roomId, userId))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'dice_requests', filter: `room_id=eq.${roomId}` }, () => void refreshRoom(roomId, userId))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'room_tiles', filter: `room_id=eq.${roomId}` }, () => void refreshRoom(roomId, userId))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'room_tile_edges', filter: `room_id=eq.${roomId}` }, () => void refreshRoom(roomId, userId))
       .subscribe()
@@ -3814,6 +3886,39 @@ export default function App() {
     })
   }
 
+  function createDiceRequest(targetPlayerId: string, operation: 'add' | 'subtract', amount: number) {
+    if (!snapshot || snapshot.isDemo || !supabase) {
+      setError(snapshot?.isDemo ? '试玩模式不支持在线骰子申请' : '尚未配置 Supabase')
+      return
+    }
+    const client = supabase
+    void runAction(async () => {
+      const { error: rpcError } = await client.rpc('create_dice_request', { p_room_id: snapshot.room.id, p_target_player_id: targetPlayerId, p_operation: operation, p_amount: amount })
+      if (rpcError) throw rpcError
+      await refreshRoom(snapshot.room.id, snapshot.userId)
+    })
+  }
+
+  function approveDiceRequest(requestId: string) {
+    if (!snapshot || snapshot.isDemo || !supabase) return
+    const client = supabase
+    void runAction(async () => {
+      const { error: rpcError } = await client.rpc('approve_dice_request', { p_request_id: requestId })
+      if (rpcError) throw rpcError
+      await refreshRoom(snapshot.room.id, snapshot.userId)
+    })
+  }
+
+  function rejectDiceRequest(requestId: string) {
+    if (!snapshot || snapshot.isDemo || !supabase) return
+    const client = supabase
+    void runAction(async () => {
+      const { error: rpcError } = await client.rpc('reject_dice_request', { p_request_id: requestId, p_note: null })
+      if (rpcError) throw rpcError
+      await refreshRoom(snapshot.room.id, snapshot.userId)
+    })
+  }
+
   function clearLocalRoom() {
     deferRoomUpdatesRef.current = false
     localStorage.removeItem(ACTIVE_ROOM_KEY)
@@ -3880,7 +3985,7 @@ export default function App() {
         <LobbyView busy={busy} onProfileUpdate={updateLobbyProfile} onReady={toggleReady} onStart={startGame} snapshot={snapshot} />
       )}
       {snapshot && snapshot.room.status !== 'lobby' && (
-        <GameView busy={busy} dice={dice} onAddDemoDice={addDemoDice} onApproveGuaranteeRequest={approveGuaranteeRequest} onChooseRoute={chooseRoute} onCreateGuaranteeRequest={createGuaranteeRequest} onExit={exitRoom} onRejectGuaranteeRequest={rejectGuaranteeRequest} onRestart={restartDemo} onRoll={rollDice} snapshot={snapshot} />
+        <GameView busy={busy} dice={dice} onAddDemoDice={addDemoDice} onApproveDiceRequest={approveDiceRequest} onApproveGuaranteeRequest={approveGuaranteeRequest} onChooseRoute={chooseRoute} onCreateDiceRequest={createDiceRequest} onCreateGuaranteeRequest={createGuaranteeRequest} onExit={exitRoom} onRejectDiceRequest={rejectDiceRequest} onRejectGuaranteeRequest={rejectGuaranteeRequest} onRestart={restartDemo} onRoll={rollDice} snapshot={snapshot} />
       )}
       {diceAnimation && <DiceRollOverlay state={diceAnimation} />}
       {error && (

@@ -1827,8 +1827,146 @@ grant execute on function public.create_guarantee_request(uuid, text, text, bigi
 grant execute on function public.approve_guarantee_request(uuid) to authenticated;
 grant execute on function public.reject_guarantee_request(uuid, text) to authenticated;
 grant execute on function public.admin_set_boss_guarantees(uuid, bigint, bigint) to authenticated;
+
+-- 打手骰子数量申请。管理员可直接设置，打手的改动必须经老板确认。
+alter table public.room_players drop constraint if exists room_players_dice_count_check;
+alter table public.room_players add constraint room_players_dice_count_check check (dice_count between 0 and 1000000000);
+alter table public.rooms drop constraint if exists rooms_rolls_remaining_check;
+alter table public.rooms add constraint rooms_rolls_remaining_check check (rolls_remaining between 0 and 1000000000);
+
+create table if not exists public.dice_requests (
+  id uuid primary key default gen_random_uuid(),
+  room_id uuid not null references public.rooms(id) on delete cascade,
+  requester_player_id uuid not null references public.room_players(id) on delete cascade,
+  requester_user_id uuid not null,
+  requester_nickname text not null,
+  target_player_id uuid not null references public.room_players(id) on delete cascade,
+  target_player_nickname text not null,
+  operation text not null check (operation in ('add', 'subtract')),
+  amount bigint not null check (amount > 0),
+  status text not null default 'pending' check (status in ('pending', 'approved', 'rejected')),
+  dice_before bigint not null default 0,
+  dice_delta bigint not null default 0,
+  dice_after bigint not null default 0,
+  reviewer_user_id uuid,
+  reviewed_at timestamptz,
+  review_note text,
+  created_at timestamptz not null default now()
+);
+alter table public.dice_requests enable row level security;
+create index if not exists dice_requests_room_created_idx on public.dice_requests(room_id, created_at desc);
+drop policy if exists "room members can read dice requests" on public.dice_requests;
+create policy "room members can read dice requests" on public.dice_requests for select to authenticated using (public.is_room_member(room_id));
+drop policy if exists "admins can read dice requests" on public.dice_requests;
+create policy "admins can read dice requests" on public.dice_requests for select to authenticated using (public.is_admin());
+grant select on public.dice_requests to authenticated;
+
+create or replace function public.create_dice_request(p_room_id uuid, p_target_player_id uuid, p_operation text, p_amount bigint)
+returns public.dice_requests language plpgsql security definer set search_path = public as $$
+declare
+  v_room public.rooms%rowtype;
+  v_requester public.room_players%rowtype;
+  v_target public.room_players%rowtype;
+  v_request public.dice_requests%rowtype;
+  v_delta bigint;
+begin
+  if auth.uid() is null then raise exception '请先进入房间'; end if;
+  if p_operation not in ('add', 'subtract') or p_amount is null or p_amount <= 0 or p_amount > 1000000000 then raise exception '骰子申请必须是 1 到 10 亿的整数'; end if;
+  select * into v_room from public.rooms where id = p_room_id for update;
+  if not found or v_room.status = 'finished' then raise exception '当前房间不能提交骰子申请'; end if;
+  select * into v_requester from public.room_players where room_id = p_room_id and user_id = auth.uid() for update;
+  if not found or v_requester.role <> 'runner' then raise exception '只有打手可以提交骰子申请'; end if;
+  select * into v_target from public.room_players where room_id = p_room_id and id = p_target_player_id for update;
+  if not found or v_target.role not in ('runner', 'boss') then raise exception '骰子申请目标无效'; end if;
+  if v_target.id <> v_requester.id and v_target.role <> 'boss' then raise exception '只能申请修改自己或老板的骰子'; end if;
+  v_delta := case when p_operation = 'add' then p_amount else -p_amount end;
+  if p_operation = 'subtract' and p_amount > v_target.dice_count then raise exception '目标骰子数量不足'; end if;
+  insert into public.dice_requests(room_id, requester_player_id, requester_user_id, requester_nickname, target_player_id, target_player_nickname, operation, amount, dice_before, dice_delta, dice_after)
+  values (p_room_id, v_requester.id, auth.uid(), v_requester.nickname, v_target.id, v_target.nickname, p_operation, p_amount, v_target.dice_count, v_delta, v_target.dice_count + v_delta)
+  returning * into v_request;
+  insert into public.game_events(room_id, message, event_type, metadata)
+  values (p_room_id, v_requester.nickname || ' 申请' || case when p_operation = 'add' then '增加' else '减少' end || ' ' || v_target.nickname || ' 的 ' || p_amount || ' 个骰子，等待老板确认', 'system',
+    jsonb_build_object('request_id', v_request.id, 'operation', p_operation, 'amount', p_amount, 'player_id', v_target.id, 'player_name', v_target.nickname, 'dice_before', v_target.dice_count, 'dice_after', v_target.dice_count + v_delta));
+  return v_request;
+end;
+$$;
+
+create or replace function public.approve_dice_request(p_request_id uuid)
+returns public.dice_requests language plpgsql security definer set search_path = public as $$
+declare
+  v_request public.dice_requests%rowtype;
+  v_room public.rooms%rowtype;
+  v_boss public.room_players%rowtype;
+  v_target public.room_players%rowtype;
+  v_after bigint;
+begin
+  select * into v_request from public.dice_requests where id = p_request_id for update;
+  if not found or v_request.status <> 'pending' then raise exception '这条骰子申请已处理'; end if;
+  select * into v_room from public.rooms where id = v_request.room_id for update;
+  if v_room.status = 'finished' then raise exception '本局已结束，不能确认骰子申请'; end if;
+  select * into v_boss from public.room_players where room_id = v_request.room_id and role = 'boss' for update;
+  if not found or v_boss.user_id <> auth.uid() then raise exception '只有当前老板可以确认骰子申请'; end if;
+  select * into v_target from public.room_players where id = v_request.target_player_id for update;
+  if not found then raise exception '骰子申请目标已离开房间'; end if;
+  if v_request.operation = 'subtract' and v_request.amount > v_target.dice_count then raise exception '目标骰子数量已变化且不足'; end if;
+  v_after := v_target.dice_count + case when v_request.operation = 'add' then v_request.amount else -v_request.amount end;
+  if v_after > 1000000000 then raise exception '骰子数量不能超过 10 亿'; end if;
+  update public.room_players set dice_count = v_after where id = v_target.id;
+  if v_room.status = 'playing' and v_room.current_turn = v_target.user_id then
+    if v_after = 0 then perform public.advance_room_turn_internal(v_room.id, v_target.turn_order); else update public.rooms set rolls_remaining = v_after where id = v_room.id; end if;
+  end if;
+  update public.dice_requests set status = 'approved', reviewer_user_id = auth.uid(), reviewed_at = now(), dice_before = v_target.dice_count, dice_after = v_after, dice_delta = v_after - v_target.dice_count where id = v_request.id returning * into v_request;
+  insert into public.game_events(room_id, message, event_type, metadata)
+  values (v_room.id, '老板同意 ' || v_request.requester_nickname || ' 的骰子申请：' || v_request.target_player_nickname || ' ' || v_target.dice_count || ' → ' || v_after || ' 个', 'system', jsonb_build_object('request_id', v_request.id, 'operation', v_request.operation, 'amount', v_request.amount, 'player_id', v_target.id, 'player_name', v_target.nickname, 'dice_before', v_target.dice_count, 'dice_after', v_after));
+  return v_request;
+end;
+$$;
+
+create or replace function public.reject_dice_request(p_request_id uuid, p_note text default null)
+returns public.dice_requests language plpgsql security definer set search_path = public as $$
+declare v_request public.dice_requests%rowtype; v_boss public.room_players%rowtype;
+begin
+  select * into v_request from public.dice_requests where id = p_request_id and status = 'pending' for update;
+  if not found then raise exception '这条骰子申请已处理'; end if;
+  select * into v_boss from public.room_players where room_id = v_request.room_id and role = 'boss';
+  if not found or v_boss.user_id <> auth.uid() then raise exception '只有当前老板可以拒绝骰子申请'; end if;
+  update public.dice_requests set status = 'rejected', reviewer_user_id = auth.uid(), reviewed_at = now(), review_note = nullif(trim(coalesce(p_note, '')), '') where id = v_request.id returning * into v_request;
+  insert into public.game_events(room_id, message, event_type, metadata)
+  values (v_request.room_id, '老板拒绝了 ' || v_request.requester_nickname || ' 的骰子申请：' || v_request.target_player_nickname || ' ' || v_request.amount || ' 个', 'system', jsonb_build_object('request_id', v_request.id, 'operation', v_request.operation, 'amount', v_request.amount, 'player_id', v_request.target_player_id, 'player_name', v_request.target_player_nickname));
+  return v_request;
+end;
+$$;
+
+create or replace function public.admin_set_player_dice_unlimited(p_room_id uuid, p_player_id uuid, p_dice_count bigint)
+returns void language plpgsql security definer set search_path = public as $$
+declare v_room public.rooms%rowtype; v_player public.room_players%rowtype;
+begin
+  if not public.is_admin() then raise exception '只有管理员可以调整玩家骰子'; end if;
+  if p_dice_count < 0 or p_dice_count > 1000000000 then raise exception '骰子数量必须是 0 到 10 亿的整数'; end if;
+  select * into v_room from public.rooms where id = p_room_id for update;
+  if not found or v_room.status = 'finished' then raise exception '当前房间不能调整骰子'; end if;
+  select * into v_player from public.room_players where id = p_player_id and room_id = p_room_id for update;
+  if not found then raise exception '玩家不在当前房间'; end if;
+  update public.room_players set dice_count = p_dice_count where id = p_player_id;
+  if v_room.status = 'playing' and v_room.current_turn = v_player.user_id then
+    if p_dice_count = 0 then perform public.advance_room_turn_internal(p_room_id, v_player.turn_order); else update public.rooms set rolls_remaining = p_dice_count where id = p_room_id; end if;
+  end if;
+  insert into public.game_events(room_id, message, event_type, metadata)
+  values (p_room_id, '管理员将 ' || v_player.nickname || ' 的骰子设为 ' || p_dice_count || ' 个', 'system', jsonb_build_object('operation', 'admin_set_dice', 'player_id', v_player.id, 'player_name', v_player.nickname, 'dice_before', v_player.dice_count, 'dice_after', p_dice_count));
+end;
+$$;
+
+revoke all on function public.create_dice_request(uuid, uuid, text, bigint) from public;
+revoke all on function public.approve_dice_request(uuid) from public;
+revoke all on function public.reject_dice_request(uuid, text) from public;
+grant execute on function public.create_dice_request(uuid, uuid, text, bigint) to authenticated;
+grant execute on function public.approve_dice_request(uuid) to authenticated;
+grant execute on function public.reject_dice_request(uuid, text) to authenticated;
+revoke all on function public.admin_set_player_dice_unlimited(uuid, uuid, bigint) from public;
+grant execute on function public.admin_set_player_dice_unlimited(uuid, uuid, bigint) to authenticated;
 do $$ begin
   begin alter publication supabase_realtime add table public.guarantee_requests; exception when duplicate_object then null; end;
+  begin alter publication supabase_realtime add table public.dice_requests; exception when duplicate_object then null; end;
 end $$;
 
 -- Advanced graph board: free tile placement, directed routes, and player route choice.

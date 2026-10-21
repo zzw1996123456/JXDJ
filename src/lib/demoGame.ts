@@ -40,6 +40,7 @@ export function createDemoRoom(nickname: string, role: PlayerRole): GameSnapshot
     tiles,
     edges: createDefaultTileEdges(tiles),
     guaranteeRequests: [],
+    diceRequests: [],
     userId: DEMO_USER_ID,
     isDemo: true,
   }

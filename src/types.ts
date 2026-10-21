@@ -166,6 +166,26 @@ export interface GuaranteeRequest {
   created_at: string
 }
 
+export interface DiceRequest {
+  id: string
+  room_id: string
+  requester_player_id: string
+  requester_user_id: string
+  requester_nickname: string
+  target_player_id: string
+  target_player_nickname: string
+  operation: 'add' | 'subtract'
+  amount: number
+  status: GuaranteeRequestStatus
+  dice_before: number
+  dice_delta: number
+  dice_after: number
+  reviewer_user_id: string | null
+  reviewed_at: string | null
+  review_note: string | null
+  created_at: string
+}
+
 export interface SettlementRule {
   id: number
   room_id: string
@@ -182,6 +202,7 @@ export interface GameSnapshot {
   tiles: RoomTile[]
   edges: RoomTileEdge[]
   guaranteeRequests: GuaranteeRequest[]
+  diceRequests: DiceRequest[]
   userId: string
   isDemo: boolean
 }
