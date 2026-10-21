@@ -4,6 +4,8 @@ import {
   ArrowLeft,
   ArrowRight,
   ArrowUpRight,
+  Bookmark,
+  ChevronDown,
   Move,
   Check,
   Clipboard,
@@ -59,7 +61,7 @@ import {
   TILE_TYPE_LABELS,
 } from './lib/board'
 import type { BoardCanvasPoint, BoardLayoutPresetId } from './lib/board'
-import { cropTileImage, TILE_IMAGE_ASPECT, TILE_IMAGE_MAX_SOURCE_BYTES } from './lib/tileImages'
+import { cropTileImage, TILE_IMAGE_ASPECT, TILE_IMAGE_MAX_BYTES, TILE_IMAGE_MAX_SOURCE_BYTES } from './lib/tileImages'
 import { createDemoRoom, rollDemoDice, startDemoGame } from './lib/demoGame'
 import { isSupabaseConfigured, supabase } from './lib/supabase'
 import type {
@@ -93,7 +95,8 @@ const TILE_TYPES = Object.keys(TILE_TYPE_LABELS) as TileType[]
 const TILE_EFFECTS = Object.keys(EFFECT_LABELS) as TileEffect[]
 const GUARANTEE_EFFECTS: GuaranteeEffect[] = ['guarantee_add', 'guarantee_subtract', 'guarantee_multiply', 'guarantee_divide']
 const ROOM_CONFIG_FORMAT = 'jingxu-delta-monopoly-room'
-const ROOM_CONFIG_VERSION = 5
+const ROOM_CONFIG_VERSION = 6
+const ROOM_CONFIG_MAX_BYTES = 32 * 1024 * 1024
 const MIN_BOARD_ZOOM = 0.1
 const MAX_BOARD_ZOOM = 2
 const BOARD_VIEW_PADDING = 12
@@ -114,13 +117,29 @@ interface RoomConfigFile {
     round_sizes: number[]
     round_advance_chances: number[]
   }
-  tiles: Array<Pick<RoomTile, 'round_number' | 'position' | 'name' | 'short_name' | 'tile_type' | 'detail' | 'effect_type' | 'effect_value' | 'tile_color' | 'is_randomized' | 'grid_x' | 'grid_y' | 'layout_x' | 'layout_y'>>
+  tiles: Array<Pick<RoomTile, 'round_number' | 'position' | 'name' | 'short_name' | 'tile_type' | 'detail' | 'effect_type' | 'effect_value' | 'tile_color' | 'is_randomized' | 'grid_x' | 'grid_y' | 'layout_x' | 'layout_y'> & {
+    image_ref?: string | null
+    image_id?: string | null
+  }>
   edges: Array<{
     round_number: GameRound
     from_position: number
     to_position: number
     is_bidirectional: boolean
   }>
+  images?: RoomConfigImage[]
+}
+
+interface RoomConfigImage extends Pick<RoomTileImage, 'name' | 'storage_path' | 'width' | 'height' | 'byte_size' | 'mime_type'> {
+  key: string
+  data_url: string
+}
+
+interface RoomConfigFavorite {
+  id: string
+  name: string
+  config: RoomConfigFile
+  created_at: string
 }
 
 function roundLabel(round: GameRound) {
@@ -184,6 +203,28 @@ function downloadTextFile(filename: string, content: string, type: string, withB
   anchor.click()
   anchor.remove()
   URL.revokeObjectURL(url)
+}
+
+function blobToDataUrl(blob: Blob) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => typeof reader.result === 'string' ? resolve(reader.result) : reject(new Error('无法读取配置图片'))
+    reader.onerror = () => reject(new Error('无法读取配置图片'))
+    reader.readAsDataURL(blob)
+  })
+}
+
+async function mapWithConcurrency<T, Result>(items: T[], limit: number, worker: (item: T) => Promise<Result>) {
+  const results = new Array<Result>(items.length)
+  let nextIndex = 0
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex
+      nextIndex += 1
+      results[index] = await worker(items[index])
+    }
+  }))
+  return results
 }
 
 function isGuaranteeEffect(effect: TileEffect): effect is GuaranteeEffect {
@@ -558,6 +599,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
   const [roomTiles, setRoomTiles] = useState<RoomTile[]>([])
   const [roomEdges, setRoomEdges] = useState<RoomTileEdge[]>([])
   const [tileImages, setTileImages] = useState<RoomTileImage[]>([])
+  const [configFavorites, setConfigFavorites] = useState<RoomConfigFavorite[]>([])
   const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null)
   const [roomPendingDelete, setRoomPendingDelete] = useState<string | null>(null)
   const [advanceChances, setAdvanceChances] = useState<string[]>(DEFAULT_ADVANCE_CHANCES.map(String))
@@ -576,6 +618,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
   const [suffixDrafts, setSuffixDrafts] = useState<Record<number, string>>({})
   const [configNotice, setConfigNotice] = useState('')
   const configInputRef = useRef<HTMLInputElement>(null)
+  const configMenuRef = useRef<HTMLDetailsElement>(null)
   const imageInputRef = useRef<HTMLInputElement>(null)
   const [cropSource, setCropSource] = useState<{ url: string; name: string } | null>(null)
   const tileRefreshTimerRef = useRef<number | null>(null)
@@ -645,6 +688,16 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       .order('created_at', { ascending: false })
     if (imagesError) throw imagesError
     setTileImages(data as RoomTileImage[])
+  }, [])
+
+  const loadConfigFavorites = useCallback(async () => {
+    if (!supabase) return
+    const { data, error: favoritesError } = await supabase
+      .from('room_config_favorites')
+      .select('id,name,config,created_at')
+      .order('created_at', { ascending: false })
+    if (favoritesError) throw favoritesError
+    setConfigFavorites(data as RoomConfigFavorite[])
   }, [])
 
   const loadRoomEdges = useCallback(async (roomId: string) => {
@@ -723,7 +776,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       if (!adminError && isAdmin === true) {
         setAuthorized(true)
         try {
-          await loadDashboard()
+          await Promise.all([loadDashboard(), loadConfigFavorites()])
         } catch (loadError) {
           setError(formatError(loadError))
         }
@@ -731,7 +784,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       setChecking(false)
     }
     void checkSession()
-  }, [loadDashboard])
+  }, [loadConfigFavorites, loadDashboard])
 
   useEffect(() => {
     if (!authorized || !supabase) return
@@ -873,7 +926,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       }
       setAuthorized(true)
       setPassword('')
-      await loadDashboard()
+      await Promise.all([loadDashboard(), loadConfigFavorites()])
     })
   }
 
@@ -887,6 +940,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       setSettlementRules([])
       setRoomTiles([])
       setRoomEdges([])
+      setConfigFavorites([])
       setSelectedRoomId(null)
     })
   }
@@ -1444,104 +1498,290 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
     window.setTimeout(() => setCodeCopied(false), 1600)
   }
 
+  async function buildRoomConfig(roomId: string) {
+    if (!supabase) throw new Error('尚未配置 Supabase')
+    const client = supabase
+    const [roomResult, tilesResult, edgesResult] = await Promise.all([
+      client.from('rooms').select('*').eq('id', roomId).single(),
+      client.from('room_tiles').select('*').eq('room_id', roomId).order('round_number').order('position'),
+      client.from('room_tile_edges').select('*').eq('room_id', roomId).order('created_at'),
+    ])
+    if (roomResult.error) throw roomResult.error
+    if (tilesResult.error) throw tilesResult.error
+    if (edgesResult.error) throw edgesResult.error
+    const room = roomResult.data as Room
+    const tiles = tilesResult.data as RoomTile[]
+    const expectedTiles = Array.from({ length: room.total_rounds ?? 3 }, (_, index) => roundBoardSize(room, (index + 1) as GameRound))
+      .reduce((sum, size) => sum + size, 0)
+    if (tiles.length !== expectedTiles) throw new Error('当前房间的棋盘不完整，无法生成完整配置')
+
+    const referencedImageIds = [...new Set(tiles.flatMap((tile) => tile.image_id ? [tile.image_id] : []))]
+    let referencedImages: RoomTileImage[] = []
+    if (referencedImageIds.length > 0) {
+      const { data, error: imagesError } = await client.from('room_tile_images').select('*').in('id', referencedImageIds)
+      if (imagesError) throw imagesError
+      referencedImages = data as RoomTileImage[]
+      if (referencedImages.length !== referencedImageIds.length) throw new Error('部分格子图片已从公共图库删除，无法生成完整配置')
+    }
+    const imageById = new Map(referencedImages.map((image) => [image.id, image]))
+    const images = await mapWithConcurrency(referencedImages, 6, async (image): Promise<RoomConfigImage> => {
+      const { data, error: downloadError } = await client.storage.from('tile-images').download(image.storage_path)
+      if (downloadError) throw downloadError
+      if (data.size < 1 || data.size > TILE_IMAGE_MAX_BYTES) throw new Error(`图片“${image.name}”不符合 15 KB 限制`)
+      return {
+        key: image.storage_path,
+        name: image.name,
+        storage_path: image.storage_path,
+        width: image.width,
+        height: image.height,
+        byte_size: data.size,
+        mime_type: 'image/webp',
+        data_url: await blobToDataUrl(data),
+      }
+    })
+    const tileById = new Map(tiles.map((tile) => [tile.id, tile]))
+    const config: RoomConfigFile = {
+      format: ROOM_CONFIG_FORMAT,
+      version: ROOM_CONFIG_VERSION,
+      exported_at: new Date().toISOString(),
+      settings: {
+        name: room.name,
+        round1_advance_chance: room.round1_advance_chance,
+        round2_advance_chance: room.round2_advance_chance,
+        rolls_per_turn: room.rolls_per_turn,
+        base_guarantee: room.base_guarantee,
+        total_rounds: room.total_rounds ?? 3,
+        round_sizes: roomRoundSizes(room),
+        round_advance_chances: roomAdvanceChances(room),
+      },
+      tiles: tiles.map((tile) => ({
+        round_number: tile.round_number,
+        position: tile.position,
+        name: tile.name,
+        short_name: tile.short_name,
+        tile_type: tile.tile_type,
+        detail: tile.detail,
+        effect_type: tile.effect_type,
+        effect_value: Number(tile.effect_value),
+        tile_color: tile.tile_color,
+        is_randomized: tile.is_randomized,
+        grid_x: tile.grid_x,
+        grid_y: tile.grid_y,
+        layout_x: tile.layout_x,
+        layout_y: tile.layout_y,
+        image_ref: tile.image_id ? imageById.get(tile.image_id)?.storage_path ?? null : null,
+      })),
+      edges: (edgesResult.data as RoomTileEdge[]).map((edge) => ({
+        round_number: edge.round_number,
+        from_position: tileById.get(edge.from_tile_id)?.position ?? -1,
+        to_position: tileById.get(edge.to_tile_id)?.position ?? -1,
+        is_bidirectional: edge.is_bidirectional,
+      })).filter((edge) => edge.from_position >= 0 && edge.to_position >= 0),
+      images,
+    }
+    return config
+  }
+
+  async function cleanupCreatedConfigImages(images: Array<{ id: string; storagePath: string }>) {
+    if (!supabase) return
+    await Promise.allSettled(images.map(async (image) => {
+      const { error: deleteError } = await supabase!.rpc('admin_delete_tile_image', { p_image_id: image.id })
+      if (deleteError) throw deleteError
+      const { error: storageError } = await supabase!.storage.from('tile-images').remove([image.storagePath])
+      if (storageError) throw storageError
+    }))
+  }
+
+  async function materializeConfigImages(config: RoomConfigFile, roomId: string) {
+    if (!supabase || config.version < 6) return { config, createdImages: [] as Array<{ id: string; storagePath: string }> }
+    if (!Array.isArray(config.images)) throw new Error('完整配置缺少图片数据')
+    const client = supabase
+    const { data, error: imagesError } = await client.from('room_tile_images').select('*')
+    if (imagesError) throw imagesError
+    const existingByPath = new Map((data as RoomTileImage[]).map((image) => [image.storage_path, image]))
+    const imageIds = new Map<string, string>()
+    const createdImages: Array<{ id: string; storagePath: string }> = []
+
+    try {
+      for (const image of config.images) {
+        if (!image.key || image.mime_type !== 'image/webp' || image.byte_size < 1 || image.byte_size > TILE_IMAGE_MAX_BYTES) {
+          throw new Error('配置中包含无效图片')
+        }
+        if (imageIds.has(image.key)) throw new Error('配置中存在重复图片标识')
+        const existing = existingByPath.get(image.storage_path)
+        if (existing) {
+          imageIds.set(image.key, existing.id)
+          continue
+        }
+        if (!image.data_url?.startsWith('data:image/webp;base64,')) throw new Error(`图片“${image.name}”缺少 WebP 原始数据`)
+        const response = await fetch(image.data_url)
+        const blob = await response.blob()
+        if (blob.size !== image.byte_size || blob.size > TILE_IMAGE_MAX_BYTES) throw new Error(`图片“${image.name}”数据不完整`)
+        const storagePath = `${roomId}/${crypto.randomUUID()}.webp`
+        const { error: uploadError } = await client.storage.from('tile-images').upload(storagePath, blob, {
+          contentType: 'image/webp', cacheControl: '31536000', upsert: false,
+        })
+        if (uploadError) throw uploadError
+        const publicUrl = client.storage.from('tile-images').getPublicUrl(storagePath).data.publicUrl
+        const { data: imageIdResult, error: createError } = await client.rpc('admin_create_tile_image', {
+          p_room_id: roomId,
+          p_name: image.name,
+          p_storage_path: storagePath,
+          p_public_url: publicUrl,
+          p_width: image.width,
+          p_height: image.height,
+          p_byte_size: blob.size,
+          p_mime_type: 'image/webp',
+        })
+        if (createError) {
+          await client.storage.from('tile-images').remove([storagePath])
+          throw createError
+        }
+        const imageId = String(imageIdResult)
+        createdImages.push({ id: imageId, storagePath })
+        imageIds.set(image.key, imageId)
+      }
+
+      return {
+        config: {
+          ...config,
+          tiles: config.tiles.map((tile) => {
+            const imageId = tile.image_ref ? imageIds.get(tile.image_ref) : null
+            if (tile.image_ref && !imageId) throw new Error('格子引用了配置中不存在的图片')
+            return { ...tile, image_id: imageId }
+          }),
+        },
+        createdImages,
+      }
+    } catch (materializeError) {
+      await cleanupCreatedConfigImages(createdImages)
+      throw materializeError
+    }
+  }
+
+  async function applyCompleteRoomConfig(roomId: string, config: RoomConfigFile) {
+    if (!supabase) return
+    const { error: importError } = await supabase.rpc('admin_import_complete_room_config', {
+      p_room_id: roomId,
+      p_config: config,
+    })
+    if (importError) throw importError
+  }
+
   function exportRoomConfig() {
     if (!selectedRoom) return
+    configMenuRef.current?.removeAttribute('open')
     void runAdminAction(async () => {
-      if (!supabase) return
-      const [roomResult, tilesResult, edgesResult] = await Promise.all([
-        supabase.from('rooms').select('*').eq('id', selectedRoom.id).single(),
-        supabase.from('room_tiles').select('*').eq('room_id', selectedRoom.id).order('round_number').order('position'),
-        supabase.from('room_tile_edges').select('*').eq('room_id', selectedRoom.id).order('created_at'),
-      ])
-      if (roomResult.error) throw roomResult.error
-      if (tilesResult.error) throw tilesResult.error
-      if (edgesResult.error) throw edgesResult.error
-      const room = roomResult.data as Room
-      const tiles = tilesResult.data as RoomTile[]
-      const expectedTiles = Array.from({ length: room.total_rounds ?? 3 }, (_, index) => roundBoardSize(room, (index + 1) as GameRound))
-        .reduce((sum, size) => sum + size, 0)
-      if (tiles.length !== expectedTiles) throw new Error('当前房间的棋盘不完整，无法导出')
-
-      const config: RoomConfigFile = {
-        format: ROOM_CONFIG_FORMAT,
-        version: ROOM_CONFIG_VERSION,
-        exported_at: new Date().toISOString(),
-        settings: {
-          name: room.name,
-          round1_advance_chance: room.round1_advance_chance,
-          round2_advance_chance: room.round2_advance_chance,
-          rolls_per_turn: room.rolls_per_turn,
-          base_guarantee: room.base_guarantee,
-          total_rounds: room.total_rounds ?? 3,
-          round_sizes: roomRoundSizes(room),
-          round_advance_chances: roomAdvanceChances(room),
-        },
-        tiles: tiles.map((tile) => ({
-          round_number: tile.round_number,
-          position: tile.position,
-          name: tile.name,
-          short_name: tile.short_name,
-          tile_type: tile.tile_type,
-          detail: tile.detail,
-          effect_type: tile.effect_type,
-          effect_value: Number(tile.effect_value),
-          tile_color: tile.tile_color,
-          is_randomized: tile.is_randomized,
-          grid_x: tile.grid_x,
-          grid_y: tile.grid_y,
-          layout_x: tile.layout_x,
-          layout_y: tile.layout_y,
-        })),
-        edges: (edgesResult.data as RoomTileEdge[]).map((edge) => ({
-          round_number: edge.round_number,
-          from_position: tiles.find((tile) => tile.id === edge.from_tile_id)?.position ?? -1,
-          to_position: tiles.find((tile) => tile.id === edge.to_tile_id)?.position ?? -1,
-          is_bidirectional: edge.is_bidirectional,
-        })).filter((edge) => edge.from_position >= 0 && edge.to_position >= 0),
-      }
+      const config = await buildRoomConfig(selectedRoom.id)
       const date = new Date().toISOString().slice(0, 10)
-      downloadTextFile(`${safeFilename(room.name)}_房间设置_${date}.json`, JSON.stringify(config, null, 2), 'application/json;charset=utf-8')
-      setConfigNotice('房间设置已导出，不包含玩家和摇骰记录')
+      downloadTextFile(`${safeFilename(selectedRoom.name)}_完整房间配置_${date}.json`, JSON.stringify(config, null, 2), 'application/json;charset=utf-8')
+      setConfigNotice(`完整配置已导出：${config.tiles.length} 个格子、${config.edges.length} 条路线、${config.images?.length ?? 0} 张图片`)
     })
   }
 
   function importRoomConfig(file: File | undefined) {
     if (!file || !selectedRoom) return
+    configMenuRef.current?.removeAttribute('open')
+    if (file.size > ROOM_CONFIG_MAX_BYTES) {
+      setError('完整配置文件不能超过 32 MB')
+      return
+    }
     if (selectedRoom.status !== 'lobby') {
       setError('只能向等待中的房间导入设置')
       return
     }
-    if (!window.confirm(`确定用「${file.name}」覆盖当前房间设置和棋盘吗？玩家席位不会被删除。`)) return
+    if (!window.confirm(`确定用「${file.name}」完整覆盖当前房间配置吗？玩家席位不会被删除。`)) return
 
     void runAdminAction(async () => {
-      if (!supabase) return
       const raw = (await file.text()).replace(/^\uFEFF/, '')
-      let config: unknown
+      let parsed: unknown
       try {
-        config = JSON.parse(raw)
+        parsed = JSON.parse(raw)
       } catch {
         throw new Error('导入文件不是有效的 JSON')
       }
-      if (!config || typeof config !== 'object') throw new Error('导入文件内容无效')
-      const candidate = config as Partial<RoomConfigFile> & { version?: number }
-      if (candidate.format !== ROOM_CONFIG_FORMAT || ![1, 2, 3, 4, ROOM_CONFIG_VERSION].includes(candidate.version ?? 0)) {
+      if (!parsed || typeof parsed !== 'object') throw new Error('导入文件内容无效')
+      const candidate = parsed as Partial<RoomConfigFile> & { version?: number }
+      if (candidate.format !== ROOM_CONFIG_FORMAT || ![1, 2, 3, 4, 5, ROOM_CONFIG_VERSION].includes(candidate.version ?? 0)) {
         throw new Error('不支持的房间设置文件格式或版本')
       }
       if (!candidate.settings || !Array.isArray(candidate.tiles) || candidate.tiles.length < MIN_BOARD_SIZE) {
         throw new Error('导入文件缺少完整的房间设置或棋盘格')
       }
-      const { error: rpcError } = await supabase.rpc('admin_import_room_config', {
-        p_room_id: selectedRoom.id,
-        p_config: config,
+      const { config, createdImages } = await materializeConfigImages(candidate as RoomConfigFile, selectedRoom.id)
+      try {
+        await applyCompleteRoomConfig(selectedRoom.id, config)
+      } catch (importError) {
+        await cleanupCreatedConfigImages(createdImages)
+        throw importError
+      }
+      await Promise.all([loadDashboard(), loadRoomTiles(selectedRoom.id), loadRoomEdges(selectedRoom.id), loadRoomEvents(selectedRoom.id), loadTileImages()])
+      setConfigNotice(`完整配置已导入：${config.tiles.length} 个格子、${config.edges.length} 条路线、${config.images?.length ?? 0} 张图片`)
+    })
+  }
+
+  function favoriteRoomConfig() {
+    if (!selectedRoom) return
+    configMenuRef.current?.removeAttribute('open')
+    void runAdminAction(async () => {
+      if (!supabase) return
+      const config = await buildRoomConfig(selectedRoom.id)
+      const { error: favoriteError } = await supabase.from('room_config_favorites').insert({
+        name: selectedRoom.name,
+        config,
       })
-      if (rpcError) throw rpcError
-      const { error: graphError } = await supabase.rpc('admin_import_room_graph', {
-        p_room_id: selectedRoom.id,
-        p_config: config,
-      })
-      if (graphError) throw graphError
-      await Promise.all([loadDashboard(), loadRoomTiles(selectedRoom.id), loadRoomEdges(selectedRoom.id), loadRoomEvents(selectedRoom.id)])
-      setConfigNotice('房间设置已导入；之后重新随机只会替换标记为“参与随机”的格子')
+      if (favoriteError) throw favoriteError
+      await loadConfigFavorites()
+      setConfigNotice(`已收藏“${selectedRoom.name}”的完整配置`)
+    })
+  }
+
+  function deleteConfigFavorite(favorite: RoomConfigFavorite) {
+    if (!window.confirm(`删除收藏“${favorite.name}”？原房间不会受到影响。`)) return
+    void runAdminAction(async () => {
+      if (!supabase) return
+      const { error: deleteError } = await supabase.from('room_config_favorites').delete().eq('id', favorite.id)
+      if (deleteError) throw deleteError
+      await loadConfigFavorites()
+      setConfigNotice(`已删除收藏“${favorite.name}”`)
+    })
+  }
+
+  function createRoomFromFavorite(favorite: RoomConfigFavorite) {
+    setCreating(true)
+    void runAdminAction(async () => {
+      if (!supabase) return
+      let roomId: string | null = null
+      let roomConfigured = false
+      let createdImages: Array<{ id: string; storagePath: string }> = []
+      try {
+        const roomName = (newRoomName.trim() || `${favorite.name} 副本`).slice(0, 24)
+        const { data, error: createError } = await supabase.rpc('admin_create_room', { p_room_name: roomName })
+        if (createError) throw createError
+        const result = Array.isArray(data) ? data[0] : data
+        roomId = result?.room_id ?? null
+        if (!roomId) throw new Error('新房间创建失败')
+        const favoriteConfig: RoomConfigFile = {
+          ...favorite.config,
+          settings: { ...favorite.config.settings, name: roomName },
+        }
+        const materialized = await materializeConfigImages(favoriteConfig, roomId)
+        createdImages = materialized.createdImages
+        await applyCompleteRoomConfig(roomId, materialized.config)
+        roomConfigured = true
+        setSelectedRoomId(roomId)
+        setNewRoomName('')
+        window.setTimeout(() => setConfigNotice(`已用收藏“${favorite.name}”创建并完整配置新房间`), 0)
+        await Promise.all([loadDashboard(), loadTileImages()])
+      } catch (createFromFavoriteError) {
+        if (!roomConfigured) {
+          await cleanupCreatedConfigImages(createdImages)
+          if (roomId) await supabase.rpc('admin_delete_room', { p_room_id: roomId })
+        }
+        throw createFromFavoriteError
+      } finally {
+        setCreating(false)
+      }
     })
   }
 
@@ -1707,6 +1947,42 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
               </div>
               {creating && <div className="creation-progress" role="status"><span /><p>正在创建房间并生成三轮随机棋盘...</p></div>}
             </div>
+            <section className="admin-favorites" aria-labelledby="config-favorites-title">
+              <div className="admin-favorites-heading">
+                <span id="config-favorites-title"><Bookmark size={14} /> 配置收藏</span>
+                <small>{configFavorites.length}</small>
+              </div>
+              <div className="admin-favorite-list">
+                {configFavorites.map((favorite) => (
+                  <div className="admin-favorite-row" key={favorite.id}>
+                    <span>
+                      <strong title={favorite.name}>{favorite.name}</strong>
+                      <small>{new Date(favorite.created_at).toLocaleDateString('zh-CN')} · {favorite.config.tiles.length} 格</small>
+                    </span>
+                    <button
+                      className="favorite-apply-button"
+                      disabled={busy}
+                      onClick={() => createRoomFromFavorite(favorite)}
+                      title={newRoomName.trim() ? `创建“${newRoomName.trim()}”` : `创建“${favorite.name} 副本”`}
+                      type="button"
+                    >
+                      <Plus size={15} /> 使用
+                    </button>
+                    <button
+                      aria-label={`删除收藏 ${favorite.name}`}
+                      className="favorite-delete-button"
+                      disabled={busy}
+                      onClick={() => deleteConfigFavorite(favorite)}
+                      title="删除收藏"
+                      type="button"
+                    >
+                      <Trash2 size={15} />
+                    </button>
+                  </div>
+                ))}
+                {configFavorites.length === 0 && <p className="admin-favorite-empty">还没有收藏的房间配置</p>}
+              </div>
+            </section>
             <div className="admin-room-items">
               {rooms.map((room) => {
                 const count = players.filter((player) => player.room_id === room.id).length
@@ -1734,8 +2010,28 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                     </button>
                   </div>
                   <div className="admin-room-actions">
-                    <button className="button secondary" disabled={busy} onClick={exportRoomConfig} type="button"><Download size={17} /> 导出设置</button>
-                    <button className="button secondary" disabled={busy || selectedRoom.status !== 'lobby'} onClick={() => configInputRef.current?.click()} type="button"><Upload size={17} /> 导入设置</button>
+                    <details className="config-menu" ref={configMenuRef}>
+                      <summary className="button secondary">
+                        <Settings2 size={17} /> 房间配置 <ChevronDown className="config-menu-chevron" size={14} />
+                      </summary>
+                      <div className="config-menu-popover">
+                        <button disabled={busy} onClick={exportRoomConfig} type="button">
+                          <Download size={16} />
+                          <span><strong>导出完整配置</strong><small>包含格子、路线、坐标和图片</small></span>
+                        </button>
+                        <button disabled={busy || selectedRoom.status !== 'lobby'} onClick={() => {
+                          configMenuRef.current?.removeAttribute('open')
+                          configInputRef.current?.click()
+                        }} type="button">
+                          <Upload size={16} />
+                          <span><strong>导入完整配置</strong><small>完整覆盖当前等待中房间</small></span>
+                        </button>
+                        <button disabled={busy} onClick={favoriteRoomConfig} type="button">
+                          <Bookmark size={16} />
+                          <span><strong>收藏当前配置</strong><small>用于快速创建相同房间</small></span>
+                        </button>
+                      </div>
+                    </details>
                     <input
                       accept="application/json,.json"
                       className="visually-hidden"

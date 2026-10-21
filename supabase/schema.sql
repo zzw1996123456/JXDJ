@@ -2638,7 +2638,7 @@ begin
   v_version := (p_config ->> 'version')::integer;
   if jsonb_typeof(p_config) <> 'object'
     or p_config ->> 'format' <> 'jingxu-delta-monopoly-room'
-    or v_version not in (1, 2, 3, 4, 5)
+    or v_version not in (1, 2, 3, 4, 5, 6)
   then raise exception '房间设置文件格式或版本无效'; end if;
 
   v_settings := p_config -> 'settings';
@@ -3025,21 +3025,43 @@ create or replace function public.admin_import_room_graph(p_room_id uuid, p_conf
 returns void
 language plpgsql security definer set search_path = public
 as $$
-declare v_tile jsonb; v_edge jsonb; v_from uuid; v_to uuid; v_round integer;
+declare
+  v_tile jsonb;
+  v_edge jsonb;
+  v_from uuid;
+  v_to uuid;
+  v_round integer;
+  v_version integer;
+  v_image_id uuid;
+  v_image_url text;
 begin
   if not public.is_admin() then raise exception '只有管理员可以导入棋盘路线'; end if;
   if not exists (select 1 from public.rooms where id = p_room_id and status = 'lobby') then raise exception '只能向等待中的房间导入路线'; end if;
-  if coalesce((p_config ->> 'version')::integer, 0) >= 4 then
+  v_version := coalesce((p_config ->> 'version')::integer, 0);
+  if v_version >= 4 then
     for v_tile in select value from jsonb_array_elements(p_config -> 'tiles') loop
+      v_image_id := null;
+      v_image_url := null;
+      if v_version >= 6 and nullif(v_tile ->> 'image_id', '') is not null then
+        begin
+          v_image_id := (v_tile ->> 'image_id')::uuid;
+        exception when invalid_text_representation then
+          raise exception '导入配置包含无效图片标识';
+        end;
+        select image.public_url into v_image_url from public.room_tile_images image where image.id = v_image_id;
+        if not found then raise exception '导入配置引用的公共图片不存在'; end if;
+      end if;
       update public.room_tiles set grid_x = case when v_tile ? 'grid_x' and v_tile ->> 'grid_x' is not null then (v_tile ->> 'grid_x')::integer else null end,
         grid_y = case when v_tile ? 'grid_y' and v_tile ->> 'grid_y' is not null then (v_tile ->> 'grid_y')::integer else null end,
-        layout_x = case when coalesce((p_config ->> 'version')::integer, 0) >= 5 and v_tile ? 'layout_x' and v_tile ->> 'layout_x' is not null then (v_tile ->> 'layout_x')::numeric else null end,
-        layout_y = case when coalesce((p_config ->> 'version')::integer, 0) >= 5 and v_tile ? 'layout_y' and v_tile ->> 'layout_y' is not null then (v_tile ->> 'layout_y')::numeric else null end
+        layout_x = case when v_version >= 5 and v_tile ? 'layout_x' and v_tile ->> 'layout_x' is not null then (v_tile ->> 'layout_x')::numeric else null end,
+        layout_y = case when v_version >= 5 and v_tile ? 'layout_y' and v_tile ->> 'layout_y' is not null then (v_tile ->> 'layout_y')::numeric else null end,
+        image_id = case when v_version >= 6 then v_image_id else image_id end,
+        image_url = case when v_version >= 6 then v_image_url else image_url end
       where room_id = p_room_id and round_number = (v_tile ->> 'round_number')::integer and position = (v_tile ->> 'position')::integer;
     end loop;
   end if;
   delete from public.room_tile_edges where room_id = p_room_id;
-  if coalesce((p_config ->> 'version')::integer, 0) >= 4 and jsonb_typeof(p_config -> 'edges') = 'array' then
+  if v_version >= 4 and jsonb_typeof(p_config -> 'edges') = 'array' then
     for v_edge in select value from jsonb_array_elements(p_config -> 'edges') loop
       v_round := (v_edge ->> 'round_number')::integer;
       select id into v_from from public.room_tiles where room_id = p_room_id and round_number = v_round and position = (v_edge ->> 'from_position')::integer;
@@ -3381,5 +3403,45 @@ begin
   exception when duplicate_object then null;
   end;
 end $$;
+
+-- Complete room configuration bundles and administrator-owned reusable favorites.
+create table if not exists public.room_config_favorites (
+  id uuid primary key default gen_random_uuid(),
+  owner_user_id uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  name text not null check (char_length(name) between 1 and 60),
+  config jsonb not null check (jsonb_typeof(config) = 'object'),
+  created_at timestamptz not null default now()
+);
+
+create index if not exists room_config_favorites_owner_created_idx
+  on public.room_config_favorites(owner_user_id, created_at desc);
+
+alter table public.room_config_favorites enable row level security;
+drop policy if exists "admins read own room config favorites" on public.room_config_favorites;
+create policy "admins read own room config favorites" on public.room_config_favorites
+  for select to authenticated using (owner_user_id = auth.uid() and public.is_admin());
+drop policy if exists "admins create own room config favorites" on public.room_config_favorites;
+create policy "admins create own room config favorites" on public.room_config_favorites
+  for insert to authenticated with check (owner_user_id = auth.uid() and public.is_admin());
+drop policy if exists "admins delete own room config favorites" on public.room_config_favorites;
+create policy "admins delete own room config favorites" on public.room_config_favorites
+  for delete to authenticated using (owner_user_id = auth.uid() and public.is_admin());
+
+revoke all on table public.room_config_favorites from public;
+grant select, insert, delete on table public.room_config_favorites to authenticated;
+
+create or replace function public.admin_import_complete_room_config(p_room_id uuid, p_config jsonb)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+begin
+  if not public.is_admin() then raise exception '只有管理员可以导入完整房间配置'; end if;
+  perform public.admin_import_room_config(p_room_id, p_config);
+  perform public.admin_import_room_graph(p_room_id, p_config);
+end;
+$$;
+
+revoke all on function public.admin_import_complete_room_config(uuid, jsonb) from public;
+grant execute on function public.admin_import_complete_room_config(uuid, jsonb) to authenticated;
 
 select pg_notify('pgrst', 'reload schema');
