@@ -3214,12 +3214,14 @@ create table if not exists public.room_tile_images (
   public_url text not null,
   width integer not null check (width between 1 and 2000),
   height integer not null check (height between 1 and 2000),
-  byte_size integer not null check (byte_size between 1 and 81920),
+  byte_size integer not null check (byte_size between 1 and 15360),
   mime_type text not null check (mime_type = 'image/webp'),
   created_at timestamptz not null default now()
 );
 
 create index if not exists room_tile_images_room_idx on public.room_tile_images(room_id, created_at desc);
+alter table public.room_tile_images drop constraint if exists room_tile_images_byte_size_check;
+alter table public.room_tile_images add constraint room_tile_images_byte_size_check check (byte_size between 1 and 15360) not valid;
 alter table public.room_tile_images enable row level security;
 drop policy if exists "room members can read tile images" on public.room_tile_images;
 create policy "room members can read tile images" on public.room_tile_images for select to authenticated using (public.is_room_member(room_id));
@@ -3232,7 +3234,7 @@ alter table public.room_tiles drop constraint if exists room_tiles_image_id_fkey
 alter table public.room_tiles add constraint room_tiles_image_id_fkey foreign key (image_id) references public.room_tile_images(id) on delete set null;
 
 insert into storage.buckets(id, name, public, file_size_limit, allowed_mime_types)
-values ('tile-images', 'tile-images', true, 131072, array['image/webp'])
+values ('tile-images', 'tile-images', true, 15360, array['image/webp'])
 on conflict (id) do update set public = true, file_size_limit = excluded.file_size_limit, allowed_mime_types = excluded.allowed_mime_types;
 
 drop policy if exists "admins upload tile images" on storage.objects;
@@ -3323,7 +3325,7 @@ declare v_id uuid;
 begin
   if not public.is_admin() then raise exception '只有管理员可以添加图片'; end if;
   if not exists (select 1 from public.rooms where id = p_room_id and status = 'lobby') then raise exception '只能在开局前添加图片'; end if;
-  if p_byte_size not between 1 and 81920 or p_mime_type <> 'image/webp' then raise exception '图片必须是 80 KB 以内的 WebP'; end if;
+  if p_byte_size not between 1 and 15360 or p_mime_type <> 'image/webp' then raise exception '图片必须是 15 KB 以内的 WebP'; end if;
   if p_storage_path not like (p_room_id::text || '/%') then raise exception '图片存储路径无效'; end if;
   insert into public.room_tile_images(room_id, name, storage_path, public_url, width, height, byte_size, mime_type)
   values (p_room_id, left(trim(p_name), 60), p_storage_path, p_public_url, p_width, p_height, p_byte_size, p_mime_type)
