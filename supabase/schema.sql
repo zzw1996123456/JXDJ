@@ -3150,4 +3150,51 @@ $$;
 revoke all on function public.admin_ensure_room_edges(uuid) from public;
 grant execute on function public.admin_ensure_room_edges(uuid) to authenticated;
 
+create or replace function public.admin_apply_board_layout(p_room_id uuid, p_round integer, p_positions jsonb)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_tile_count integer;
+  v_layout_count integer;
+  v_unique_positions integer;
+  v_unique_coordinates integer;
+  v_invalid_count integer;
+  v_min_position integer;
+  v_max_position integer;
+begin
+  if not public.is_admin() then raise exception '只有管理员可以应用地图预设'; end if;
+  perform 1 from public.rooms where id = p_room_id and status = 'lobby' for update;
+  if not found then raise exception '房间不存在，或房间已经开始'; end if;
+  if p_round not between 1 and 10 then raise exception '轮次无效'; end if;
+  if jsonb_typeof(p_positions) <> 'array' then raise exception '地图坐标格式无效'; end if;
+
+  select count(*) into v_tile_count from public.room_tiles
+  where room_id = p_room_id and round_number = p_round;
+
+  select count(*), count(distinct layout.position), count(distinct (layout.grid_x, layout.grid_y)),
+    count(*) filter (where layout.position is null or layout.grid_x is null or layout.grid_y is null
+      or layout.grid_x not between 0 and 200 or layout.grid_y not between 0 and 200),
+    min(layout.position), max(layout.position)
+  into v_layout_count, v_unique_positions, v_unique_coordinates, v_invalid_count, v_min_position, v_max_position
+  from jsonb_to_recordset(p_positions) as layout(position integer, grid_x integer, grid_y integer);
+
+  if v_layout_count <> v_tile_count or v_unique_positions <> v_tile_count
+    or v_unique_coordinates <> v_tile_count or v_invalid_count > 0
+    or v_min_position <> 0 or v_max_position <> v_tile_count - 1 then
+    raise exception '地图预设必须为本轮每个格子提供唯一且有效的坐标';
+  end if;
+
+  with layout as (
+    select * from jsonb_to_recordset(p_positions) as item(position integer, grid_x integer, grid_y integer)
+  )
+  update public.room_tiles as tile
+  set grid_x = layout.grid_x, grid_y = layout.grid_y
+  from layout
+  where tile.room_id = p_room_id and tile.round_number = p_round and tile.position = layout.position;
+end;
+$$;
+revoke all on function public.admin_apply_board_layout(uuid, integer, jsonb) from public;
+grant execute on function public.admin_apply_board_layout(uuid, integer, jsonb) to authenticated;
+
 select pg_notify('pgrst', 'reload schema');

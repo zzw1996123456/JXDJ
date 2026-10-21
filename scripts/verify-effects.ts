@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { createDefaultTileEdges, createRandomRoomTiles, getBoardDimensions, getBoardGridPosition, getRoomBoardDimensions, getRoomTileGridPosition, RULE_TEMPLATES, usesDenseBoardLayout } from '../src/lib/board'
+import { BOARD_LAYOUT_PRESETS, createBoardLayout, createDefaultTileEdges, createRandomRoomTiles, getBoardDimensions, getBoardGridPosition, getRoomBoardDimensions, getRoomTileGridPosition, RULE_TEMPLATES, usesDenseBoardLayout } from '../src/lib/board'
 import { chooseDemoDice, createDemoRoom, resolveDemoDice, startDemoGame } from '../src/lib/demoGame'
 import type { GameRound, RoomTile, TileEffect } from '../src/types'
 
@@ -285,6 +285,22 @@ for (let size = 2; size <= 100; size += 2) {
   }
 }
 
+for (const preset of BOARD_LAYOUT_PRESETS) {
+  for (let size = 2; size <= 100; size += 2) {
+    const positions = createBoardLayout(size, preset.id)
+    const uniquePositions = new Set(positions.map((position) => `${position.gridX}:${position.gridY}`))
+    assert.equal(positions.length, size, `${preset.name}必须适配 ${size} 格`)
+    assert.equal(uniquePositions.size, size, `${preset.name}的 ${size} 格排布不能重叠`)
+    assert.ok(positions.every((position) => position.gridX >= 0 && position.gridX <= 200), `${preset.name}横坐标越界`)
+    assert.ok(positions.every((position) => position.gridY >= 0 && position.gridY <= 200), `${preset.name}纵坐标越界`)
+  }
+  const small = createBoardLayout(8, preset.id)
+  const large = createBoardLayout(100, preset.id)
+  const smallSpan = Math.max(...small.map((position) => position.gridX)) + Math.max(...small.map((position) => position.gridY))
+  const largeSpan = Math.max(...large.map((position) => position.gridX)) + Math.max(...large.map((position) => position.gridY))
+  assert.ok(largeSpan > smallSpan, `${preset.name}应随格子数量增加而扩展复杂度`)
+}
+
 const graphTiles = createRandomRoomTiles('graph-test-room')
 const graphEdges = createDefaultTileEdges(graphTiles)
 assert.equal(graphEdges.length, graphTiles.length, '默认图必须为每个格子创建一条出口')
@@ -302,4 +318,4 @@ assert.deepEqual(getRoomTileGridPosition(movedTiles[0], 0, movedTiles.length), {
 const movedDimensions = getRoomBoardDimensions(movedTiles)
 assert.ok(movedDimensions.columns >= 15 && movedDimensions.rows >= 10, '自由移动后的棋盘边界必须随格子扩张')
 
-console.log('效果回归测试通过：落格效果、分轮规则、随机棋盘、2–100 偶数格布局与默认路线图')
+console.log('效果回归测试通过：落格效果、分轮规则、随机棋盘、5 种自适应预设与默认路线图')

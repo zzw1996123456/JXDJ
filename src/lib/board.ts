@@ -180,6 +180,102 @@ export function usesDenseBoardLayout(size: number) {
   return size > 24
 }
 
+export type BoardLayoutPresetId = 'rings' | 'snake' | 'spiral' | 'diamond' | 'three-lane'
+
+export interface BoardLayoutPoint {
+  gridX: number
+  gridY: number
+}
+
+export interface BoardLayoutPreset {
+  id: BoardLayoutPresetId
+  name: string
+  tag: string
+  description: string
+}
+
+export const BOARD_LAYOUT_PRESETS: BoardLayoutPreset[] = [
+  { id: 'rings', name: '同心封锁', tag: '闭环', description: '外圈清晰，格子增多后自动向内增加防线。' },
+  { id: 'snake', name: '补给长廊', tag: '长线', description: '折返推进，路线紧凑，适合连续事件与追赶。' },
+  { id: 'spiral', name: '中心突围', tag: '向心', description: '从核心向外盘旋，规模越大包围层数越多。' },
+  { id: 'diamond', name: '菱形战区', tag: '扩张', description: '战线逐层扩张，关键节点更容易形成视觉焦点。' },
+  { id: 'three-lane', name: '三线推进', tag: '多线', description: '在上中下三条战线间切换，适合布置分叉路线。' },
+]
+
+function normalizeLayout(points: BoardLayoutPoint[]) {
+  const minimumX = Math.min(...points.map((point) => point.gridX))
+  const minimumY = Math.min(...points.map((point) => point.gridY))
+  return points.map((point) => ({ gridX: point.gridX - minimumX, gridY: point.gridY - minimumY }))
+}
+
+function createSnakeLayout(size: number) {
+  const columns = Math.max(2, Math.ceil(Math.sqrt(size * 1.5)))
+  return Array.from({ length: size }, (_, index) => {
+    const row = Math.floor(index / columns)
+    const offset = index % columns
+    return { gridX: row % 2 === 0 ? offset : columns - offset - 1, gridY: row }
+  })
+}
+
+function createSpiralLayout(size: number) {
+  const points: BoardLayoutPoint[] = [{ gridX: 0, gridY: 0 }]
+  let x = 0
+  let y = 0
+  let segmentLength = 1
+  const directions = [[1, 0], [0, 1], [-1, 0], [0, -1]] as const
+  let directionIndex = 0
+  while (points.length < size) {
+    for (let repeatedSegment = 0; repeatedSegment < 2 && points.length < size; repeatedSegment += 1) {
+      const [deltaX, deltaY] = directions[directionIndex % directions.length]
+      for (let step = 0; step < segmentLength && points.length < size; step += 1) {
+        x += deltaX
+        y += deltaY
+        points.push({ gridX: x, gridY: y })
+      }
+      directionIndex += 1
+    }
+    segmentLength += 1
+  }
+  return normalizeLayout(points)
+}
+
+function createDiamondLayout(size: number) {
+  const points: BoardLayoutPoint[] = [{ gridX: 0, gridY: 0 }]
+  for (let radius = 1; points.length < size; radius += 1) {
+    let x = 0
+    let y = -radius
+    const directions = [[1, 1], [-1, 1], [-1, -1], [1, -1]] as const
+    for (const [deltaX, deltaY] of directions) {
+      for (let step = 0; step < radius && points.length < size; step += 1) {
+        points.push({ gridX: x, gridY: y })
+        x += deltaX
+        y += deltaY
+      }
+    }
+  }
+  return normalizeLayout(points)
+}
+
+function createThreeLaneLayout(size: number) {
+  const laneOrders = [[1, 0, 2], [1, 2, 0]] as const
+  return Array.from({ length: size }, (_, index) => {
+    const section = Math.floor(index / 3)
+    return { gridX: section, gridY: laneOrders[section % 2][index % 3] }
+  })
+}
+
+export function createBoardLayout(size: number, preset: BoardLayoutPresetId): BoardLayoutPoint[] {
+  if (!Number.isInteger(size) || size < 1 || size > 100) throw new RangeError('Board layout size must be between 1 and 100')
+  if (preset === 'snake') return createSnakeLayout(size)
+  if (preset === 'spiral') return createSpiralLayout(size)
+  if (preset === 'diamond') return createDiamondLayout(size)
+  if (preset === 'three-lane') return createThreeLaneLayout(size)
+  return Array.from({ length: size }, (_, index) => {
+    const position = getBoardGridPosition(index, size)
+    return { gridX: position.gridColumn - 1, gridY: position.gridRow - 1 }
+  })
+}
+
 export function getBoardDimensions(size: number) {
   if (size === 8) return { columns: 3, rows: 3 }
   if (size === 12) return { columns: 4, rows: 4 }
