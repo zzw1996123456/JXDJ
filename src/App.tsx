@@ -553,7 +553,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
   const [settlementRules, setSettlementRules] = useState<SettlementRule[]>([])
   const [roomTiles, setRoomTiles] = useState<RoomTile[]>([])
   const [roomEdges, setRoomEdges] = useState<RoomTileEdge[]>([])
-  const [roomImages, setRoomImages] = useState<RoomTileImage[]>([])
+  const [tileImages, setTileImages] = useState<RoomTileImage[]>([])
   const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null)
   const [roomPendingDelete, setRoomPendingDelete] = useState<string | null>(null)
   const [advanceChances, setAdvanceChances] = useState<string[]>(DEFAULT_ADVANCE_CHANCES.map(String))
@@ -615,15 +615,14 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
     }))
   }, [])
 
-  const loadRoomImages = useCallback(async (roomId: string) => {
+  const loadTileImages = useCallback(async () => {
     if (!supabase) return
     const { data, error: imagesError } = await supabase
       .from('room_tile_images')
       .select('*')
-      .eq('room_id', roomId)
       .order('created_at', { ascending: false })
     if (imagesError) throw imagesError
-    setRoomImages(data as RoomTileImage[])
+    setTileImages(data as RoomTileImage[])
   }, [])
 
   const loadRoomEdges = useCallback(async (roomId: string) => {
@@ -734,7 +733,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
         if (selectedRoomId) void loadRoomEdges(selectedRoomId)
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'room_tile_images' }, () => {
-        if (selectedRoomId) void loadRoomImages(selectedRoomId)
+        void loadTileImages()
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'room_settlement_rules' }, () => {
         if (selectedRoomId) void loadSettlementRules(selectedRoomId)
@@ -748,7 +747,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       }
       void client.removeChannel(channel)
     }
-  }, [authorized, loadDashboard, loadRoomEdges, loadRoomEvents, loadRoomImages, loadRoomTiles, loadSettlementRules, selectedRoomId])
+  }, [authorized, loadDashboard, loadRoomEdges, loadRoomEvents, loadRoomTiles, loadSettlementRules, loadTileImages, selectedRoomId])
 
   useEffect(() => {
     if (!authorized) return
@@ -757,12 +756,11 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       setSettlementRules([])
       setRoomTiles([])
       setRoomEdges([])
-      setRoomImages([])
       return
     }
-    void Promise.all([loadRoomEvents(selectedRoomId), loadRoomTiles(selectedRoomId), loadRoomEdges(selectedRoomId), loadRoomImages(selectedRoomId), loadSettlementRules(selectedRoomId)])
+    void Promise.all([loadRoomEvents(selectedRoomId), loadRoomTiles(selectedRoomId), loadRoomEdges(selectedRoomId), loadTileImages(), loadSettlementRules(selectedRoomId)])
       .catch((loadError) => setError(formatError(loadError)))
-  }, [authorized, loadRoomEdges, loadRoomEvents, loadRoomImages, loadRoomTiles, loadSettlementRules, selectedRoomId])
+  }, [authorized, loadRoomEdges, loadRoomEvents, loadRoomTiles, loadSettlementRules, loadTileImages, selectedRoomId])
 
   useEffect(() => {
     if (!selectedRoom) return
@@ -1154,7 +1152,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       throw createError
     }
     cancelImageCrop()
-    await loadRoomImages(selectedRoom.id)
+    await loadTileImages()
     setConfigNotice(`图片已裁剪并压缩至 ${(blob.size / 1024).toFixed(1)} KB`)
   }
 
@@ -1172,14 +1170,14 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
   }
 
   function deleteLibraryImage(image: RoomTileImage) {
-    if (!selectedRoom || !window.confirm(`删除图片“${image.name}”？所有使用它的格子会恢复为无图片。`)) return
+    if (!selectedRoom || !window.confirm(`删除公共图片“${image.name}”？所有房间中使用它的格子都会恢复为无图片。`)) return
     void runAdminAction(async () => {
       if (!supabase) return
       const { error: storageError } = await supabase.storage.from('tile-images').remove([image.storage_path])
       if (storageError) throw storageError
       const { error: rpcError } = await supabase.rpc('admin_delete_tile_image', { p_image_id: image.id })
       if (rpcError) throw rpcError
-      await Promise.all([loadRoomImages(selectedRoom.id), loadRoomTiles(selectedRoom.id)])
+      await Promise.all([loadTileImages(), loadRoomTiles(selectedRoom.id)])
     })
   }
 
@@ -1856,13 +1854,13 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
                         </div>
                         <div className="tile-image-library">
                           <div className="tile-image-library-heading">
-                            <span><Images size={15} /> 图片库</span>
+                            <span><Images size={15} /> 公共图片库</span>
                             <button disabled={busy || selectedRoom.status !== 'lobby'} onClick={() => imageInputRef.current?.click()} type="button"><Plus size={14} /> 添加图片</button>
                             <input accept="image/jpeg,image/png,image/webp" className="sr-only" onChange={(event) => chooseImageFile(event.target.files?.[0])} ref={imageInputRef} type="file" />
                           </div>
                           <div className="tile-image-list">
                             <button aria-pressed={!tileDraft.image_id} className={!tileDraft.image_id ? 'selected' : ''} disabled={busy || selectedRoom.status !== 'lobby'} onClick={() => assignTileImage(null)} type="button"><span className="tile-image-none"><X size={18} /></span><small>无图片</small></button>
-                            {roomImages.map((image) => (
+                            {tileImages.map((image) => (
                               <div className={`tile-image-option ${tileDraft.image_id === image.id ? 'selected' : ''}`} key={image.id}>
                                 <button aria-label={`使用图片 ${image.name}`} aria-pressed={tileDraft.image_id === image.id} disabled={busy || selectedRoom.status !== 'lobby'} onClick={() => assignTileImage(image)} type="button"><img alt="" src={image.public_url} /><small>{image.name}</small></button>
                                 <button aria-label={`删除图片 ${image.name}`} className="tile-image-delete" disabled={busy || selectedRoom.status !== 'lobby'} onClick={() => deleteLibraryImage(image)} title="删除图片" type="button"><Trash2 size={13} /></button>

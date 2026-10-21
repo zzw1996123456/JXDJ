@@ -79,7 +79,7 @@ export interface RoomTile {
 
 export interface RoomTileImage {
   id: string
-  room_id: string
+  room_id: string | null
   name: string
   storage_path: string
   public_url: string

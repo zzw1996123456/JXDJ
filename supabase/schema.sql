@@ -3208,7 +3208,7 @@ alter table public.room_tiles add constraint room_tiles_layout_y_check check (la
 
 create table if not exists public.room_tile_images (
   id uuid primary key default gen_random_uuid(),
-  room_id uuid not null references public.rooms(id) on delete cascade,
+  room_id uuid references public.rooms(id) on delete set null,
   name text not null check (char_length(name) between 1 and 60),
   storage_path text not null unique,
   public_url text not null,
@@ -3220,11 +3220,13 @@ create table if not exists public.room_tile_images (
 );
 
 create index if not exists room_tile_images_room_idx on public.room_tile_images(room_id, created_at desc);
+alter table public.room_tile_images drop constraint if exists room_tile_images_room_id_fkey;
+alter table public.room_tile_images alter column room_id drop not null;
+alter table public.room_tile_images add constraint room_tile_images_room_id_fkey foreign key (room_id) references public.rooms(id) on delete set null;
 alter table public.room_tile_images drop constraint if exists room_tile_images_byte_size_check;
 alter table public.room_tile_images add constraint room_tile_images_byte_size_check check (byte_size between 1 and 15360) not valid;
 alter table public.room_tile_images enable row level security;
 drop policy if exists "room members can read tile images" on public.room_tile_images;
-create policy "room members can read tile images" on public.room_tile_images for select to authenticated using (public.is_room_member(room_id));
 drop policy if exists "admins can read tile images" on public.room_tile_images;
 create policy "admins can read tile images" on public.room_tile_images for select to authenticated using (public.is_admin());
 
@@ -3341,9 +3343,8 @@ declare v_url text;
 begin
   if not public.is_admin() then raise exception '只有管理员可以设置格子图片'; end if;
   if p_image_id is not null then
-    select image.public_url into v_url from public.room_tile_images image join public.room_tiles tile on tile.room_id = image.room_id
-      where image.id = p_image_id and tile.id = p_tile_id;
-    if not found then raise exception '图片不属于当前房间'; end if;
+    select image.public_url into v_url from public.room_tile_images image where image.id = p_image_id;
+    if not found then raise exception '公共图片不存在'; end if;
   end if;
   update public.room_tiles tile set image_id = p_image_id, image_url = v_url
   from public.rooms room where tile.id = p_tile_id and room.id = tile.room_id and room.status = 'lobby';
@@ -3354,12 +3355,10 @@ $$;
 create or replace function public.admin_delete_tile_image(p_image_id uuid)
 returns void language plpgsql security definer set search_path = public
 as $$
-declare v_room_id uuid;
 begin
   if not public.is_admin() then raise exception '只有管理员可以删除图片'; end if;
-  select image.room_id into v_room_id from public.room_tile_images image join public.rooms room on room.id = image.room_id
-    where image.id = p_image_id and room.status = 'lobby' for update of image;
-  if not found then raise exception '图片不存在，或房间已经开始'; end if;
+  perform 1 from public.room_tile_images where id = p_image_id for update;
+  if not found then raise exception '公共图片不存在'; end if;
   update public.room_tiles set image_id = null, image_url = null where image_id = p_image_id;
   delete from public.room_tile_images where id = p_image_id;
 end;
