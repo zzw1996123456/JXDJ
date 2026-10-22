@@ -20,7 +20,7 @@ export function createDemoRoom(nickname: string, role: PlayerRole): GameSnapshot
     total_rounds: 3, round1_board_size: 8, round2_board_size: 12, round3_board_size: 24,
     round_board_sizes: [8, 12, 24, 24, 24, 24, 24, 24, 24, 24],
     round_advance_chances: [35, 30, 30, 30, 30, 30, 30, 30, 30],
-    imported_config: false, pending_dice: null, pending_player_id: null, pending_route_options: [], created_at: now(),
+    imported_config: false, pending_dice: null, pending_player_id: null, pending_route_options: [], pending_route_state: {}, created_at: now(),
   }
 
   const player: Player = {

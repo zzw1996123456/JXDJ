@@ -8,7 +8,8 @@
     "build": "tsc --noEmit -p tsconfig.app.json && vite build",
     "preview": "vite preview",
     "test:effects": "tsx scripts/verify-effects.ts",
-    "test:export": "tsx scripts/verify-room-audit-workbook.ts"
+    "test:export": "tsx scripts/verify-room-audit-workbook.ts",
+    "test:routes": "tsx scripts/verify-route-choice.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.57.4",

@@ -2421,45 +2421,6 @@ button.mode-card {
   box-shadow: 0 0 0 5px rgba(217, 255, 79, 0.09);
 }
 
-.route-choice-panel {
-  border-top: 1px solid #3b4237;
-  background: #151912;
-  padding: 12px;
-}
-
-.route-choice-panel > div:first-child {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--acid);
-  font-size: 12px;
-}
-
-.route-options {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 8px;
-  margin-top: 10px;
-}
-
-.route-options button {
-  min-width: 0;
-  display: grid;
-  gap: 4px;
-  border: 1px solid #46503d;
-  border-radius: 4px;
-  background: #1c2118;
-  color: var(--ink);
-  padding: 10px;
-  text-align: left;
-  cursor: pointer;
-}
-
-.route-options button:hover:not(:disabled) { border-color: var(--acid); }
-.route-options span { color: var(--acid); font-size: 9px; font-weight: 800; }
-.route-options strong { font-size: 11px; }
-.route-options small { overflow-wrap: anywhere; color: #8c9585; font-size: 9px; }
-
 .board-viewport {
   min-width: 0;
   min-height: 0;
@@ -3651,8 +3612,7 @@ body::after {
 .ranking-panel,
 .log-panel,
 .crop-dialog,
-.winner-dialog,
-.route-choice-panel {
+.winner-dialog {
   border-color: var(--line);
   background: linear-gradient(145deg, rgb(28 37 33 / 78%), rgb(12 17 16 / 70%));
   box-shadow: var(--glass-shadow);
@@ -3667,8 +3627,7 @@ body::after {
 .ranking-panel,
 .log-panel,
 .crop-dialog,
-.winner-dialog,
-.route-choice-panel {
+.winner-dialog {
   border-radius: 8px;
 }
 
@@ -4127,6 +4086,29 @@ textarea:focus {
   animation: step-ring 620ms ease-out both;
 }
 
+.tile.route-choice-target {
+  z-index: 7;
+  border-color: var(--acid);
+  box-shadow: 0 0 0 3px rgb(217 255 94 / 20%), 0 0 30px rgb(217 255 94 / 44%), inset 0 1px 0 rgb(255 255 255 / 12%);
+  animation: route-choice-pulse 920ms ease-in-out infinite alternate;
+}
+
+.tile.route-choice-selectable {
+  cursor: pointer;
+}
+
+.tile.route-choice-selectable:hover:not(:disabled),
+.tile.route-choice-selectable:focus-visible {
+  border-color: #fff;
+  outline: 2px solid var(--acid);
+  outline-offset: 5px;
+  filter: brightness(1.22);
+}
+
+.tile.route-choice-selectable:disabled {
+  cursor: wait;
+}
+
 .player-avatar-moving {
   z-index: 8;
   animation: piece-hop 300ms cubic-bezier(.2,.85,.2,1) both;
@@ -4233,6 +4215,7 @@ textarea:focus {
 @keyframes route-flow { to { stroke-dashoffset: -16; } }
 @keyframes tile-step-flash { 0% { filter: brightness(1); } 42% { filter: brightness(1.5) saturate(1.25); } 100% { filter: brightness(1.06); } }
 @keyframes step-ring { from { opacity: .9; transform: scale(.82); } to { opacity: 0; transform: scale(1.18); } }
+@keyframes route-choice-pulse { from { filter: brightness(1.04); transform: translateY(0); } to { filter: brightness(1.3); transform: translateY(-4px); } }
 @keyframes piece-hop { 0% { transform: translateY(7px) scale(.78); opacity: .65; } 48% { transform: translateY(-9px) scale(1.18); opacity: 1; } 100% { transform: translateY(0) scale(1); opacity: 1; } }
 @keyframes status-pulse { 50% { transform: scale(1.16); box-shadow: 0 0 0 7px rgb(217 255 94 / 5%), 0 0 24px rgb(217 255 94 / 58%); } }
 @keyframes dice-sheen { to { transform: rotate(360deg); } }
@@ -4279,7 +4262,8 @@ textarea:focus {
   .brand-mark,
   .winner-icon,
   .monopoly-preview i,
-  .monopoly-preview b { animation: none !important; }
+  .monopoly-preview b,
+  .tile.route-choice-target { animation: none !important; }
 }
 
 /* Chinese-inspired quiet palette and fluid glass game field */
@@ -4381,8 +4365,7 @@ body::after {
 .ranking-panel,
 .log-panel,
 .crop-dialog,
-.winner-dialog,
-.route-choice-panel {
+.winner-dialog {
   border-color: rgb(190 211 202 / 18%);
   background:
     linear-gradient(145deg, rgb(42 59 55 / 65%), rgb(15 27 25 / 58%)),
@@ -4713,7 +4696,6 @@ textarea:focus {
   .log-panel,
   .crop-dialog,
   .winner-dialog,
-  .route-choice-panel,
   .board-stage,
   .board-stage::before { animation: none !important; }
 }
@@ -4946,7 +4928,8 @@ body * {
   .dice-pips i.visible,
   .dice-result-face,
   .dice-roll-overlay strong,
-  .tile.tile-step-active { animation: none !important; }
+  .tile.tile-step-active,
+  .tile.route-choice-target { animation: none !important; }
 }
 
 /* Keep navigation content, but remove the full-width framed header surface. */

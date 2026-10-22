@@ -336,12 +336,26 @@ function buildMovementPath(
   steps: number,
   landingPosition: number,
   finalPosition: number,
+  movementPath?: string[],
 ) {
   if (tiles.length === 0 || steps < 1) return []
   const tileById = new Map(tiles.map((tile) => [tile.id, tile]))
   const startTile = tiles.find((tile) => tile.position === startPosition)
   const landingTile = tiles.find((tile) => tile.position === landingPosition)
   if (!startTile || !landingTile) return []
+
+  if (movementPath && movementPath.length > 1) {
+    const startIndexes = movementPath
+      .map((tileId, index) => tileId === startTile.id ? index : -1)
+      .filter((index) => index >= 0 && index < movementPath.length - 1)
+    const startIndex = startIndexes.at(-1) ?? -1
+    if (startIndex >= 0) {
+      const positions = movementPath
+        .slice(startIndex + 1)
+        .flatMap((tileId) => tileById.get(tileId)?.position ?? [])
+      if (positions.length > 0) return positions
+    }
+  }
   const landingTileId = landingTile.id
 
   const adjacency = new Map<string, string[]>()
@@ -3011,7 +3025,11 @@ const Board = memo(function Board({
   onTileSelect,
   onTileMove,
   movementEvent,
+  movementPath,
   onMovementStateChange,
+  routeChoiceTileIds = [],
+  onRouteTileSelect,
+  routeChoiceDisabled = false,
 }: {
   players: Player[]
   room: Room
@@ -3023,7 +3041,11 @@ const Board = memo(function Board({
   onTileSelect?: (tile: RoomTile) => void
   onTileMove?: (tile: RoomTile, x: number, y: number) => void
   movementEvent?: GameEvent
+  movementPath?: string[]
   onMovementStateChange?: (moving: boolean) => void
+  routeChoiceTileIds?: string[]
+  onRouteTileSelect?: (tile: RoomTile) => void
+  routeChoiceDisabled?: boolean
 }) {
   const tiles = useMemo(() => getRoundTiles(allTiles, displayRound), [allTiles, displayRound])
   const edges = useMemo(() => allEdges.filter((edge) => edge.round_number === displayRound), [allEdges, displayRound])
@@ -3058,6 +3080,7 @@ const Board = memo(function Board({
   const [visualPositions, setVisualPositions] = useState<Record<string, number>>(visualPositionsRef.current)
   const [movingPlayerId, setMovingPlayerId] = useState<string | null>(null)
   const [activeStepPosition, setActiveStepPosition] = useState<number | null>(null)
+  const routeChoiceTileIdSet = useMemo(() => new Set(routeChoiceTileIds), [routeChoiceTileIds])
 
   const tileCanvasPositions = useMemo(() => new Map(tiles.map((tile, index) => [
     tile.id,
@@ -3211,6 +3234,9 @@ const Board = memo(function Board({
       ? eventPlayer
       : players.find((player) => previousPlayers.get(player.id)?.distance !== player.distance)
         ?? players.find((player) => previousPlayers.get(player.id)?.position !== player.position)
+        ?? (movementPath && movementPath.length > 1
+          ? players.find((player) => player.user_id === room.pending_player_id)
+          : undefined)
     if (!changedPlayer || previousPlayers.size === 0) {
       if (movementTimerRef.current === null) {
         const nextPositions = Object.fromEntries(players.map((player) => [player.id, player.position]))
@@ -3230,7 +3256,7 @@ const Board = memo(function Board({
     const landingPosition = eventMatches && movementEvent?.metadata?.landed_position !== undefined
       ? movementEvent.metadata.landed_position
       : changedPlayer.position
-    const path = buildMovementPath(tiles, edges, previous.position, steps, landingPosition, changedPlayer.position)
+    const path = buildMovementPath(tiles, edges, previous.position, steps, landingPosition, changedPlayer.position, movementPath)
     if (path.length === 0) {
       const nextPositions = { ...visualPositionsRef.current, [changedPlayer.id]: changedPlayer.position }
       visualPositionsRef.current = nextPositions
@@ -3272,7 +3298,7 @@ const Board = memo(function Board({
       }, reducedMotion ? 10 : 340)
     }
     playStep()
-  }, [displayRound, edges, movementEvent, onMovementStateChange, players, tiles])
+  }, [displayRound, edges, movementEvent, movementPath, onMovementStateChange, players, tiles])
 
   function startBoardDrag(event: React.PointerEvent<HTMLDivElement>) {
     if (event.button !== 0) return
@@ -3482,8 +3508,21 @@ const Board = memo(function Board({
               >
                 {tileContent}
               </button>
+            ) : routeChoiceTileIdSet.has(tile.id) && onRouteTileSelect ? (
+              <button
+                aria-label={`选择前往第 ${tile.position + 1} 格：${tile.short_name}`}
+                className={`${tileClassName} route-choice-target route-choice-selectable`}
+                disabled={routeChoiceDisabled}
+                key={tile.id}
+                onClick={() => onRouteTileSelect(tile)}
+                onPointerDown={(event) => event.stopPropagation()}
+                style={positionStyle}
+                type="button"
+              >
+                {tileContent}
+              </button>
             ) : (
-              <div className={tileClassName} key={tile.id} style={positionStyle}>
+              <div className={`${tileClassName} ${routeChoiceTileIdSet.has(tile.id) ? 'route-choice-target' : ''}`.trim()} key={tile.id} style={positionStyle}>
                 {tileContent}
               </div>
             )
@@ -3537,6 +3576,10 @@ function GameView({
   const routePending = snapshot.room.pending_player_id !== null
   const isChoosingRoute = snapshot.room.pending_player_id === snapshot.userId
   const latestMovementEvent = snapshot.events.find((event) => event.event_type === 'roll' && event.metadata?.player_id)
+  const movementPath = routePending
+    ? snapshot.room.pending_route_state?.path
+    : latestMovementEvent?.metadata?.movement_path
+  const routeChoiceTileIds = snapshot.room.pending_route_options.map((option) => option.tile_id)
   const boardTileCount = getRoundTiles(snapshot.tiles, boardRound).length
   const handleMovementStateChange = useCallback((moving: boolean) => {
     setIsAnimatingMove(moving)
@@ -3591,26 +3634,26 @@ function GameView({
           <div className="turn-strip">
             <div>
               <span className={`turn-indicator ${isMyTurn && !snapshot.room.is_paused ? 'active' : ''}`} />
-              <p>{snapshot.room.is_paused ? '本局已暂停' : snapshot.room.status === 'finished' ? '行动结束' : waitingForDice ? snapshot.isDemo ? '试玩骰子已用完' : '等待管理员补充骰子' : isMyTurn ? '轮到你行动' : `等待 ${currentPlayer?.nickname ?? '队员'}`}</p>
+              <p>{snapshot.room.is_paused ? '本局已暂停' : snapshot.room.status === 'finished' ? '行动结束' : routePending ? isChoosingRoute ? '请选择闪烁的下一格' : `等待 ${currentPlayer?.nickname ?? '队员'} 选择路线` : waitingForDice ? snapshot.isDemo ? '试玩骰子已用完' : '等待管理员补充骰子' : isMyTurn ? '轮到你行动' : `等待 ${currentPlayer?.nickname ?? '队员'}`}</p>
             </div>
             <span>{roundLabel(boardRound)} · {boardTileCount} 格 · 当前骰子 {ownPlayer?.dice_count ?? 0} 个</span>
           </div>
-          <Board displayRound={boardRound} edges={snapshot.edges} movementEvent={latestMovementEvent} onMovementStateChange={handleMovementStateChange} players={snapshot.players} room={snapshot.room} tiles={snapshot.tiles} />
-          {routePending && (
-            <section className="route-choice-panel" aria-live="polite">
-              <div><Route size={19} /><strong>{isChoosingRoute ? `骰子为 ${snapshot.room.pending_dice}，请选择路线` : `等待 ${currentPlayer?.nickname ?? '当前玩家'} 选择路线`}</strong></div>
-              {isChoosingRoute && <div className="route-options">
-                {snapshot.room.pending_route_options.map((option, index) => {
-                  const destination = snapshot.tiles.find((tile) => tile.id === option.tile_id)
-                  const pathLabels = option.path.slice(1).map((tileId) => {
-                    const tile = snapshot.tiles.find((item) => item.id === tileId)
-                    return tile ? String(tile.position + 1) : '?'
-                  }).join(' → ')
-                  return <button disabled={busy || isAnimatingMove} key={`${option.tile_id}-${index}`} onClick={() => onChooseRoute(option)} type="button"><span>路线 {index + 1}</span><strong>前往第 {option.position + 1} 格 · {destination?.short_name ?? '未知格'}</strong><small>{pathLabels}</small></button>
-                })}
-              </div>}
-            </section>
-          )}
+          <Board
+            displayRound={boardRound}
+            edges={snapshot.edges}
+            movementEvent={latestMovementEvent}
+            movementPath={movementPath}
+            onMovementStateChange={handleMovementStateChange}
+            onRouteTileSelect={isChoosingRoute ? (tile) => {
+              const option = snapshot.room.pending_route_options.find((item) => item.tile_id === tile.id)
+              if (option) onChooseRoute(option)
+            } : undefined}
+            players={snapshot.players}
+            room={snapshot.room}
+            routeChoiceDisabled={busy || isAnimatingMove}
+            routeChoiceTileIds={routeChoiceTileIds}
+            tiles={snapshot.tiles}
+          />
         </section>
 
         <aside className="game-sidebar">
@@ -4030,7 +4073,7 @@ export default function App() {
     void runAction(async () => {
       const { error: rpcError } = await client.rpc('choose_route', {
         p_room_id: snapshot.room.id,
-        p_path: route.path,
+        p_tile_id: route.tile_id,
       })
       if (rpcError) throw rpcError
       await refreshRoom(snapshot.room.id, snapshot.userId)

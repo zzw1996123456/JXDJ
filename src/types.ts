@@ -34,6 +34,7 @@ export interface Room {
   pending_dice: number | null
   pending_player_id: string | null
   pending_route_options: RouteOption[]
+  pending_route_state: PendingRouteState
   created_at: string
 }
 
@@ -125,6 +126,16 @@ export interface RouteOption {
   path: string[]
 }
 
+export interface PendingRouteState {
+  phase?: 'dice' | 'effect'
+  original_dice?: number
+  remaining_steps?: number
+  direction?: 1 | -1
+  path?: string[]
+  primary_landing_tile_id?: string | null
+  should_advance?: boolean
+}
+
 export interface GameEvent {
   id: number | string
   room_id: string
@@ -142,6 +153,8 @@ export interface GameEvent {
     tile_type?: TileType
     effect_type?: TileEffect
     effect_value?: number
+    movement_path?: string[]
+    final_position?: number
     sequence_number?: number
     request_id?: string
     operation?: 'add' | 'subtract'
