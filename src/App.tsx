@@ -860,6 +860,7 @@ function AdminPanel({ onBack, visuals }: { onBack: () => void; visuals: SiteVisu
   const siteImageInputRef = useRef<HTMLInputElement>(null)
   const [cropSource, setCropSource] = useState<{ url: string; name: string } | null>(null)
   const tileRefreshTimerRef = useRef<number | null>(null)
+  const edgeRefreshTimerRef = useRef<number | null>(null)
   const pendingTileMovesRef = useRef(new Map<string, { x: number; y: number; revision: number }>())
   const tileMoveQueueRef = useRef(new Map<string, Promise<void>>())
   const tileMoveRevisionRef = useRef(0)
@@ -983,10 +984,8 @@ function AdminPanel({ onBack, visuals }: { onBack: () => void; visuals: SiteVisu
     setSiteContentDraft(normalizeSiteContent(data as Partial<SiteContent> | null))
   }, [])
 
-  const loadRoomEdges = useCallback(async (roomId: string) => {
+  const fetchRoomEdges = useCallback(async (roomId: string) => {
     if (!supabase) return
-    const { error: ensureError } = await supabase.rpc('admin_ensure_room_edges', { p_room_id: roomId })
-    if (ensureError) throw ensureError
     const { data, error: edgesError } = await supabase
       .from('room_tile_edges')
       .select('*')
@@ -995,6 +994,13 @@ function AdminPanel({ onBack, visuals }: { onBack: () => void; visuals: SiteVisu
     if (edgesError) throw edgesError
     setRoomEdges(data as RoomTileEdge[])
   }, [])
+
+  const loadRoomEdges = useCallback(async (roomId: string) => {
+    if (!supabase) return
+    const { error: ensureError } = await supabase.rpc('admin_ensure_room_edges', { p_room_id: roomId })
+    if (ensureError) throw ensureError
+    await fetchRoomEdges(roomId)
+  }, [fetchRoomEdges])
 
   const loadRoomEvents = useCallback(async (roomId: string) => {
     if (!supabase) return
@@ -1122,7 +1128,12 @@ function AdminPanel({ onBack, visuals }: { onBack: () => void; visuals: SiteVisu
         }, 150)
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'room_tile_edges' }, () => {
-        if (selectedRoomId) void loadRoomEdges(selectedRoomId)
+        if (!selectedRoomId) return
+        if (edgeRefreshTimerRef.current !== null) window.clearTimeout(edgeRefreshTimerRef.current)
+        edgeRefreshTimerRef.current = window.setTimeout(() => {
+          edgeRefreshTimerRef.current = null
+          void fetchRoomEdges(selectedRoomId)
+        }, 150)
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'room_tile_images' }, () => {
         void loadTileImages()
@@ -1149,9 +1160,13 @@ function AdminPanel({ onBack, visuals }: { onBack: () => void; visuals: SiteVisu
         window.clearTimeout(tileRefreshTimerRef.current)
         tileRefreshTimerRef.current = null
       }
+      if (edgeRefreshTimerRef.current !== null) {
+        window.clearTimeout(edgeRefreshTimerRef.current)
+        edgeRefreshTimerRef.current = null
+      }
       void client.removeChannel(channel)
     }
-  }, [applyPendingTileState, authorized, loadDashboard, loadDiceRequests, loadGuaranteeRequests, loadRoomEdges, loadRoomEvents, loadRoomTiles, loadSettlementRules, loadSiteImages, loadTileImages, loadTilePresets, selectedRoomId])
+  }, [applyPendingTileState, authorized, fetchRoomEdges, loadDashboard, loadDiceRequests, loadGuaranteeRequests, loadRoomEvents, loadRoomTiles, loadSettlementRules, loadSiteImages, loadTileImages, loadTilePresets, selectedRoomId])
 
   useEffect(() => {
     if (!authorized) return
@@ -1812,14 +1827,56 @@ function AdminPanel({ onBack, visuals }: { onBack: () => void; visuals: SiteVisu
     const deletableIds = [...new Set(tileIds)].filter((id) => selectedRoundTiles.some((tile) => tile.id === id && tile.tile_type !== 'start'))
     if (deletableIds.length === 0) return
     if (!window.confirm(`确认删除选中的 ${deletableIds.length} 个格子吗？关联路线会自动整理。`)) return
+    const deletedIdSet = new Set(deletableIds)
+    const previousTiles = roomTiles
+    const previousEdges = roomEdges
+    const previousRooms = rooms
+    const previousSelectedTileIds = selectedTileIds
+    const previousSelectionMode = tileSelectionMode
+    const previousLinkingTileId = linkingTileId
+    const remainingRoundTiles = selectedRoundTiles
+      .filter((tile) => !deletedIdSet.has(tile.id))
+      .map((tile, position) => ({ ...tile, position }))
+    const remainingRoundTileMap = new Map(remainingRoundTiles.map((tile) => [tile.id, tile]))
+    const nextRoundSizes = roomRoundSizes(selectedRoom)
+    nextRoundSizes[editorRound - 1] = remainingRoundTiles.length
+
+    setRoomTiles((current) => current
+      .filter((tile) => !deletedIdSet.has(tile.id))
+      .map((tile) => remainingRoundTileMap.get(tile.id) ?? tile))
+    setRoomEdges((current) => current.filter((edge) => !deletedIdSet.has(edge.from_tile_id) && !deletedIdSet.has(edge.to_tile_id)))
+    setRooms((current) => current.map((room) => room.id === selectedRoom.id ? {
+      ...room,
+      round_board_sizes: nextRoundSizes,
+      ...(editorRound === 1 ? { board_size: remainingRoundTiles.length, round1_board_size: remainingRoundTiles.length } : {}),
+      ...(editorRound === 2 ? { round2_board_size: remainingRoundTiles.length } : {}),
+      ...(editorRound === 3 ? { round3_board_size: remainingRoundTiles.length } : {}),
+    } : room))
+    setSelectedTileIds([])
+    setTileSelectionMode(false)
+    setLinkingTileId(null)
+
     void runAdminAction(async () => {
-      if (!supabase) return
-      const { error: rpcError } = await supabase.rpc('admin_delete_room_tiles', { p_tile_ids: deletableIds })
-      if (rpcError) throw rpcError
-      setSelectedTileIds([])
-      setTileSelectionMode(false)
-      setLinkingTileId(null)
-      await refreshBoardEditor(selectedRoom.id)
+      const rollbackDeletion = () => {
+        setRoomTiles(previousTiles)
+        setRoomEdges(previousEdges)
+        setRooms(previousRooms)
+        setSelectedTileIds(previousSelectedTileIds)
+        setTileSelectionMode(previousSelectionMode)
+        setLinkingTileId(previousLinkingTileId)
+      }
+      if (!supabase) {
+        rollbackDeletion()
+        throw new Error('尚未配置 Supabase')
+      }
+      try {
+        const { error: rpcError } = await supabase.rpc('admin_delete_room_tiles', { p_tile_ids: deletableIds })
+        if (rpcError) throw rpcError
+      } catch (deleteError) {
+        rollbackDeletion()
+        throw deleteError
+      }
+      await Promise.all([loadRoomTiles(selectedRoom.id), fetchRoomEdges(selectedRoom.id)])
     })
   }
 
@@ -2918,29 +2975,31 @@ function AdminPanel({ onBack, visuals }: { onBack: () => void; visuals: SiteVisu
                   </div>
                   <div className="tile-builder-layout">
                     <aside className="tile-preset-library">
-                      <div className="tile-preset-heading">
-                        <span><Bookmark size={15} /> 格子预设库</span>
-                        <button aria-label="新建预设" disabled={busy} onClick={startNewPreset} title="新建预设" type="button"><Plus size={15} /></button>
-                      </div>
-                      <div className="tile-preset-filters">
-                        <input aria-label="搜索格子预设" onChange={(event) => setPresetSearch(event.target.value)} placeholder="搜索预设" type="search" value={presetSearch} />
-                        <span>
-                          <select aria-label="筛选预设分类" onChange={(event) => setPresetCategoryFilter(event.target.value)} value={presetCategoryFilter}>
-                            <option value="all">全部分类</option>
-                            <option value="uncategorized">未分类</option>
-                            {tilePresetCategories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
-                          </select>
-                          <button aria-label="重命名当前分类" disabled={busy || !tilePresetCategories.some((category) => category.id === presetCategoryFilter)} onClick={renamePresetCategory} title="重命名分类" type="button"><SquarePen size={14} /></button>
-                          <button aria-label="删除当前分类" disabled={busy || !tilePresetCategories.some((category) => category.id === presetCategoryFilter)} onClick={deletePresetCategory} title="删除分类" type="button"><Trash2 size={14} /></button>
-                        </span>
-                      </div>
-                      <div className="tile-preset-category-create">
-                        <input aria-label="新分类名称" maxLength={30} onChange={(event) => setNewPresetCategoryName(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && createPresetCategory()} placeholder="新分类" value={newPresetCategoryName} />
-                        <button aria-label="创建分类" disabled={busy || !newPresetCategoryName.trim()} onClick={createPresetCategory} title="创建分类" type="button"><FolderPlus size={15} /></button>
-                      </div>
-                      <div className="edge-direction preset-link-direction" role="group" aria-label="拖入格子的连线方向">
-                        <button className={!presetDropBidirectional ? 'active' : ''} onClick={() => setPresetDropBidirectional(false)} type="button"><ArrowRight size={14} /> 单向</button>
-                        <button className={presetDropBidirectional ? 'active' : ''} onClick={() => setPresetDropBidirectional(true)} type="button"><ArrowLeft size={14} /><ArrowRight size={14} /> 双向</button>
+                      <div className="tile-preset-tools">
+                        <div className="tile-preset-heading">
+                          <span><Bookmark size={15} /> 格子预设库</span>
+                          <button aria-label="新建预设" disabled={busy} onClick={startNewPreset} title="新建预设" type="button"><Plus size={15} /></button>
+                        </div>
+                        <div className="tile-preset-filters">
+                          <input aria-label="搜索格子预设" onChange={(event) => setPresetSearch(event.target.value)} placeholder="搜索预设" type="search" value={presetSearch} />
+                          <span>
+                            <select aria-label="筛选预设分类" onChange={(event) => setPresetCategoryFilter(event.target.value)} value={presetCategoryFilter}>
+                              <option value="all">全部分类</option>
+                              <option value="uncategorized">未分类</option>
+                              {tilePresetCategories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
+                            </select>
+                            <button aria-label="重命名当前分类" disabled={busy || !tilePresetCategories.some((category) => category.id === presetCategoryFilter)} onClick={renamePresetCategory} title="重命名分类" type="button"><SquarePen size={14} /></button>
+                            <button aria-label="删除当前分类" disabled={busy || !tilePresetCategories.some((category) => category.id === presetCategoryFilter)} onClick={deletePresetCategory} title="删除分类" type="button"><Trash2 size={14} /></button>
+                          </span>
+                        </div>
+                        <div className="tile-preset-category-create">
+                          <input aria-label="新分类名称" maxLength={30} onChange={(event) => setNewPresetCategoryName(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && createPresetCategory()} placeholder="新分类" value={newPresetCategoryName} />
+                          <button aria-label="创建分类" disabled={busy || !newPresetCategoryName.trim()} onClick={createPresetCategory} title="创建分类" type="button"><FolderPlus size={15} /></button>
+                        </div>
+                        <div className="edge-direction preset-link-direction" role="group" aria-label="拖入格子的连线方向">
+                          <button className={!presetDropBidirectional ? 'active' : ''} onClick={() => setPresetDropBidirectional(false)} type="button"><ArrowRight size={14} /> 单向</button>
+                          <button className={presetDropBidirectional ? 'active' : ''} onClick={() => setPresetDropBidirectional(true)} type="button"><ArrowLeft size={14} /><ArrowRight size={14} /> 双向</button>
+                        </div>
                       </div>
                       <div className="tile-preset-list">
                         {filteredTilePresets.map((preset) => {
