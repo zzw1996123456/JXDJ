@@ -2918,12 +2918,29 @@ button.mode-card {
   background: var(--acid);
 }
 
-.event-row time {
+.event-meta {
   grid-column: 2;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0 2px;
+  line-height: 1.25;
+}
+
+.event-meta strong {
+  color: #cbd4c6;
+  font-size: 12px;
+}
+
+.event-meta small,
+.event-meta time {
   color: #858e81;
   font-size: 11px;
+}
+
+.event-meta time {
   font-variant-numeric: tabular-nums;
-  line-height: 1.25;
 }
 
 .event-row p {

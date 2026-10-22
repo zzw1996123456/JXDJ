@@ -284,6 +284,25 @@ function isGuaranteeEffect(effect: TileEffect): effect is GuaranteeEffect {
   return GUARANTEE_EFFECTS.includes(effect as GuaranteeEffect)
 }
 
+function gameEventActor(event: GameEvent, players: Player[]) {
+  if (event.message.startsWith('管理员')) return { name: '管理员', identity: '后台' }
+
+  const boss = players.find((player) => player.role === 'boss')
+  if (event.message.startsWith('老板') && boss) return { name: boss.nickname, identity: '老板' }
+
+  const metadataPlayer = players.find((player) => player.id === event.metadata?.player_id
+    || player.nickname === event.metadata?.player_name)
+  const mentionedPlayer = [...players]
+    .sort((left, right) => right.nickname.length - left.nickname.length)
+    .find((player) => event.message.includes(player.nickname))
+  const player = metadataPlayer ?? mentionedPlayer
+  const name = event.metadata?.player_name ?? player?.nickname
+  const role = event.metadata?.role ?? player?.role
+
+  if (name) return { name, identity: role === 'boss' ? '老板' : role === 'runner' ? '打手' : '成员' }
+  return { name: '系统', identity: '公共事件' }
+}
+
 function guaranteePresetLabel(effect: GuaranteeEffect, value: number) {
   if (effect === 'guarantee_add') return `增加 ${value} 万`
   if (effect === 'guarantee_subtract') return `减少 ${value} 万`
@@ -3747,15 +3766,22 @@ function GameView({
               <Radio size={17} />
             </div>
             <div className="event-list">
-              {snapshot.events.slice(0, 8).map((event) => (
-                <div className="event-row" key={event.id}>
-                  <span />
-                  <time dateTime={event.created_at} title={new Date(event.created_at).toLocaleString('zh-CN')}>
-                    {new Date(event.created_at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })}
-                  </time>
-                  <p>{event.message}</p>
-                </div>
-              ))}
+              {snapshot.events.slice(0, 8).map((event) => {
+                const actor = gameEventActor(event, snapshot.players)
+                return (
+                  <div className="event-row" key={event.id}>
+                    <span />
+                    <div className="event-meta">
+                      <strong>{actor.name}</strong>
+                      <small>（{actor.identity}）</small>
+                      <time dateTime={event.created_at} title={new Date(event.created_at).toLocaleString('zh-CN')}>
+                        · {new Date(event.created_at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })}
+                      </time>
+                    </div>
+                    <p>{event.message}</p>
+                  </div>
+                )
+              })}
             </div>
           </section>
         </aside>
