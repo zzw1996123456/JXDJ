@@ -2121,8 +2121,6 @@ begin
   select id into v_partner from public.room_tiles where room_id = v_tile.room_id and round_number = v_tile.round_number
     and position > 0 and id <> p_tile_id order by position desc limit 1;
   delete from public.room_tiles where id in (p_tile_id, v_partner);
-  update public.room_tiles set position = position + 1000
-  where room_id = v_tile.room_id and round_number = v_tile.round_number;
   for v_item in select id from public.room_tiles where room_id = v_tile.room_id and round_number = v_tile.round_number order by position loop
     update public.room_tiles set position = v_position where id = v_item.id;
     v_position := v_position + 1;
