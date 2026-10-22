@@ -3863,4 +3863,150 @@ begin
   end;
 end $$;
 
+-- Administrator-managed website artwork shared across public pages.
+create table if not exists public.site_images (
+  id uuid primary key default gen_random_uuid(),
+  name text not null check (char_length(name) between 1 and 60),
+  storage_path text not null unique,
+  public_url text not null,
+  width integer not null check (width > 0),
+  height integer not null check (height > 0),
+  byte_size integer not null check (byte_size between 1 and 2097152),
+  mime_type text not null default 'image/webp' check (mime_type = 'image/webp'),
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.site_image_slots (
+  slot text primary key check (slot in ('hub_hero', 'mode_card', 'entry_hero', 'entry_banner', 'admin_login', 'room_header')),
+  image_id uuid references public.site_images(id) on delete set null,
+  updated_at timestamptz not null default now()
+);
+
+insert into public.site_image_slots(slot)
+select slot from unnest(array['hub_hero', 'mode_card', 'entry_hero', 'entry_banner', 'admin_login', 'room_header']) as slots(slot)
+on conflict (slot) do nothing;
+
+alter table public.site_images enable row level security;
+alter table public.site_image_slots enable row level security;
+drop policy if exists "any visitor can read site images" on public.site_images;
+create policy "any visitor can read site images" on public.site_images for select to anon, authenticated using (true);
+drop policy if exists "any visitor can read site image slots" on public.site_image_slots;
+create policy "any visitor can read site image slots" on public.site_image_slots for select to anon, authenticated using (true);
+
+revoke all on table public.site_images from public;
+revoke all on table public.site_image_slots from public;
+grant select on table public.site_images to anon, authenticated;
+grant select on table public.site_image_slots to anon, authenticated;
+
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values ('site-images', 'site-images', true, 2097152, array['image/webp'])
+on conflict (id) do update set public = true, file_size_limit = 2097152, allowed_mime_types = array['image/webp'];
+
+drop policy if exists "admins can upload site images" on storage.objects;
+create policy "admins can upload site images" on storage.objects for insert to authenticated
+  with check (bucket_id = 'site-images' and public.is_admin());
+drop policy if exists "admins can update site images" on storage.objects;
+create policy "admins can update site images" on storage.objects for update to authenticated
+  using (bucket_id = 'site-images' and public.is_admin()) with check (bucket_id = 'site-images' and public.is_admin());
+drop policy if exists "admins can delete site images" on storage.objects;
+create policy "admins can delete site images" on storage.objects for delete to authenticated
+  using (bucket_id = 'site-images' and public.is_admin());
+
+create or replace function public.admin_create_site_image(
+  p_name text,
+  p_storage_path text,
+  p_public_url text,
+  p_width integer,
+  p_height integer,
+  p_byte_size integer,
+  p_mime_type text
+)
+returns uuid
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_id uuid;
+begin
+  if not public.is_admin() then raise exception '只有管理员可以上传网站素材'; end if;
+  if char_length(trim(coalesce(p_name, ''))) not between 1 and 60 then raise exception '素材名称需要 1 到 60 个字符'; end if;
+  if p_storage_path is null or p_storage_path not like 'library/%' then raise exception '素材存储路径无效'; end if;
+  if p_public_url is null or p_public_url = '' then raise exception '素材地址无效'; end if;
+  if p_width <= 0 or p_height <= 0 then raise exception '素材尺寸无效'; end if;
+  if p_byte_size not between 1 and 2097152 then raise exception '网站素材不能超过 2 MB'; end if;
+  if p_mime_type <> 'image/webp' then raise exception '网站素材必须是 WebP 格式'; end if;
+
+  insert into public.site_images(name, storage_path, public_url, width, height, byte_size, mime_type)
+  values (trim(p_name), p_storage_path, p_public_url, p_width, p_height, p_byte_size, p_mime_type)
+  returning id into v_id;
+  return v_id;
+end;
+$$;
+
+create or replace function public.admin_set_site_image_slot(p_slot text, p_image_id uuid)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+begin
+  if not public.is_admin() then raise exception '只有管理员可以修改网站图片位'; end if;
+  if p_slot not in ('hub_hero', 'mode_card', 'entry_hero', 'entry_banner', 'admin_login', 'room_header') then
+    raise exception '未知的网站图片位';
+  end if;
+  if p_image_id is not null and not exists (select 1 from public.site_images where id = p_image_id) then
+    raise exception '网站素材不存在';
+  end if;
+  insert into public.site_image_slots(slot, image_id, updated_at)
+  values (p_slot, p_image_id, now())
+  on conflict (slot) do update set image_id = excluded.image_id, updated_at = now();
+end;
+$$;
+
+create or replace function public.admin_delete_site_image(p_image_id uuid)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+begin
+  if not public.is_admin() then raise exception '只有管理员可以删除网站素材'; end if;
+  delete from public.site_images where id = p_image_id;
+  if not found then raise exception '网站素材不存在'; end if;
+end;
+$$;
+
+create or replace function public.admin_update_room_name(p_room_id uuid, p_room_name text)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_old_name text;
+  v_new_name text := trim(coalesce(p_room_name, ''));
+begin
+  if not public.is_admin() then raise exception '只有管理员可以修改房间名称'; end if;
+  if char_length(v_new_name) not between 1 and 24 then raise exception '房间名需要 1 到 24 个字符'; end if;
+  select name into v_old_name from public.rooms where id = p_room_id for update;
+  if not found then raise exception '房间不存在'; end if;
+  if v_old_name = v_new_name then return; end if;
+  update public.rooms set name = v_new_name where id = p_room_id;
+  insert into public.game_events(room_id, message)
+  values (p_room_id, '管理员将房间“' || v_old_name || '”重命名为“' || v_new_name || '”');
+end;
+$$;
+
+revoke all on function public.admin_create_site_image(text, text, text, integer, integer, integer, text) from public;
+revoke all on function public.admin_set_site_image_slot(text, uuid) from public;
+revoke all on function public.admin_delete_site_image(uuid) from public;
+revoke all on function public.admin_update_room_name(uuid, text) from public;
+grant execute on function public.admin_create_site_image(text, text, text, integer, integer, integer, text) to authenticated;
+grant execute on function public.admin_set_site_image_slot(text, uuid) to authenticated;
+grant execute on function public.admin_delete_site_image(uuid) to authenticated;
+grant execute on function public.admin_update_room_name(uuid, text) to authenticated;
+
+do $$
+begin
+  begin alter publication supabase_realtime add table public.site_images;
+  exception when duplicate_object then null;
+  end;
+  begin alter publication supabase_realtime add table public.site_image_slots;
+  exception when duplicate_object then null;
+  end;
+end $$;
+
 select pg_notify('pgrst', 'reload schema');

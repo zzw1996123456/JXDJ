@@ -5005,3 +5005,278 @@ body * {
   .site-content-grid { grid-template-columns: 1fr; }
   .site-content-wide { grid-column: auto; }
 }
+
+/* Administrator-managed site artwork */
+.has-site-art {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+}
+
+.mode-intro.has-site-art,
+.hero-copy.has-site-art,
+.admin-login-copy.has-site-art {
+  min-height: 430px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  border-left: 3px solid var(--china-jade);
+  padding: 28px;
+}
+
+.mode-intro.has-site-art h1,
+.hero-copy.has-site-art h1,
+.admin-login-copy.has-site-art h1 { font-size: 56px; }
+
+.site-hero-art {
+  width: 100%;
+  height: 100%;
+  position: absolute;
+  z-index: -2;
+  inset: 0;
+  object-fit: cover;
+  opacity: .4;
+}
+
+.has-site-art::after {
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  background: linear-gradient(90deg, rgb(7 18 16 / 92%) 0%, rgb(7 18 16 / 62%) 58%, rgb(7 18 16 / 30%) 100%);
+  content: '';
+}
+
+.mode-preview.has-cover {
+  display: block;
+  padding: 0;
+}
+
+.mode-preview.has-cover > img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+  opacity: .82;
+}
+
+.mode-preview.has-cover > i,
+.mode-preview.has-cover > b {
+  display: none;
+}
+
+.entry-panel-banner {
+  width: calc(100% + 60px);
+  height: 116px;
+  display: block;
+  margin: -30px -30px 24px;
+  border-bottom: 1px solid rgb(184 213 201 / 24%);
+  object-fit: cover;
+}
+
+.room-header.has-site-art {
+  isolation: isolate;
+  overflow: hidden;
+  border-bottom: 1px solid rgb(184 213 201 / 18%);
+}
+
+.room-header.has-site-art > *:not(.room-header-art) {
+  position: relative;
+  z-index: 1;
+}
+
+.room-header-art {
+  width: 100%;
+  height: 100%;
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  object-fit: cover;
+  opacity: .28;
+}
+
+.room-header.has-site-art::before {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  background: linear-gradient(90deg, rgb(6 17 15 / 82%), rgb(6 17 15 / 48%), rgb(6 17 15 / 78%));
+  content: '';
+}
+
+.admin-site-assets-panel {
+  margin-bottom: 18px;
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgb(10 23 21 / 62%);
+}
+
+.admin-site-assets-panel .section-title h2 {
+  margin: 4px 0 0;
+  color: var(--china-moon);
+  font-size: 20px;
+}
+
+.site-slot-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.site-slot-editor {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 82px minmax(0, 1fr);
+  gap: 9px;
+  border: 1px solid rgb(184 213 201 / 16%);
+  border-radius: 6px;
+  padding: 8px;
+  background: rgb(5 16 14 / 48%);
+}
+
+.site-slot-preview {
+  width: 82px;
+  height: 58px;
+  grid-row: span 2;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid rgb(184 213 201 / 18%);
+  border-radius: 4px;
+  background: rgb(4 12 11 / 76%);
+  color: var(--muted);
+}
+
+.site-slot-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.site-slot-editor > span:nth-child(2) {
+  min-width: 0;
+  display: grid;
+  align-content: center;
+  gap: 3px;
+}
+
+.site-slot-editor strong,
+.site-slot-editor small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.site-slot-editor strong { color: var(--china-moon); font-size: 11px; }
+.site-slot-editor small { color: var(--muted); font-size: 9px; }
+
+.site-slot-editor select {
+  min-width: 0;
+  height: 30px;
+  border: 1px solid rgb(184 213 201 / 20%);
+  border-radius: 4px;
+  padding: 0 7px;
+  background: rgb(5 16 14 / 76%);
+  color: var(--china-moon);
+  font-size: 10px;
+}
+
+.site-asset-library {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid rgb(184 213 201 / 14%);
+}
+
+.site-asset-item {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr) 30px;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid rgb(184 213 201 / 14%);
+  border-radius: 5px;
+  padding: 6px;
+  background: rgb(5 16 14 / 48%);
+}
+
+.site-asset-item > img {
+  width: 58px;
+  height: 42px;
+  border-radius: 3px;
+  object-fit: cover;
+}
+
+.site-asset-item > span { min-width: 0; display: grid; gap: 3px; }
+.site-asset-item strong,
+.site-asset-item small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.site-asset-item strong { color: var(--china-moon); font-size: 10px; }
+.site-asset-item small { color: var(--muted); font-size: 8px; }
+.site-asset-item button {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgb(179 82 73 / 34%);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--china-vermilion);
+  cursor: pointer;
+}
+
+.admin-room-name-editor {
+  max-width: 560px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 36px;
+  gap: 6px;
+  margin-top: 3px;
+}
+
+.admin-room-name-editor input {
+  min-width: 0;
+  height: 38px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 0 8px;
+  background: transparent;
+  color: var(--ink);
+  font: 700 22px 'Barlow Condensed', 'Noto Sans SC', sans-serif;
+}
+
+.admin-room-name-editor input:hover,
+.admin-room-name-editor input:focus {
+  outline: none;
+  border-color: rgb(184 213 201 / 26%);
+  background: rgb(5 16 14 / 56%);
+}
+
+.admin-room-name-editor button {
+  display: grid;
+  place-items: center;
+  border: 1px solid rgb(184 213 201 / 22%);
+  border-radius: 4px;
+  background: rgb(5 16 14 / 56%);
+  color: var(--china-jade);
+  cursor: pointer;
+}
+
+.admin-room-name-editor button:disabled,
+.site-asset-item button:disabled { cursor: not-allowed; opacity: .38; }
+
+@media (max-width: 1180px) {
+  .site-slot-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 680px) {
+  .mode-intro.has-site-art,
+  .hero-copy.has-site-art,
+  .admin-login-copy.has-site-art { min-height: 330px; padding: 22px; }
+  .mode-intro.has-site-art h1,
+  .hero-copy.has-site-art h1,
+  .admin-login-copy.has-site-art h1 { font-size: 44px; }
+  .entry-panel-banner { width: calc(100% + 40px); height: 92px; margin: -20px -20px 20px; }
+  .admin-site-assets-panel { padding: 15px; }
+  .site-slot-grid { grid-template-columns: 1fr; }
+}

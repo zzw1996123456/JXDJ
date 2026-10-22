@@ -91,6 +91,24 @@ export interface RoomTileImage {
   created_at: string
 }
 
+export interface SiteImage {
+  id: string
+  name: string
+  storage_path: string
+  public_url: string
+  width: number
+  height: number
+  byte_size: number
+  mime_type: string
+  created_at: string
+}
+
+export interface SiteImageSlot {
+  slot: string
+  image_id: string | null
+  updated_at: string
+}
+
 export interface RoomTileEdge {
   id: string
   room_id: string

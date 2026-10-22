@@ -63,6 +63,7 @@ import {
 } from './lib/board'
 import type { BoardCanvasPoint, BoardLayoutPresetId } from './lib/board'
 import { cropTileImage, TILE_IMAGE_ASPECT, TILE_IMAGE_MAX_BYTES, TILE_IMAGE_MAX_SOURCE_BYTES } from './lib/tileImages'
+import { prepareSiteImage } from './lib/siteImages'
 import { createDemoRoom, rollDemoDice, startDemoGame } from './lib/demoGame'
 import { isSupabaseConfigured, supabase } from './lib/supabase'
 import type {
@@ -80,6 +81,8 @@ import type {
   RoomTileImage,
   RouteOption,
   SettlementRule,
+  SiteImage,
+  SiteImageSlot,
   TileEffect,
   TileType,
 } from './types'
@@ -150,6 +153,28 @@ interface SiteContent {
   hero_title_primary: string
   hero_title_accent: string
   hero_subtitle: string
+}
+
+const SITE_IMAGE_SLOTS = [
+  { key: 'hub_hero', label: '趣味大厅主视觉', help: '趣味大厅左侧标题区域的背景图' },
+  { key: 'mode_card', label: '玩法卡封面', help: '护航大富翁玩法卡的横向封面' },
+  { key: 'entry_hero', label: '大富翁入口主视觉', help: '加入房间页面左侧标题区域的背景图' },
+  { key: 'entry_banner', label: '加入面板横幅', help: '加入房间表单顶部的窄幅图片' },
+  { key: 'admin_login', label: '管理员登录主视觉', help: '管理员登录页面左侧背景图' },
+  { key: 'room_header', label: '房间顶部背景', help: '等待大厅和对局页面顶部的横幅背景' },
+] as const
+
+type SiteImageSlotKey = typeof SITE_IMAGE_SLOTS[number]['key']
+type SiteVisuals = Partial<Record<SiteImageSlotKey, string>>
+
+function buildSiteVisuals(images: SiteImage[], slots: SiteImageSlot[]) {
+  const imageById = new Map(images.map((image) => [image.id, image.public_url]))
+  return Object.fromEntries(slots.flatMap((slot) => {
+    const url = slot.image_id ? imageById.get(slot.image_id) : null
+    return url && SITE_IMAGE_SLOTS.some((candidate) => candidate.key === slot.slot)
+      ? [[slot.slot, url]]
+      : []
+  })) as SiteVisuals
 }
 
 const DEFAULT_SITE_CONTENT: SiteContent = {
@@ -443,7 +468,7 @@ function StatusPill({ online }: { online: boolean }) {
   )
 }
 
-function ModeHub({ onSelect }: { onSelect: () => void }) {
+function ModeHub({ onSelect, visuals }: { onSelect: () => void; visuals: SiteVisuals }) {
   return (
     <div className="portal-page">
       <header className="portal-header">
@@ -452,7 +477,8 @@ function ModeHub({ onSelect }: { onSelect: () => void }) {
       </header>
 
       <main className="mode-hub">
-        <section className="mode-intro">
+        <section className={`mode-intro ${visuals.hub_hero ? 'has-site-art' : ''}`}>
+          {visuals.hub_hero && <img alt="" className="site-hero-art" decoding="async" src={visuals.hub_hero} />}
           <p className="eyebrow"><Radio size={14} /> 景序电竞 · 三角洲行动</p>
           <h1>选择你的<br /><span>趣味行动。</span></h1>
           <p>每一种玩法都是独立趣味单。管理员创建房间后，玩家凭房间码加入。</p>
@@ -470,7 +496,8 @@ function ModeHub({ onSelect }: { onSelect: () => void }) {
           <div className="mode-grid">
             <button className="mode-card featured" onClick={onSelect} type="button">
               <span className="mode-status live"><Radio size={13} /> 可在线组队</span>
-              <span className="mode-preview monopoly-preview" aria-hidden="true">
+              <span className={`mode-preview monopoly-preview ${visuals.mode_card ? 'has-cover' : ''}`} aria-hidden="true">
+                {visuals.mode_card && <img alt="" decoding="async" src={visuals.mode_card} />}
                 {Array.from({ length: 16 }, (_, index) => <i key={index} />)}
                 <b><Dice5 size={34} /></b>
               </span>
@@ -514,6 +541,7 @@ function ModeHub({ onSelect }: { onSelect: () => void }) {
 function MonopolyEntry({
   busy,
   content,
+  visuals,
   onJoin,
   onDemo,
   onAdmin,
@@ -521,6 +549,7 @@ function MonopolyEntry({
 }: {
   busy: boolean
   content: SiteContent
+  visuals: SiteVisuals
   onJoin: (nickname: string, role: PlayerRole, code: string) => void
   onDemo: (nickname: string, role: PlayerRole) => void
   onAdmin: () => void
@@ -565,7 +594,8 @@ function MonopolyEntry({
         <button className="back-link" onClick={onBack} type="button"><ArrowLeft size={17} /> 趣味大厅</button>
       </header>
       <main className="home-shell">
-        <section className="hero-copy">
+        <section className={`hero-copy ${visuals.entry_hero ? 'has-site-art' : ''}`}>
+          {visuals.entry_hero && <img alt="" className="site-hero-art" decoding="async" src={visuals.entry_hero} />}
           {content.hero_eyebrow && <p className="eyebrow"><Dice5 size={14} /> {content.hero_eyebrow}</p>}
           <h1>
             {content.hero_title_primary}
@@ -576,6 +606,7 @@ function MonopolyEntry({
         </section>
 
         <section className="entry-panel" aria-labelledby="entry-title">
+        {visuals.entry_banner && <img alt="" className="entry-panel-banner" decoding="async" src={visuals.entry_banner} />}
         <div className="panel-heading">
           <div>
             <p className="kicker">新行动</p>
@@ -699,7 +730,7 @@ function DiceRollOverlay({ state }: { state: DiceAnimationState }) {
   )
 }
 
-function RoomHeader({ snapshot }: { snapshot: GameSnapshot }) {
+function RoomHeader({ snapshot, imageUrl }: { snapshot: GameSnapshot; imageUrl?: string }) {
   const [copied, setCopied] = useState(false)
 
   async function copyCode() {
@@ -709,7 +740,8 @@ function RoomHeader({ snapshot }: { snapshot: GameSnapshot }) {
   }
 
   return (
-    <header className="room-header">
+    <header className={`room-header ${imageUrl ? 'has-site-art' : ''}`}>
+      {imageUrl && <img alt="" className="room-header-art" decoding="async" src={imageUrl} />}
       <Logo />
       <div className="room-actions">
         <StatusPill online={!snapshot.isDemo} />
@@ -724,7 +756,7 @@ function RoomHeader({ snapshot }: { snapshot: GameSnapshot }) {
   )
 }
 
-function AdminPanel({ onBack }: { onBack: () => void }) {
+function AdminPanel({ onBack, visuals }: { onBack: () => void; visuals: SiteVisuals }) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [authorized, setAuthorized] = useState(false)
@@ -744,9 +776,12 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
   const [roomTiles, setRoomTiles] = useState<RoomTile[]>([])
   const [roomEdges, setRoomEdges] = useState<RoomTileEdge[]>([])
   const [tileImages, setTileImages] = useState<RoomTileImage[]>([])
+  const [siteImages, setSiteImages] = useState<SiteImage[]>([])
+  const [siteImageSlots, setSiteImageSlots] = useState<SiteImageSlot[]>([])
   const [configFavorites, setConfigFavorites] = useState<RoomConfigFavorite[]>([])
   const [siteContentDraft, setSiteContentDraft] = useState<SiteContent>(DEFAULT_SITE_CONTENT)
   const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null)
+  const [roomNameDraft, setRoomNameDraft] = useState('')
   const [roomPendingDelete, setRoomPendingDelete] = useState<string | null>(null)
   const [advanceChances, setAdvanceChances] = useState<string[]>(DEFAULT_ADVANCE_CHANCES.map(String))
   const [startingPlayerId, setStartingPlayerId] = useState('')
@@ -767,6 +802,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
   const configInputRef = useRef<HTMLInputElement>(null)
   const configMenuRef = useRef<HTMLDetailsElement>(null)
   const imageInputRef = useRef<HTMLInputElement>(null)
+  const siteImageInputRef = useRef<HTMLInputElement>(null)
   const [cropSource, setCropSource] = useState<{ url: string; name: string } | null>(null)
   const tileRefreshTimerRef = useRef<number | null>(null)
   const pendingTileMovesRef = useRef(new Map<string, { x: number; y: number; revision: number }>())
@@ -785,6 +821,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
   const layoutUndoRef = useRef(new Map<GameRound, BoardCanvasPoint[]>())
 
   const selectedRoom = rooms.find((room) => room.id === selectedRoomId) ?? null
+  const configuredSiteVisuals = buildSiteVisuals(siteImages, siteImageSlots)
   const selectedPlayers = players.filter((player) => player.room_id === selectedRoomId)
   const selectedEvents = events.filter((event) => event.room_id === selectedRoomId)
   const selectedGuaranteeRequests = guaranteeRequests.filter((request) => request.room_id === selectedRoomId)
@@ -837,6 +874,18 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       .order('created_at', { ascending: false })
     if (imagesError) throw imagesError
     setTileImages(data as RoomTileImage[])
+  }, [])
+
+  const loadSiteImages = useCallback(async () => {
+    if (!supabase) return
+    const [imagesResult, slotsResult] = await Promise.all([
+      supabase.from('site_images').select('*').order('created_at', { ascending: false }),
+      supabase.from('site_image_slots').select('*').order('slot'),
+    ])
+    if (imagesResult.error) throw imagesResult.error
+    if (slotsResult.error) throw slotsResult.error
+    setSiteImages(imagesResult.data as SiteImage[])
+    setSiteImageSlots(slotsResult.data as SiteImageSlot[])
   }, [])
 
   const loadConfigFavorites = useCallback(async () => {
@@ -950,7 +999,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       if (!adminError && isAdmin === true) {
         setAuthorized(true)
         try {
-          await Promise.all([loadDashboard(), loadConfigFavorites(), loadSiteContent()])
+          await Promise.all([loadDashboard(), loadConfigFavorites(), loadSiteContent(), loadSiteImages()])
         } catch (loadError) {
           setError(formatError(loadError))
         }
@@ -958,7 +1007,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       setChecking(false)
     }
     void checkSession()
-  }, [loadConfigFavorites, loadDashboard, loadSiteContent])
+  }, [loadConfigFavorites, loadDashboard, loadSiteContent, loadSiteImages])
 
   useEffect(() => {
     if (!authorized || !supabase) return
@@ -1004,6 +1053,12 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'room_tile_images' }, () => {
         void loadTileImages()
       })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'site_images' }, () => {
+        void loadSiteImages()
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'site_image_slots' }, () => {
+        void loadSiteImages()
+      })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'room_settlement_rules' }, () => {
         if (selectedRoomId) void loadSettlementRules(selectedRoomId)
       })
@@ -1016,7 +1071,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       }
       void client.removeChannel(channel)
     }
-  }, [applyPendingTileState, authorized, loadDashboard, loadDiceRequests, loadGuaranteeRequests, loadRoomEdges, loadRoomEvents, loadRoomTiles, loadSettlementRules, loadTileImages, selectedRoomId])
+  }, [applyPendingTileState, authorized, loadDashboard, loadDiceRequests, loadGuaranteeRequests, loadRoomEdges, loadRoomEvents, loadRoomTiles, loadSettlementRules, loadSiteImages, loadTileImages, selectedRoomId])
 
   useEffect(() => {
     if (!authorized) return
@@ -1083,6 +1138,10 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
     setEdgeTargetId('')
   }, [editorRound, selectedRoomId, roomTiles])
 
+  useEffect(() => {
+    setRoomNameDraft(selectedRoom?.name ?? '')
+  }, [selectedRoom?.id, selectedRoom?.name])
+
   async function runAdminAction(action: () => Promise<void>) {
     setBusy(true)
     setError('')
@@ -1109,7 +1168,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       }
       setAuthorized(true)
       setPassword('')
-      await Promise.all([loadDashboard(), loadConfigFavorites(), loadSiteContent()])
+      await Promise.all([loadDashboard(), loadConfigFavorites(), loadSiteContent(), loadSiteImages()])
     })
   }
 
@@ -1124,6 +1183,8 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       setRoomTiles([])
       setRoomEdges([])
       setConfigFavorites([])
+      setSiteImages([])
+      setSiteImageSlots([])
       setSelectedRoomId(null)
     })
   }
@@ -1138,6 +1199,83 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
       if (rpcError) throw rpcError
       setSiteContentDraft(content)
       setConfigNotice('首页主视觉文案已保存，刷新玩家页面即可看到最新内容')
+    })
+  }
+
+  function saveRoomName() {
+    if (!selectedRoom) return
+    void runAdminAction(async () => {
+      if (!supabase) return
+      const roomName = roomNameDraft.trim()
+      if (roomName.length < 1 || roomName.length > 24) throw new Error('房间名需要 1–24 个字符')
+      if (roomName === selectedRoom.name) return
+      const { error: rpcError } = await supabase.rpc('admin_update_room_name', {
+        p_room_id: selectedRoom.id,
+        p_room_name: roomName,
+      })
+      if (rpcError) throw rpcError
+      await Promise.all([loadDashboard(), loadRoomEvents(selectedRoom.id)])
+      setConfigNotice(`房间已重命名为“${roomName}”`)
+    })
+  }
+
+  function uploadSiteImage(file: File | undefined) {
+    if (!file) return
+    void runAdminAction(async () => {
+      if (!supabase) return
+      const { blob, width, height } = await prepareSiteImage(file)
+      const storagePath = `library/${crypto.randomUUID()}.webp`
+      const name = file.name.replace(/\.[^.]+$/, '').slice(0, 60) || '网站素材'
+      const { error: uploadError } = await supabase.storage.from('site-images').upload(storagePath, blob, {
+        contentType: 'image/webp',
+        cacheControl: '31536000',
+        upsert: false,
+      })
+      if (uploadError) throw uploadError
+      const publicUrl = supabase.storage.from('site-images').getPublicUrl(storagePath).data.publicUrl
+      const { error: createError } = await supabase.rpc('admin_create_site_image', {
+        p_name: name,
+        p_storage_path: storagePath,
+        p_public_url: publicUrl,
+        p_width: width,
+        p_height: height,
+        p_byte_size: blob.size,
+        p_mime_type: 'image/webp',
+      })
+      if (createError) {
+        await supabase.storage.from('site-images').remove([storagePath])
+        throw createError
+      }
+      await loadSiteImages()
+      setConfigNotice(`网站素材已上传并压缩至 ${(blob.size / 1024).toFixed(1)} KB`)
+    })
+    if (siteImageInputRef.current) siteImageInputRef.current.value = ''
+  }
+
+  function assignSiteImage(slot: SiteImageSlotKey, imageId: string | null) {
+    void runAdminAction(async () => {
+      if (!supabase) return
+      const { error: rpcError } = await supabase.rpc('admin_set_site_image_slot', {
+        p_slot: slot,
+        p_image_id: imageId,
+      })
+      if (rpcError) throw rpcError
+      await loadSiteImages()
+      const label = SITE_IMAGE_SLOTS.find((item) => item.key === slot)?.label ?? slot
+      setConfigNotice(`${label}${imageId ? '已更新' : '已清空'}`)
+    })
+  }
+
+  function deleteSiteImage(image: SiteImage) {
+    if (!window.confirm(`删除网站素材“${image.name}”？使用它的图片位会同时清空。`)) return
+    void runAdminAction(async () => {
+      if (!supabase) return
+      const { error: deleteError } = await supabase.rpc('admin_delete_site_image', { p_image_id: image.id })
+      if (deleteError) throw deleteError
+      const { error: storageError } = await supabase.storage.from('site-images').remove([image.storage_path])
+      if (storageError) throw storageError
+      await loadSiteImages()
+      setConfigNotice(`网站素材“${image.name}”已删除`)
     })
   }
 
@@ -2104,7 +2242,8 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
 
       {!authorized ? (
         <main className="admin-login-shell">
-          <section className="admin-login-copy">
+          <section className={`admin-login-copy ${visuals.admin_login ? 'has-site-art' : ''}`}>
+            {visuals.admin_login && <img alt="" className="site-hero-art" decoding="async" src={visuals.admin_login} />}
             <p className="eyebrow"><LockKeyhole size={14} /> 管理员控制台</p>
             <h1>管理房间与<br /><span>全部摇骰记录。</span></h1>
             <p>只有加入 Supabase 管理员白名单的账号可以登录。</p>
@@ -2221,12 +2360,55 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
               </div>
               <button className="button primary" disabled={busy} onClick={saveSiteContent} type="button"><Save size={17} /> 保存首页文案</button>
             </section>
+            <section className="admin-site-assets-panel" aria-labelledby="site-assets-title">
+              <div className="section-title">
+                <div>
+                  <p className="kicker">SITE MEDIA</p>
+                  <h2 id="site-assets-title">网站图片素材与展示位置</h2>
+                </div>
+                <button className="button secondary" disabled={busy} onClick={() => siteImageInputRef.current?.click()} type="button"><Plus size={17} /> 上传素材</button>
+                <input accept="image/jpeg,image/png,image/webp" className="visually-hidden" onChange={(event) => uploadSiteImage(event.currentTarget.files?.[0])} ref={siteImageInputRef} type="file" />
+              </div>
+              <p className="probability-note">素材上传一次即可重复使用。图片位只影响装饰区域，不会覆盖按钮、房间信息或操作面板。</p>
+              <div className="site-slot-grid">
+                {SITE_IMAGE_SLOTS.map((slot) => {
+                  const selectedImageId = siteImageSlots.find((item) => item.slot === slot.key)?.image_id ?? ''
+                  return (
+                    <label className="site-slot-editor" key={slot.key}>
+                      <span className="site-slot-preview">
+                        {configuredSiteVisuals[slot.key]
+                          ? <img alt="" decoding="async" src={configuredSiteVisuals[slot.key]} />
+                          : <Images aria-hidden="true" size={22} />}
+                      </span>
+                      <span><strong>{slot.label}</strong><small>{slot.help}</small></span>
+                      <select disabled={busy} onChange={(event) => assignSiteImage(slot.key, event.target.value || null)} value={selectedImageId ?? ''}>
+                        <option value="">不显示图片</option>
+                        {siteImages.map((image) => <option key={image.id} value={image.id}>{image.name}</option>)}
+                      </select>
+                    </label>
+                  )
+                })}
+              </div>
+              <div className="site-asset-library">
+                {siteImages.map((image) => (
+                  <article className="site-asset-item" key={image.id}>
+                    <img alt="" decoding="async" src={image.public_url} />
+                    <span><strong title={image.name}>{image.name}</strong><small>{image.width} × {image.height} · {(image.byte_size / 1024).toFixed(0)} KB</small></span>
+                    <button aria-label={`删除网站素材 ${image.name}`} disabled={busy} onClick={() => deleteSiteImage(image)} title="删除素材" type="button"><Trash2 size={14} /></button>
+                  </article>
+                ))}
+                {siteImages.length === 0 && <p className="admin-empty">还没有网站图片素材。</p>}
+              </div>
+            </section>
             {selectedRoom ? (
               <>
                 <div className="admin-detail-header">
                   <div>
                     <p className="kicker">SELECTED ROOM</p>
-                    <h2 className="admin-room-title">{selectedRoom.name}</h2>
+                    <div className="admin-room-name-editor">
+                      <input aria-label="房间名称" disabled={busy} maxLength={24} onChange={(event) => setRoomNameDraft(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && saveRoomName()} value={roomNameDraft} />
+                      <button aria-label="保存房间名称" disabled={busy || !roomNameDraft.trim() || roomNameDraft.trim() === selectedRoom.name} onClick={saveRoomName} title="保存房间名称" type="button"><Save size={16} /></button>
+                    </div>
                     <button className="admin-code" onClick={copyRoomCode} title="复制房间码" type="button">
                       {selectedRoom.code} {codeCopied ? <><Check size={17} /><small>已复制</small></> : <Clipboard size={17} />}
                     </button>
@@ -2628,12 +2810,14 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
 function LobbyView({
   snapshot,
   busy,
+  roomHeaderImage,
   onReady,
   onProfileUpdate,
   onStart,
 }: {
   snapshot: GameSnapshot
   busy: boolean
+  roomHeaderImage?: string
   onReady: () => void
   onProfileUpdate: (nickname: string, role: PlayerRole) => void
   onStart: () => void
@@ -2657,7 +2841,7 @@ function LobbyView({
 
   return (
     <div className="app-shell">
-      <RoomHeader snapshot={snapshot} />
+      <RoomHeader imageUrl={roomHeaderImage} snapshot={snapshot} />
       <main className="lobby-layout">
         <section className="lobby-intro">
           <p className="eyebrow"><Radio size={14} /> 集结阶段</p>
@@ -3308,6 +3492,7 @@ const Board = memo(function Board({
 function GameView({
   snapshot,
   busy,
+  roomHeaderImage,
   dice,
   onRoll,
   onChooseRoute,
@@ -3323,6 +3508,7 @@ function GameView({
 }: {
   snapshot: GameSnapshot
   busy: boolean
+  roomHeaderImage?: string
   dice: number | null
   onRoll: () => void
   onChooseRoute: (route: RouteOption) => void
@@ -3394,7 +3580,7 @@ function GameView({
 
   return (
     <div className="app-shell game-shell">
-      <RoomHeader snapshot={snapshot} />
+      <RoomHeader imageUrl={roomHeaderImage} snapshot={snapshot} />
       <main className="game-layout">
         <section className="board-section">
           <div className="turn-strip">
@@ -3569,12 +3755,23 @@ export default function App() {
   const [showAdmin, setShowAdmin] = useState(false)
   const [snapshot, setSnapshot] = useState<GameSnapshot | null>(null)
   const [siteContent, setSiteContent] = useState<SiteContent>(DEFAULT_SITE_CONTENT)
+  const [siteVisuals, setSiteVisuals] = useState<SiteVisuals>({})
   const [busy, setBusy] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [dice, setDice] = useState<number | null>(null)
   const [diceAnimation, setDiceAnimation] = useState<DiceAnimationState | null>(null)
   const deferRoomUpdatesRef = useRef(false)
+
+  const loadPublicSiteImages = useCallback(async () => {
+    if (!supabase) return
+    const [imagesResult, slotsResult] = await Promise.all([
+      supabase.from('site_images').select('*'),
+      supabase.from('site_image_slots').select('*'),
+    ])
+    if (imagesResult.error || slotsResult.error) return
+    setSiteVisuals(buildSiteVisuals(imagesResult.data as SiteImage[], slotsResult.data as SiteImageSlot[]))
+  }, [])
 
   useEffect(() => {
     if (!supabase) return
@@ -3584,7 +3781,8 @@ export default function App() {
       .eq('id', 'global')
       .maybeSingle()
       .then(({ data }) => setSiteContent(normalizeSiteContent(data as Partial<SiteContent> | null)))
-  }, [])
+    void loadPublicSiteImages()
+  }, [loadPublicSiteImages])
 
   useEffect(() => {
     if (!supabase) return
@@ -3594,9 +3792,11 @@ export default function App() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'site_content', filter: 'id=eq.global' }, (payload) => {
         setSiteContent(normalizeSiteContent(payload.new as Partial<SiteContent>))
       })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'site_images' }, () => void loadPublicSiteImages())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'site_image_slots' }, () => void loadPublicSiteImages())
       .subscribe()
     return () => { void client.removeChannel(channel) }
-  }, [])
+  }, [loadPublicSiteImages])
 
   const refreshRoom = useCallback(async (roomId: string, userId: string) => {
     try {
@@ -3949,16 +4149,17 @@ export default function App() {
   }
 
   if (showAdmin && !snapshot) {
-    return <AdminPanel onBack={() => setShowAdmin(false)} />
+    return <AdminPanel onBack={() => setShowAdmin(false)} visuals={siteVisuals} />
   }
 
   return (
     <>
-      {!snapshot && !selectedMode && <ModeHub onSelect={() => setSelectedMode('monopoly')} />}
+      {!snapshot && !selectedMode && <ModeHub onSelect={() => setSelectedMode('monopoly')} visuals={siteVisuals} />}
       {!snapshot && selectedMode === 'monopoly' && (
         <MonopolyEntry
           busy={busy}
           content={siteContent}
+          visuals={siteVisuals}
           onBack={() => setSelectedMode(null)}
           onAdmin={() => setShowAdmin(true)}
           onDemo={createDemo}
@@ -3966,10 +4167,10 @@ export default function App() {
         />
       )}
       {snapshot?.room.status === 'lobby' && (
-        <LobbyView busy={busy} onProfileUpdate={updateLobbyProfile} onReady={toggleReady} onStart={startGame} snapshot={snapshot} />
+        <LobbyView busy={busy} onProfileUpdate={updateLobbyProfile} onReady={toggleReady} onStart={startGame} roomHeaderImage={siteVisuals.room_header} snapshot={snapshot} />
       )}
       {snapshot && snapshot.room.status !== 'lobby' && (
-        <GameView busy={busy} dice={dice} onAddDemoDice={addDemoDice} onApproveDiceRequest={approveDiceRequest} onApproveGuaranteeRequest={approveGuaranteeRequest} onChooseRoute={chooseRoute} onCreateDiceRequest={createDiceRequest} onCreateGuaranteeRequest={createGuaranteeRequest} onExit={exitRoom} onRejectDiceRequest={rejectDiceRequest} onRejectGuaranteeRequest={rejectGuaranteeRequest} onRestart={restartDemo} onRoll={rollDice} snapshot={snapshot} />
+        <GameView busy={busy} dice={dice} onAddDemoDice={addDemoDice} onApproveDiceRequest={approveDiceRequest} onApproveGuaranteeRequest={approveGuaranteeRequest} onChooseRoute={chooseRoute} onCreateDiceRequest={createDiceRequest} onCreateGuaranteeRequest={createGuaranteeRequest} onExit={exitRoom} onRejectDiceRequest={rejectDiceRequest} onRejectGuaranteeRequest={rejectGuaranteeRequest} onRestart={restartDemo} onRoll={rollDice} roomHeaderImage={siteVisuals.room_header} snapshot={snapshot} />
       )}
       {diceAnimation && <DiceRollOverlay state={diceAnimation} />}
       {error && (
