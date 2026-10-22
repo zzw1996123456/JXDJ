@@ -3750,6 +3750,9 @@ function GameView({
               {snapshot.events.slice(0, 8).map((event) => (
                 <div className="event-row" key={event.id}>
                   <span />
+                  <time dateTime={event.created_at} title={new Date(event.created_at).toLocaleString('zh-CN')}>
+                    {new Date(event.created_at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })}
+                  </time>
                   <p>{event.message}</p>
                 </div>
               ))}

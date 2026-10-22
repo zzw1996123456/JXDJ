@@ -2706,8 +2706,15 @@ button.mode-card {
 .game-sidebar {
   min-height: 0;
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto auto minmax(0, 1fr);
   gap: 12px;
+}
+
+.game-sidebar > .log-panel {
+  min-height: 0;
+  grid-row: -2 / -1;
+  display: flex;
+  flex-direction: column;
 }
 
 .dice-panel,
@@ -2887,31 +2894,44 @@ button.mode-card {
 }
 
 .event-list {
+  min-height: 0;
+  flex: 1 1 auto;
   overflow-y: auto;
-  max-height: 100%;
+  max-height: none;
 }
 
 .event-row {
   display: grid;
-  grid-template-columns: 7px 1fr;
-  gap: 9px;
+  grid-template-columns: 7px minmax(0, 1fr);
+  column-gap: 9px;
+  row-gap: 3px;
   border-top: 1px solid #30352c;
-  padding: 9px 0;
+  padding: 10px 0 11px;
 }
 
 .event-row > span {
+  grid-row: 1 / span 2;
   width: 5px;
   height: 5px;
-  margin-top: 6px;
+  margin-top: 4px;
   border-radius: 50%;
   background: var(--acid);
 }
 
+.event-row time {
+  grid-column: 2;
+  color: #858e81;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.25;
+}
+
 .event-row p {
+  grid-column: 2;
   margin: 0;
   color: #aeb5a6;
-  font-size: 10px;
-  line-height: 1.55;
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .modal-backdrop {
@@ -3159,7 +3179,11 @@ button.mode-card {
 
   .game-sidebar {
     grid-template-columns: 1fr 1fr;
-    grid-template-rows: auto auto;
+    grid-template-rows: auto;
+  }
+
+  .game-sidebar > .log-panel {
+    grid-row: auto;
   }
 
   .dice-panel {
