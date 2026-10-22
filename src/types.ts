@@ -92,6 +92,31 @@ export interface RoomTileImage {
   created_at: string
 }
 
+export interface TilePresetCategory {
+  id: string
+  name: string
+  sort_order: number
+  created_at: string
+  updated_at: string
+}
+
+export interface TilePreset {
+  id: string
+  category_id: string | null
+  name: string
+  tile_name: string
+  short_name: string
+  tile_type: Exclude<TileType, 'start'>
+  detail: string
+  effect_type: TileEffect
+  effect_value: number
+  tile_color: string | null
+  image_id: string | null
+  is_randomized: boolean
+  created_at: string
+  updated_at: string
+}
+
 export interface SiteImage {
   id: string
   name: string

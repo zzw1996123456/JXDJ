@@ -1617,6 +1617,394 @@ end $$;
 
 select pg_notify('pgrst', 'reload schema');
 
+        -- 2026-10: odd board sizes, batch tile deletion, and reusable global tile presets.
+        -- These idempotent additions let the functions below compile before later historical upgrades reapply their final defaults and constraints.
+        alter table public.rooms add column if not exists total_rounds integer not null default 3;
+        alter table public.rooms add column if not exists round_board_sizes jsonb;
+        alter table public.rooms add column if not exists imported_config boolean not null default false;
+        alter table public.room_tiles add column if not exists tile_color text;
+        alter table public.room_tiles add column if not exists is_randomized boolean not null default true;
+        alter table public.room_tiles add column if not exists layout_x numeric;
+        alter table public.room_tiles add column if not exists layout_y numeric;
+        alter table public.room_tiles add column if not exists image_id uuid;
+        alter table public.room_tiles add column if not exists image_url text;
+        alter table public.rooms drop constraint if exists rooms_round1_board_size_check;
+        alter table public.rooms add constraint rooms_round1_board_size_check check (round1_board_size between 2 and 100);
+        alter table public.rooms drop constraint if exists rooms_round2_board_size_check;
+        alter table public.rooms add constraint rooms_round2_board_size_check check (round2_board_size between 2 and 100);
+        alter table public.rooms drop constraint if exists rooms_round3_board_size_check;
+        alter table public.rooms add constraint rooms_round3_board_size_check check (round3_board_size between 2 and 100);
+
+        create table if not exists public.tile_preset_categories (
+          id uuid primary key default gen_random_uuid(),
+          name text not null unique check (char_length(trim(name)) between 1 and 30),
+          sort_order integer not null default 0,
+          created_at timestamptz not null default now(),
+          updated_at timestamptz not null default now()
+        );
+
+        create table if not exists public.tile_presets (
+          id uuid primary key default gen_random_uuid(),
+          category_id uuid references public.tile_preset_categories(id) on delete set null,
+          name text not null check (char_length(trim(name)) between 1 and 60),
+          tile_name text not null check (char_length(trim(tile_name)) between 1 and 40),
+          short_name text not null check (char_length(trim(short_name)) between 1 and 16),
+          tile_type text not null check (tile_type in ('shared','boss','runner','empty','move','chance')),
+          detail text not null check (char_length(trim(detail)) between 1 and 160),
+          effect_type text not null check (effect_type in ('none','guarantee_add','guarantee_subtract','guarantee_multiply','guarantee_divide','move','skip','extra_roll','lose_roll','advance_chance','advance_round','finish')),
+          effect_value numeric not null default 0,
+          tile_color text check (tile_color is null or tile_color ~ '^#[0-9A-Fa-f]{6}$'),
+          image_id uuid,
+          is_randomized boolean not null default false,
+          created_at timestamptz not null default now(),
+          updated_at timestamptz not null default now()
+        );
+
+        alter table public.tile_presets add column if not exists tile_name text;
+        update public.tile_presets set tile_name = name where tile_name is null;
+        alter table public.tile_presets alter column tile_name set not null;
+
+        create index if not exists tile_presets_category_idx on public.tile_presets(category_id);
+        alter table public.tile_preset_categories enable row level security;
+        alter table public.tile_presets enable row level security;
+        drop policy if exists "admins can read tile preset categories" on public.tile_preset_categories;
+        create policy "admins can read tile preset categories" on public.tile_preset_categories for select to authenticated using (public.is_admin());
+        drop policy if exists "admins can read tile presets" on public.tile_presets;
+        create policy "admins can read tile presets" on public.tile_presets for select to authenticated using (public.is_admin());
+        grant select on public.tile_preset_categories to authenticated;
+        grant select on public.tile_presets to authenticated;
+
+        create or replace function public.admin_create_tile_preset_category(p_name text)
+        returns uuid language plpgsql security definer set search_path = public
+        as $$
+        declare v_id uuid;
+        begin
+          if not public.is_admin() then raise exception '只有管理员可以管理格子预设'; end if;
+          if char_length(trim(p_name)) not between 1 and 30 then raise exception '分类名称需要 1 到 30 个字符'; end if;
+          insert into public.tile_preset_categories(name) values (trim(p_name)) returning id into v_id;
+          return v_id;
+        end;
+        $$;
+
+        create or replace function public.admin_rename_tile_preset_category(p_category_id uuid, p_name text)
+        returns void language plpgsql security definer set search_path = public
+        as $$
+        begin
+          if not public.is_admin() then raise exception '只有管理员可以管理格子预设'; end if;
+          if char_length(trim(p_name)) not between 1 and 30 then raise exception '分类名称需要 1 到 30 个字符'; end if;
+          update public.tile_preset_categories set name = trim(p_name), updated_at = now() where id = p_category_id;
+          if not found then raise exception '预设分类不存在'; end if;
+        end;
+        $$;
+
+        create or replace function public.admin_delete_tile_preset_category(p_category_id uuid)
+        returns void language plpgsql security definer set search_path = public
+        as $$
+        begin
+          if not public.is_admin() then raise exception '只有管理员可以管理格子预设'; end if;
+          delete from public.tile_preset_categories where id = p_category_id;
+          if not found then raise exception '预设分类不存在'; end if;
+        end;
+        $$;
+
+        create or replace function public.admin_save_tile_preset(p_tile_id uuid, p_name text, p_category_id uuid)
+        returns uuid language plpgsql security definer set search_path = public
+        as $$
+        declare v_tile public.room_tiles%rowtype; v_id uuid;
+        begin
+          if not public.is_admin() then raise exception '只有管理员可以管理格子预设'; end if;
+          if char_length(trim(p_name)) not between 1 and 60 then raise exception '预设名称需要 1 到 60 个字符'; end if;
+          if p_category_id is not null and not exists (select 1 from public.tile_preset_categories where id = p_category_id) then raise exception '预设分类不存在'; end if;
+          select tile.* into v_tile from public.room_tiles tile join public.rooms room on room.id = tile.room_id
+          where tile.id = p_tile_id and room.status = 'lobby';
+          if not found or v_tile.tile_type = 'start' then raise exception '只能保存等待中房间的普通格子'; end if;
+          insert into public.tile_presets(category_id, name, tile_name, short_name, tile_type, detail, effect_type, effect_value, tile_color, image_id, is_randomized)
+          values (p_category_id, trim(p_name), v_tile.name, v_tile.short_name, v_tile.tile_type, v_tile.detail, v_tile.effect_type, v_tile.effect_value, v_tile.tile_color, v_tile.image_id, v_tile.is_randomized)
+          returning id into v_id;
+          return v_id;
+        end;
+        $$;
+
+        create or replace function public.admin_update_tile_preset(p_preset_id uuid, p_name text, p_category_id uuid)
+        returns void language plpgsql security definer set search_path = public
+        as $$
+        begin
+          if not public.is_admin() then raise exception '只有管理员可以管理格子预设'; end if;
+          if char_length(trim(p_name)) not between 1 and 60 then raise exception '预设名称需要 1 到 60 个字符'; end if;
+          if p_category_id is not null and not exists (select 1 from public.tile_preset_categories where id = p_category_id) then raise exception '预设分类不存在'; end if;
+          update public.tile_presets set category_id = p_category_id, name = trim(p_name), updated_at = now() where id = p_preset_id;
+          if not found then raise exception '格子预设不存在'; end if;
+        end;
+        $$;
+
+        create or replace function public.admin_save_tile_presets(p_tile_ids uuid[], p_category_id uuid)
+        returns integer language plpgsql security definer set search_path = public
+        as $$
+        declare v_ids uuid[]; v_count integer;
+        begin
+          if not public.is_admin() then raise exception '只有管理员可以管理格子预设'; end if;
+          if p_category_id is not null and not exists (select 1 from public.tile_preset_categories where id = p_category_id) then raise exception '预设分类不存在'; end if;
+          select array_agg(distinct requested.id) into v_ids from unnest(p_tile_ids) as requested(id) where requested.id is not null;
+          if coalesce(cardinality(v_ids), 0) = 0 then raise exception '请至少选择一个格子'; end if;
+          select count(*) into v_count from public.room_tiles tile join public.rooms room on room.id = tile.room_id
+          where tile.id = any(v_ids) and tile.tile_type <> 'start' and room.status = 'lobby';
+          if v_count <> cardinality(v_ids) then raise exception '只能保存等待中房间的普通格子'; end if;
+          insert into public.tile_presets(category_id, name, tile_name, short_name, tile_type, detail, effect_type, effect_value, tile_color, image_id, is_randomized)
+          select p_category_id, tile.name, tile.name, tile.short_name, tile.tile_type, tile.detail, tile.effect_type,
+            tile.effect_value, tile.tile_color, tile.image_id, tile.is_randomized
+          from public.room_tiles tile where tile.id = any(v_ids);
+          return v_count;
+        end;
+        $$;
+
+        create or replace function public.admin_replace_tile_preset_from_tile(p_preset_id uuid, p_tile_id uuid)
+        returns void language plpgsql security definer set search_path = public
+        as $$
+        declare v_tile public.room_tiles%rowtype;
+        begin
+          if not public.is_admin() then raise exception '只有管理员可以管理格子预设'; end if;
+          select tile.* into v_tile from public.room_tiles tile join public.rooms room on room.id = tile.room_id
+          where tile.id = p_tile_id and room.status = 'lobby';
+          if not found or v_tile.tile_type = 'start' then raise exception '只能使用等待中房间的普通格子'; end if;
+          update public.tile_presets set tile_name = v_tile.name, short_name = v_tile.short_name, tile_type = v_tile.tile_type,
+            detail = v_tile.detail, effect_type = v_tile.effect_type, effect_value = v_tile.effect_value,
+            tile_color = v_tile.tile_color, image_id = v_tile.image_id, is_randomized = v_tile.is_randomized,
+            updated_at = now()
+          where id = p_preset_id;
+          if not found then raise exception '格子预设不存在'; end if;
+        end;
+        $$;
+
+        create or replace function public.admin_copy_tile_preset(p_preset_id uuid)
+        returns uuid language plpgsql security definer set search_path = public
+        as $$
+        declare v_id uuid;
+        begin
+          if not public.is_admin() then raise exception '只有管理员可以管理格子预设'; end if;
+          insert into public.tile_presets(category_id, name, tile_name, short_name, tile_type, detail, effect_type, effect_value, tile_color, image_id, is_randomized)
+          select category_id, left(name || ' 副本', 60), tile_name, short_name, tile_type, detail, effect_type, effect_value, tile_color, image_id, is_randomized
+          from public.tile_presets where id = p_preset_id returning id into v_id;
+          if v_id is null then raise exception '格子预设不存在'; end if;
+          return v_id;
+        end;
+        $$;
+
+        create or replace function public.admin_delete_tile_preset(p_preset_id uuid)
+        returns void language plpgsql security definer set search_path = public
+        as $$
+        begin
+          if not public.is_admin() then raise exception '只有管理员可以管理格子预设'; end if;
+          delete from public.tile_presets where id = p_preset_id;
+          if not found then raise exception '格子预设不存在'; end if;
+        end;
+        $$;
+
+        create or replace function public.admin_create_room_tile(
+          p_room_id uuid, p_round integer, p_preset_id uuid,
+          p_layout_x numeric, p_layout_y numeric, p_insert_edge_id uuid,
+          p_link_from_tile_id uuid, p_is_bidirectional boolean
+        ) returns uuid language plpgsql security definer set search_path = public
+        as $$
+        declare
+          v_room public.rooms%rowtype;
+          v_preset public.tile_presets%rowtype;
+          v_edge_from uuid;
+          v_edge_to uuid;
+          v_edge_bidirectional boolean;
+          v_size integer;
+          v_id uuid;
+        begin
+          if not public.is_admin() then raise exception '只有管理员可以添加格子'; end if;
+          if p_layout_x not between -100000 and 100000 or p_layout_y not between -100000 and 100000 then raise exception '格子坐标无效'; end if;
+          if p_insert_edge_id is not null and p_link_from_tile_id is not null then raise exception '一次只能选择一种连接方式'; end if;
+          select * into v_room from public.rooms where id = p_room_id and status = 'lobby' for update;
+          if not found then raise exception '只能编辑等待中的房间'; end if;
+          if p_round not between 1 and v_room.total_rounds then raise exception '轮次无效'; end if;
+          v_size := (v_room.round_board_sizes ->> (p_round - 1))::integer;
+          if v_size >= 100 then raise exception '每轮最多 100 格'; end if;
+
+          if p_preset_id is not null then
+            select * into v_preset from public.tile_presets where id = p_preset_id;
+            if not found then raise exception '格子预设不存在'; end if;
+            if v_preset.effect_type in ('advance_chance','advance_round') and p_round = v_room.total_rounds then raise exception '最终轮不能放置晋级格'; end if;
+            if v_preset.effect_type = 'finish' and p_round <> v_room.total_rounds then raise exception '结束格只能放在最终轮'; end if;
+          end if;
+
+          insert into public.room_tiles(room_id, round_number, position, name, short_name, tile_type, detail,
+            effect_type, effect_value, tile_color, is_randomized, layout_x, layout_y, image_id, image_url)
+          values (
+            p_room_id, p_round, v_size,
+            case when p_preset_id is null then '空格' else v_preset.tile_name end,
+            case when p_preset_id is null then '空格' else v_preset.short_name end,
+            case when p_preset_id is null then 'empty' else v_preset.tile_type end,
+            case when p_preset_id is null then '平安经过，本格不触发额外效果' else v_preset.detail end,
+            case when p_preset_id is null then 'none' else v_preset.effect_type end,
+            case when p_preset_id is null then 0 else v_preset.effect_value end,
+            case when p_preset_id is null then null else v_preset.tile_color end,
+            case when p_preset_id is null then true else v_preset.is_randomized end,
+            p_layout_x, p_layout_y,
+            case when p_preset_id is null then null else v_preset.image_id end,
+            case when p_preset_id is null then null else (select public_url from public.room_tile_images where id = v_preset.image_id) end
+          ) returning id into v_id;
+
+          if p_insert_edge_id is not null then
+            select from_tile_id, to_tile_id, is_bidirectional into v_edge_from, v_edge_to, v_edge_bidirectional
+            from public.room_tile_edges where id = p_insert_edge_id and room_id = p_room_id and round_number = p_round;
+            if not found then raise exception '要插入的路线不存在'; end if;
+            delete from public.room_tile_edges where id = p_insert_edge_id;
+            insert into public.room_tile_edges(room_id, round_number, from_tile_id, to_tile_id, is_bidirectional)
+            values (p_room_id, p_round, v_edge_from, v_id, v_edge_bidirectional),
+              (p_room_id, p_round, v_id, v_edge_to, v_edge_bidirectional);
+          elsif p_link_from_tile_id is not null then
+            if not exists (select 1 from public.room_tiles where id = p_link_from_tile_id and room_id = p_room_id and round_number = p_round) then raise exception '连接起点不存在'; end if;
+            if (select count(*) from public.room_tile_edges where from_tile_id = p_link_from_tile_id or (is_bidirectional and to_tile_id = p_link_from_tile_id)) >= 4 then raise exception '连接起点已有 4 个出口'; end if;
+            insert into public.room_tile_edges(room_id, round_number, from_tile_id, to_tile_id, is_bidirectional)
+            values (p_room_id, p_round, p_link_from_tile_id, v_id, coalesce(p_is_bidirectional, false));
+          end if;
+
+          update public.rooms set
+            round_board_sizes = jsonb_set(round_board_sizes, array[(p_round - 1)::text], to_jsonb(v_size + 1)),
+            round1_board_size = case when p_round = 1 then v_size + 1 else round1_board_size end,
+            round2_board_size = case when p_round = 2 then v_size + 1 else round2_board_size end,
+            round3_board_size = case when p_round = 3 then v_size + 1 else round3_board_size end,
+            board_size = case when p_round = 1 then v_size + 1 else board_size end,
+            imported_config = true
+          where id = p_room_id;
+          insert into public.game_events(room_id, message) values (p_room_id, '管理员在第' || p_round || '轮添加了 1 个格子');
+          return v_id;
+        end;
+        $$;
+
+        create or replace function public.admin_delete_room_tiles(p_tile_ids uuid[])
+        returns void language plpgsql security definer set search_path = public
+        as $$
+        declare
+          v_ids uuid[];
+          v_tile public.room_tiles%rowtype;
+          v_room public.rooms%rowtype;
+          v_size integer;
+          v_delete_count integer;
+          v_item record;
+          v_position integer := 0;
+        begin
+          if not public.is_admin() then raise exception '只有管理员可以删除格子'; end if;
+          select array_agg(distinct requested.id) into v_ids from unnest(p_tile_ids) as requested(id) where requested.id is not null;
+          if coalesce(cardinality(v_ids), 0) = 0 then raise exception '请至少选择一个格子'; end if;
+          select * into v_tile from public.room_tiles where id = v_ids[1];
+          if not found then raise exception '所选格子不存在'; end if;
+          select * into v_room from public.rooms where id = v_tile.room_id and status = 'lobby' for update;
+          if not found then raise exception '只能编辑等待中的房间'; end if;
+          select count(*) into v_delete_count from public.room_tiles
+          where id = any(v_ids) and room_id = v_tile.room_id and round_number = v_tile.round_number and tile_type <> 'start';
+          if v_delete_count <> cardinality(v_ids) then raise exception '只能同时删除同一轮的普通格子'; end if;
+          v_size := (v_room.round_board_sizes ->> (v_tile.round_number - 1))::integer;
+          if v_size - v_delete_count < 2 then raise exception '每轮至少保留 2 个格子'; end if;
+
+          with recursive directed(from_id, to_id) as (
+            select from_tile_id, to_tile_id from public.room_tile_edges where room_id = v_tile.room_id and round_number = v_tile.round_number
+            union
+            select to_tile_id, from_tile_id from public.room_tile_edges where room_id = v_tile.room_id and round_number = v_tile.round_number and is_bidirectional
+          ), walk(start_id, current_id, path) as (
+            select edge.from_id, edge.to_id, array[edge.from_id, edge.to_id]::uuid[]
+            from directed edge where edge.from_id <> all(v_ids) and edge.to_id = any(v_ids)
+            union all
+            select walk.start_id, edge.to_id, walk.path || edge.to_id
+            from walk join directed edge on edge.from_id = walk.current_id
+            where walk.current_id = any(v_ids) and edge.to_id <> all(walk.path)
+          ), bridges as (
+            select distinct start_id, current_id from walk
+            where current_id <> all(v_ids) and start_id <> current_id
+          )
+          insert into public.room_tile_edges(room_id, round_number, from_tile_id, to_tile_id, is_bidirectional)
+          select v_tile.room_id, v_tile.round_number, start_id, current_id, false from bridges
+          on conflict (from_tile_id, to_tile_id) do nothing;
+
+          delete from public.room_tiles where id = any(v_ids);
+          if exists (
+            with exits as (
+              select from_tile_id as tile_id from public.room_tile_edges where room_id = v_tile.room_id and round_number = v_tile.round_number
+              union all
+              select to_tile_id from public.room_tile_edges where room_id = v_tile.room_id and round_number = v_tile.round_number and is_bidirectional
+            ) select 1 from exits group by tile_id having count(*) > 4
+          ) then raise exception '删除后自动衔接会使某个格子超过 4 个出口，请先调整路线'; end if;
+
+          for v_item in select id from public.room_tiles where room_id = v_tile.room_id and round_number = v_tile.round_number order by position loop
+            update public.room_tiles set position = v_position where id = v_item.id;
+            v_position := v_position + 1;
+          end loop;
+          update public.rooms set
+            round_board_sizes = jsonb_set(round_board_sizes, array[(v_tile.round_number - 1)::text], to_jsonb(v_size - v_delete_count)),
+            round1_board_size = case when v_tile.round_number = 1 then v_size - v_delete_count else round1_board_size end,
+            round2_board_size = case when v_tile.round_number = 2 then v_size - v_delete_count else round2_board_size end,
+            round3_board_size = case when v_tile.round_number = 3 then v_size - v_delete_count else round3_board_size end,
+            board_size = case when v_tile.round_number = 1 then v_size - v_delete_count else board_size end
+          where id = v_tile.room_id;
+          insert into public.game_events(room_id, message)
+          values (v_tile.room_id, '管理员在第' || v_tile.round_number || '轮删除了 ' || v_delete_count || ' 个格子');
+        end;
+        $$;
+
+        create or replace function public.admin_delete_room_tile_pair(p_tile_id uuid)
+        returns void language plpgsql security definer set search_path = public
+        as $$ begin perform public.admin_delete_room_tiles(array[p_tile_id]); end; $$;
+
+        create or replace function public.validate_graph_before_start()
+        returns trigger language plpgsql security definer set search_path = public
+        as $$
+        declare v_round integer; v_tile record;
+        begin
+          if old.status = 'lobby' and new.status = 'playing' then
+            for v_round in 1..new.total_rounds loop
+              perform public.ensure_room_edges_internal(new.id, v_round);
+              if v_round < new.total_rounds and not exists (
+                select 1 from public.room_tiles where room_id = new.id and round_number = v_round and effect_type in ('advance_chance','advance_round')
+              ) then raise exception '第 % 轮至少需要一个晋级格', v_round; end if;
+              if v_round = new.total_rounds and not exists (
+                select 1 from public.room_tiles where room_id = new.id and round_number = v_round and effect_type = 'finish'
+              ) then raise exception '最终轮至少需要一个结束格'; end if;
+              for v_tile in select id, position from public.room_tiles where room_id = new.id and round_number = v_round loop
+                if not exists (
+                  select 1 from public.room_tile_edges edge where edge.room_id = new.id and edge.round_number = v_round
+                    and (edge.from_tile_id = v_tile.id or (edge.is_bidirectional and edge.to_tile_id = v_tile.id))
+                ) then raise exception '第 % 轮第 % 格没有出口路线', v_round, v_tile.position + 1; end if;
+              end loop;
+            end loop;
+          end if;
+          return new;
+        end;
+        $$;
+
+        revoke all on function public.admin_create_tile_preset_category(text) from public;
+        revoke all on function public.admin_rename_tile_preset_category(uuid, text) from public;
+        revoke all on function public.admin_delete_tile_preset_category(uuid) from public;
+        revoke all on function public.admin_save_tile_preset(uuid, text, uuid) from public;
+        revoke all on function public.admin_update_tile_preset(uuid, text, uuid) from public;
+        revoke all on function public.admin_save_tile_presets(uuid[], uuid) from public;
+        revoke all on function public.admin_replace_tile_preset_from_tile(uuid, uuid) from public;
+        revoke all on function public.admin_copy_tile_preset(uuid) from public;
+        revoke all on function public.admin_delete_tile_preset(uuid) from public;
+        revoke all on function public.admin_create_room_tile(uuid, integer, uuid, numeric, numeric, uuid, uuid, boolean) from public;
+        revoke all on function public.admin_delete_room_tiles(uuid[]) from public;
+        grant execute on function public.admin_create_tile_preset_category(text) to authenticated;
+        grant execute on function public.admin_rename_tile_preset_category(uuid, text) to authenticated;
+        grant execute on function public.admin_delete_tile_preset_category(uuid) to authenticated;
+        grant execute on function public.admin_save_tile_preset(uuid, text, uuid) to authenticated;
+        grant execute on function public.admin_update_tile_preset(uuid, text, uuid) to authenticated;
+        grant execute on function public.admin_save_tile_presets(uuid[], uuid) to authenticated;
+        grant execute on function public.admin_replace_tile_preset_from_tile(uuid, uuid) to authenticated;
+        grant execute on function public.admin_copy_tile_preset(uuid) to authenticated;
+        grant execute on function public.admin_delete_tile_preset(uuid) to authenticated;
+        grant execute on function public.admin_create_room_tile(uuid, integer, uuid, numeric, numeric, uuid, uuid, boolean) to authenticated;
+        grant execute on function public.admin_delete_room_tiles(uuid[]) to authenticated;
+
+        do $$
+        begin
+          begin alter publication supabase_realtime add table public.tile_preset_categories; exception when duplicate_object then null; end;
+          begin alter publication supabase_realtime add table public.tile_presets; exception when duplicate_object then null; end;
+        end $$;
+
+        select pg_notify('pgrst', 'reload schema');
+
 
 
 
@@ -2467,11 +2855,11 @@ alter table public.rooms add constraint rooms_total_rounds_check check (total_ro
 alter table public.rooms drop constraint if exists rooms_current_round_check;
 alter table public.rooms add constraint rooms_current_round_check check (current_round between 1 and 10);
 alter table public.rooms drop constraint if exists rooms_round1_board_size_check;
-alter table public.rooms add constraint rooms_round1_board_size_check check (round1_board_size between 2 and 100 and mod(round1_board_size, 2) = 0);
+        alter table public.rooms add constraint rooms_round1_board_size_check check (round1_board_size between 2 and 100);
 alter table public.rooms drop constraint if exists rooms_round2_board_size_check;
-alter table public.rooms add constraint rooms_round2_board_size_check check (round2_board_size between 2 and 100 and mod(round2_board_size, 2) = 0);
+        alter table public.rooms add constraint rooms_round2_board_size_check check (round2_board_size between 2 and 100);
 alter table public.rooms drop constraint if exists rooms_round3_board_size_check;
-alter table public.rooms add constraint rooms_round3_board_size_check check (round3_board_size between 2 and 100 and mod(round3_board_size, 2) = 0);
+        alter table public.rooms add constraint rooms_round3_board_size_check check (round3_board_size between 2 and 100);
 alter table public.rooms drop constraint if exists rooms_round_board_sizes_check;
 alter table public.rooms add constraint rooms_round_board_sizes_check
   check (jsonb_typeof(round_board_sizes) = 'array' and jsonb_array_length(round_board_sizes) = 10);
@@ -2492,8 +2880,8 @@ language plpgsql security definer set search_path = public
 as $$
 begin
   if p_round not between 1 and 10 then raise exception '轮次必须在 1 到 10 之间'; end if;
-  if p_board_size not between 2 and 100 or mod(p_board_size, 2) <> 0 then
-    raise exception '每轮格子数必须是 2 到 100 之间的偶数';
+          if p_board_size not between 2 and 100 then
+            raise exception '每轮格子数必须是 2 到 100 之间的整数';
   end if;
 
   delete from public.room_tiles where room_id = p_room_id and round_number = p_round;
@@ -2647,8 +3035,8 @@ begin
   from jsonb_array_elements_text(p_round_sizes) with ordinality as sizes(value, ordinal);
   if exists (
     select 1 from unnest(v_sizes[1:p_total_rounds]) as sizes(value)
-    where value not between 2 and 100 or mod(value, 2) <> 0
-  ) then raise exception '每轮格子数必须是 2 到 100 之间的偶数'; end if;
+            where value not between 2 and 100
+          ) then raise exception '每轮格子数必须是 2 到 100 之间的整数'; end if;
 
   update public.rooms set
     total_rounds = p_total_rounds,
@@ -2721,11 +3109,11 @@ alter table public.rooms add column if not exists imported_config boolean not nu
 alter table public.rooms drop constraint if exists rooms_total_rounds_check;
 alter table public.rooms add constraint rooms_total_rounds_check check (total_rounds between 1 and 10);
 alter table public.rooms drop constraint if exists rooms_round1_board_size_check;
-alter table public.rooms add constraint rooms_round1_board_size_check check (round1_board_size between 2 and 100 and mod(round1_board_size, 2) = 0);
+        alter table public.rooms add constraint rooms_round1_board_size_check check (round1_board_size between 2 and 100);
 alter table public.rooms drop constraint if exists rooms_round2_board_size_check;
-alter table public.rooms add constraint rooms_round2_board_size_check check (round2_board_size between 2 and 100 and mod(round2_board_size, 2) = 0);
+        alter table public.rooms add constraint rooms_round2_board_size_check check (round2_board_size between 2 and 100);
 alter table public.rooms drop constraint if exists rooms_round3_board_size_check;
-alter table public.rooms add constraint rooms_round3_board_size_check check (round3_board_size between 2 and 100 and mod(round3_board_size, 2) = 0);
+        alter table public.rooms add constraint rooms_round3_board_size_check check (round3_board_size between 2 and 100);
 
 alter table public.room_tiles add column if not exists tile_color text;
 alter table public.room_tiles add column if not exists is_randomized boolean not null default true;
@@ -2929,8 +3317,8 @@ begin
   end if;
   select array_agg(value::integer order by ordinal) into v_sizes
   from jsonb_array_elements_text(p_round_sizes) with ordinality as sizes(value, ordinal);
-  if exists (select 1 from unnest(v_sizes[1:p_total_rounds]) as sizes(value) where value not between 2 and 100 or mod(value, 2) <> 0) then
-    raise exception '每轮格子数必须是 2 到 100 之间的偶数';
+          if exists (select 1 from unnest(v_sizes[1:p_total_rounds]) as sizes(value) where value not between 2 and 100) then
+            raise exception '每轮格子数必须是 2 到 100 之间的整数';
   end if;
 
   update public.rooms set
@@ -3036,8 +3424,8 @@ begin
   if v_rolls_per_turn not between 1 and 5 then raise exception '导入的初始骰子数量必须在 1 到 5 之间'; end if;
   if v_base_guarantee not between 0 and 10000 then raise exception '导入的基础保底必须在 0 到 10000 万之间'; end if;
   if v_total_rounds not between 1 and 10 then raise exception '导入的轮数必须在 1 到 10 之间'; end if;
-  if exists (select 1 from unnest(v_sizes[1:v_total_rounds]) as sizes(value) where value not between 2 and 100 or mod(value, 2) <> 0) then
-    raise exception '导入的每轮格子数必须是 2 到 100 之间的偶数';
+          if exists (select 1 from unnest(v_sizes[1:v_total_rounds]) as sizes(value) where value not between 2 and 100) then
+            raise exception '导入的每轮格子数必须是 2 到 100 之间的整数';
   end if;
   select sum(value) into v_expected from unnest(v_sizes[1:v_total_rounds]) as sizes(value);
   if jsonb_array_length(v_tiles) <> v_expected then raise exception '导入棋盘格数与轮次设置不一致'; end if;
@@ -4380,5 +4768,39 @@ revoke all on function public.finish_routed_landing_internal(uuid, uuid, jsonb, 
 revoke all on function public.continue_routed_move_internal(uuid, uuid, uuid, jsonb) from public;
 revoke all on function public.choose_route(uuid, uuid) from public;
 grant execute on function public.choose_route(uuid, uuid) to authenticated;
+
+        alter table public.tile_presets drop constraint if exists tile_presets_image_id_fkey;
+        alter table public.tile_presets add constraint tile_presets_image_id_fkey
+          foreign key (image_id) references public.room_tile_images(id) on delete set null;
+
+        create or replace function public.admin_delete_room_tile_pair(p_tile_id uuid)
+        returns void language plpgsql security definer set search_path = public
+        as $$ begin perform public.admin_delete_room_tiles(array[p_tile_id]); end; $$;
+
+        create or replace function public.validate_graph_before_start()
+        returns trigger language plpgsql security definer set search_path = public
+        as $$
+        declare v_round integer; v_tile record;
+        begin
+          if old.status = 'lobby' and new.status = 'playing' then
+            for v_round in 1..new.total_rounds loop
+              perform public.ensure_room_edges_internal(new.id, v_round);
+              if v_round < new.total_rounds and not exists (
+                select 1 from public.room_tiles where room_id = new.id and round_number = v_round and effect_type in ('advance_chance','advance_round')
+              ) then raise exception '第 % 轮至少需要一个晋级格', v_round; end if;
+              if v_round = new.total_rounds and not exists (
+                select 1 from public.room_tiles where room_id = new.id and round_number = v_round and effect_type = 'finish'
+              ) then raise exception '最终轮至少需要一个结束格'; end if;
+              for v_tile in select id, position from public.room_tiles where room_id = new.id and round_number = v_round loop
+                if not exists (
+                  select 1 from public.room_tile_edges edge where edge.room_id = new.id and edge.round_number = v_round
+                    and (edge.from_tile_id = v_tile.id or (edge.is_bidirectional and edge.to_tile_id = v_tile.id))
+                ) then raise exception '第 % 轮第 % 格没有出口路线', v_round, v_tile.position + 1; end if;
+              end loop;
+            end loop;
+          end if;
+          return new;
+        end;
+        $$;
 
 select pg_notify('pgrst', 'reload schema');

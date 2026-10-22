@@ -256,7 +256,7 @@ forcedRunnerAdvance.isDemo = false
 forcedRunnerAdvance.players[0].role = 'runner'
 assert.equal(resolveDemoDice(forcedRunnerAdvance, 1).snapshot.room.current_round, 1, '打手即使落到晋级格也不得晋级')
 
-for (let size = 2; size <= 100; size += 2) {
+for (let size = 2; size <= 100; size += 1) {
   const dimensions = getBoardDimensions(size)
   const positions = Array.from({ length: size }, (_, index) => getBoardGridPosition(index, size))
   const uniquePositions = new Set(positions.map((position) => `${position.gridColumn}:${position.gridRow}`))
@@ -286,7 +286,7 @@ for (let size = 2; size <= 100; size += 2) {
 }
 
 for (const preset of BOARD_LAYOUT_PRESETS) {
-  for (let size = 2; size <= 100; size += 2) {
+  for (let size = 2; size <= 100; size += 1) {
     const positions = createBoardLayout(size, preset.id)
     const uniquePositions = new Set(positions.map((position) => `${position.gridX}:${position.gridY}`))
     assert.equal(positions.length, size, `${preset.name}必须适配 ${size} 格`)
@@ -352,4 +352,4 @@ assert.deepEqual(
   '超出轻量吸附范围后必须保持自由坐标',
 )
 
-console.log('效果回归测试通过：落格效果、分轮规则、无限画布、轻量磁吸、5 种自适应预设与默认路线图')
+console.log('效果回归测试通过：落格效果、分轮规则、2–100 奇偶格布局、无限画布、轻量磁吸、5 种自适应预设与默认路线图')

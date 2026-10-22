@@ -9,14 +9,17 @@ import {
   Move,
   Check,
   Clipboard,
+  Copy,
   Crosshair,
   Crown,
   Dice5,
   Download,
   Images,
   Flag,
+  FolderPlus,
   LoaderCircle,
   LockKeyhole,
+  Link2,
   LogIn,
   LogOut,
   Minus,
@@ -83,6 +86,8 @@ import type {
   SettlementRule,
   SiteImage,
   SiteImageSlot,
+  TilePreset,
+  TilePresetCategory,
   TileEffect,
   TileType,
 } from './types'
@@ -108,6 +113,7 @@ const MAX_BOARD_ZOOM = 2
 const BOARD_VIEW_PADDING = 12
 const MIN_IMAGE_ZOOM = 0.25
 const MAX_IMAGE_ZOOM = 3
+const TILE_PRESET_DRAG_TYPE = 'application/x-jingxu-tile-preset'
 
 interface RoomConfigFile {
   format: typeof ROOM_CONFIG_FORMAT
@@ -812,6 +818,8 @@ function AdminPanel({ onBack, visuals }: { onBack: () => void; visuals: SiteVisu
   const [roomTiles, setRoomTiles] = useState<RoomTile[]>([])
   const [roomEdges, setRoomEdges] = useState<RoomTileEdge[]>([])
   const [tileImages, setTileImages] = useState<RoomTileImage[]>([])
+  const [tilePresetCategories, setTilePresetCategories] = useState<TilePresetCategory[]>([])
+  const [tilePresets, setTilePresets] = useState<TilePreset[]>([])
   const [siteImages, setSiteImages] = useState<SiteImage[]>([])
   const [siteImageSlots, setSiteImageSlots] = useState<SiteImageSlot[]>([])
   const [configFavorites, setConfigFavorites] = useState<RoomConfigFavorite[]>([])
@@ -828,9 +836,19 @@ function AdminPanel({ onBack, visuals }: { onBack: () => void; visuals: SiteVisu
   const [roundSizes, setRoundSizes] = useState<number[]>(DEFAULT_ROUND_SIZES)
   const [editorRound, setEditorRound] = useState<GameRound>(1)
   const [selectedTileId, setSelectedTileId] = useState<string | null>(null)
+  const [selectedTileIds, setSelectedTileIds] = useState<string[]>([])
+  const [tileSelectionMode, setTileSelectionMode] = useState(false)
+  const [linkingTileId, setLinkingTileId] = useState<string | null>(null)
   const [tileDraft, setTileDraft] = useState<RoomTile | null>(null)
   const [edgeTargetId, setEdgeTargetId] = useState('')
   const [edgeBidirectional, setEdgeBidirectional] = useState(false)
+  const [presetDropBidirectional, setPresetDropBidirectional] = useState(false)
+  const [selectedPresetId, setSelectedPresetId] = useState<string | null>(null)
+  const [presetSearch, setPresetSearch] = useState('')
+  const [presetCategoryFilter, setPresetCategoryFilter] = useState('all')
+  const [presetNameDraft, setPresetNameDraft] = useState('')
+  const [presetCategoryDraft, setPresetCategoryDraft] = useState('')
+  const [newPresetCategoryName, setNewPresetCategoryName] = useState('')
   const [diceDrafts, setDiceDrafts] = useState<Record<string, string>>({})
   const [guaranteeDrafts, setGuaranteeDrafts] = useState<Record<string, string>>({})
   const [baseGuaranteeDrafts, setBaseGuaranteeDrafts] = useState<Record<string, string>>({})
@@ -870,6 +888,13 @@ function AdminPanel({ onBack, visuals }: { onBack: () => void; visuals: SiteVisu
     .filter((tile) => tile.room_id === selectedRoomId && tile.round_number === editorRound)
     .sort((a, b) => a.position - b.position)
   const selectedRoundEdges = roomEdges.filter((edge) => edge.round_number === editorRound)
+  const selectedPreset = tilePresets.find((preset) => preset.id === selectedPresetId) ?? null
+  const filteredTilePresets = tilePresets.filter((preset) => {
+    const categoryMatches = presetCategoryFilter === 'all'
+      || (presetCategoryFilter === 'uncategorized' ? !preset.category_id : preset.category_id === presetCategoryFilter)
+    const search = presetSearch.trim().toLocaleLowerCase()
+    return categoryMatches && (!search || `${preset.name} ${preset.short_name} ${preset.detail}`.toLocaleLowerCase().includes(search))
+  })
   const selectedBosses = selectedPlayers.filter((player) => player.role === 'boss').length
   const selectedRunners = selectedPlayers.filter((player) => player.role === 'runner').length
   const canStart = selectedRoom?.status === 'lobby'
@@ -911,6 +936,18 @@ function AdminPanel({ onBack, visuals }: { onBack: () => void; visuals: SiteVisu
       .order('created_at', { ascending: false })
     if (imagesError) throw imagesError
     setTileImages(data as RoomTileImage[])
+  }, [])
+
+  const loadTilePresets = useCallback(async () => {
+    if (!supabase) return
+    const [categoriesResult, presetsResult] = await Promise.all([
+      supabase.from('tile_preset_categories').select('*').order('sort_order').order('name'),
+      supabase.from('tile_presets').select('*').order('updated_at', { ascending: false }),
+    ])
+    if (categoriesResult.error) throw categoriesResult.error
+    if (presetsResult.error) throw presetsResult.error
+    setTilePresetCategories(categoriesResult.data as TilePresetCategory[])
+    setTilePresets(presetsResult.data as TilePreset[])
   }, [])
 
   const loadSiteImages = useCallback(async () => {
@@ -1036,7 +1073,7 @@ function AdminPanel({ onBack, visuals }: { onBack: () => void; visuals: SiteVisu
       if (!adminError && isAdmin === true) {
         setAuthorized(true)
         try {
-          await Promise.all([loadDashboard(), loadConfigFavorites(), loadSiteContent(), loadSiteImages()])
+          await Promise.all([loadDashboard(), loadConfigFavorites(), loadSiteContent(), loadSiteImages(), loadTilePresets()])
         } catch (loadError) {
           setError(formatError(loadError))
         }
@@ -1044,7 +1081,7 @@ function AdminPanel({ onBack, visuals }: { onBack: () => void; visuals: SiteVisu
       setChecking(false)
     }
     void checkSession()
-  }, [loadConfigFavorites, loadDashboard, loadSiteContent, loadSiteImages])
+  }, [loadConfigFavorites, loadDashboard, loadSiteContent, loadSiteImages, loadTilePresets])
 
   useEffect(() => {
     if (!authorized || !supabase) return
@@ -1090,6 +1127,12 @@ function AdminPanel({ onBack, visuals }: { onBack: () => void; visuals: SiteVisu
       .on('postgres_changes', { event: '*', schema: 'public', table: 'room_tile_images' }, () => {
         void loadTileImages()
       })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'tile_preset_categories' }, () => {
+        void loadTilePresets()
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'tile_presets' }, () => {
+        void loadTilePresets()
+      })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'site_images' }, () => {
         void loadSiteImages()
       })
@@ -1108,7 +1151,7 @@ function AdminPanel({ onBack, visuals }: { onBack: () => void; visuals: SiteVisu
       }
       void client.removeChannel(channel)
     }
-  }, [applyPendingTileState, authorized, loadDashboard, loadDiceRequests, loadGuaranteeRequests, loadRoomEdges, loadRoomEvents, loadRoomTiles, loadSettlementRules, loadSiteImages, loadTileImages, selectedRoomId])
+  }, [applyPendingTileState, authorized, loadDashboard, loadDiceRequests, loadGuaranteeRequests, loadRoomEdges, loadRoomEvents, loadRoomTiles, loadSettlementRules, loadSiteImages, loadTileImages, loadTilePresets, selectedRoomId])
 
   useEffect(() => {
     if (!authorized) return
@@ -1151,6 +1194,9 @@ function AdminPanel({ onBack, visuals }: { onBack: () => void; visuals: SiteVisu
 
   useEffect(() => {
     pendingTileImagesRef.current.clear()
+    setSelectedTileIds([])
+    setTileSelectionMode(false)
+    setLinkingTileId(null)
     setRoomPendingDelete(null)
     setCodeCopied(false)
     setConfigNotice('')
@@ -1164,6 +1210,12 @@ function AdminPanel({ onBack, visuals }: { onBack: () => void; visuals: SiteVisu
     })
   }, [selectedRoomId])
 
+  useEffect(() => {
+    if (!selectedPreset) return
+    setPresetNameDraft(selectedPreset.name)
+    setPresetCategoryDraft(selectedPreset.category_id ?? '')
+  }, [selectedPreset])
+
   useEffect(() => () => {
     if (cropSource) URL.revokeObjectURL(cropSource.url)
   }, [cropSource])
@@ -1172,6 +1224,8 @@ function AdminPanel({ onBack, visuals }: { onBack: () => void; visuals: SiteVisu
     const nextTile = selectedRoundTiles.find((tile) => tile.id === selectedTileId) ?? selectedRoundTiles[0] ?? null
     setSelectedTileId(nextTile?.id ?? null)
     setTileDraft(nextTile ? { ...nextTile } : null)
+    setSelectedTileIds((current) => current.filter((id) => selectedRoundTiles.some((tile) => tile.id === id && tile.tile_type !== 'start')))
+    setLinkingTileId((current) => current && selectedRoundTiles.some((tile) => tile.id === current) ? current : null)
     setEdgeTargetId('')
   }, [editorRound, selectedRoomId, roomTiles])
 
@@ -1396,8 +1450,8 @@ function AdminPanel({ onBack, visuals }: { onBack: () => void; visuals: SiteVisu
       if (!Number.isInteger(totalRounds) || totalRounds < 1 || totalRounds > MAX_ROUNDS) {
         throw new Error(`轮数必须在 1–${MAX_ROUNDS} 之间`)
       }
-      if (roundSizes.slice(0, totalRounds).some((size) => !Number.isInteger(size) || size < MIN_BOARD_SIZE || size > MAX_BOARD_SIZE || size % 2 !== 0)) {
-        throw new Error(`每轮格子数必须是 ${MIN_BOARD_SIZE}–${MAX_BOARD_SIZE} 之间的偶数`)
+      if (roundSizes.slice(0, totalRounds).some((size) => !Number.isInteger(size) || size < MIN_BOARD_SIZE || size > MAX_BOARD_SIZE)) {
+        throw new Error(`每轮格子数必须是 ${MIN_BOARD_SIZE}–${MAX_BOARD_SIZE} 之间的整数`)
       }
       const { error: rpcError } = await supabase.rpc('admin_update_board_structure', {
         p_room_id: selectedRoom.id,
@@ -1410,10 +1464,31 @@ function AdminPanel({ onBack, visuals }: { onBack: () => void; visuals: SiteVisu
     })
   }
 
-  const chooseTile = useCallback((tile: RoomTile) => {
+  function chooseTile(tile: RoomTile) {
+    if (tileSelectionMode) {
+      if (tile.tile_type === 'start') return
+      setSelectedTileIds((current) => current.includes(tile.id)
+        ? current.filter((id) => id !== tile.id)
+        : [...current, tile.id])
+      return
+    }
+    if (linkingTileId && tile.id !== linkingTileId) {
+      void runAdminAction(async () => {
+        if (!supabase) return
+        const { error: rpcError } = await supabase.rpc('admin_upsert_tile_edge', {
+          p_from_tile_id: linkingTileId,
+          p_to_tile_id: tile.id,
+          p_is_bidirectional: presetDropBidirectional,
+        })
+        if (rpcError) throw rpcError
+        await loadRoomEdges(tile.room_id)
+        setLinkingTileId(null)
+      })
+      return
+    }
     setSelectedTileId(tile.id)
     setTileDraft({ ...tile })
-  }, [])
+  }
 
   function saveTile() {
     if (!selectedRoom || !tileDraft) return
@@ -1705,29 +1780,228 @@ function AdminPanel({ onBack, visuals }: { onBack: () => void; visuals: SiteVisu
     })
   }
 
-  function addTiles() {
+  async function refreshBoardEditor(roomId: string) {
+    await Promise.all([loadDashboard(), loadRoomTiles(roomId), loadRoomEdges(roomId), loadRoomEvents(roomId)])
+  }
+
+  function addTile() {
     if (!selectedRoom || !tileDraft) return
     void runAdminAction(async () => {
       if (!supabase) return
       const anchor = getRoomTileCanvasPosition(tileDraft, selectedRoundTiles.findIndex((tile) => tile.id === tileDraft.id), selectedRoundTiles.length)
-      const { error: rpcError } = await supabase.rpc('admin_add_room_tiles_around', {
-        p_tile_id: tileDraft.id,
-        p_anchor_x: anchor.x,
-        p_anchor_y: anchor.y,
+      const { data, error: rpcError } = await supabase.rpc('admin_create_room_tile', {
+        p_room_id: selectedRoom.id,
+        p_round: editorRound,
+        p_preset_id: null,
+        p_layout_x: anchor.x + BOARD_TILE_WIDTH + 30,
+        p_layout_y: anchor.y,
+        p_insert_edge_id: null,
+        p_link_from_tile_id: tileDraft.id,
+        p_is_bidirectional: presetDropBidirectional,
       })
       if (rpcError) throw rpcError
-      await Promise.all([loadDashboard(), loadRoomTiles(selectedRoom.id), loadRoomEdges(selectedRoom.id)])
+      await refreshBoardEditor(selectedRoom.id)
+      const createdId = data as string
+      setSelectedTileId(createdId)
+      setLinkingTileId(createdId)
     })
   }
 
-  function deleteTilePair() {
-    if (!selectedRoom || !tileDraft || tileDraft.tile_type === 'start') return
-    if (!window.confirm(`将删除第 ${tileDraft.position + 1} 格，并同时删除本轮最后一个非起点格，以保证格子总数为偶数。继续吗？`)) return
+  function deleteTiles(tileIds: string[]) {
+    if (!selectedRoom) return
+    const deletableIds = [...new Set(tileIds)].filter((id) => selectedRoundTiles.some((tile) => tile.id === id && tile.tile_type !== 'start'))
+    if (deletableIds.length === 0) return
+    if (!window.confirm(`确认删除选中的 ${deletableIds.length} 个格子吗？关联路线会自动整理。`)) return
     void runAdminAction(async () => {
       if (!supabase) return
-      const { error: rpcError } = await supabase.rpc('admin_delete_room_tile_pair', { p_tile_id: tileDraft.id })
+      const { error: rpcError } = await supabase.rpc('admin_delete_room_tiles', { p_tile_ids: deletableIds })
       if (rpcError) throw rpcError
-      await Promise.all([loadDashboard(), loadRoomTiles(selectedRoom.id), loadRoomEdges(selectedRoom.id)])
+      setSelectedTileIds([])
+      setTileSelectionMode(false)
+      setLinkingTileId(null)
+      await refreshBoardEditor(selectedRoom.id)
+    })
+  }
+
+  function toggleTileSelectionMode() {
+    setTileSelectionMode((current) => !current)
+    setSelectedTileIds([])
+    setLinkingTileId(null)
+  }
+
+  function selectAllDeletableTiles() {
+    setSelectedTileIds(selectedRoundTiles
+      .filter((tile) => tile.tile_type !== 'start')
+      .slice(0, Math.max(0, selectedRoundTiles.length - MIN_BOARD_SIZE))
+      .map((tile) => tile.id))
+  }
+
+  function saveSelectedTilesAsPresets() {
+    if (selectedTileIds.length === 0) return
+    void runAdminAction(async () => {
+      if (!supabase) return
+      if (tileDraft && selectedTileIds.includes(tileDraft.id)) await persistPresetSourceTile(tileDraft)
+      const { error: rpcError } = await supabase.rpc('admin_save_tile_presets', {
+        p_tile_ids: selectedTileIds,
+        p_category_id: presetCategoryDraft || null,
+      })
+      if (rpcError) throw rpcError
+      await loadTilePresets()
+      setConfigNotice(`已将 ${selectedTileIds.length} 个格子保存到预设库`)
+    })
+  }
+
+  function createPresetCategory() {
+    const name = newPresetCategoryName.trim()
+    if (!name) return
+    void runAdminAction(async () => {
+      if (!supabase) return
+      const { data, error: rpcError } = await supabase.rpc('admin_create_tile_preset_category', { p_name: name })
+      if (rpcError) throw rpcError
+      await loadTilePresets()
+      setNewPresetCategoryName('')
+      setPresetCategoryDraft(data as string)
+      setPresetCategoryFilter(data as string)
+    })
+  }
+
+  function renamePresetCategory() {
+    const category = tilePresetCategories.find((item) => item.id === presetCategoryFilter)
+    if (!category) return
+    const name = window.prompt('分类名称', category.name)?.trim()
+    if (!name || name === category.name) return
+    void runAdminAction(async () => {
+      if (!supabase) return
+      const { error: rpcError } = await supabase.rpc('admin_rename_tile_preset_category', { p_category_id: category.id, p_name: name })
+      if (rpcError) throw rpcError
+      await loadTilePresets()
+    })
+  }
+
+  function deletePresetCategory() {
+    const category = tilePresetCategories.find((item) => item.id === presetCategoryFilter)
+    if (!category || !window.confirm(`删除分类“${category.name}”？分类中的预设会移到未分类。`)) return
+    void runAdminAction(async () => {
+      if (!supabase) return
+      const { error: rpcError } = await supabase.rpc('admin_delete_tile_preset_category', { p_category_id: category.id })
+      if (rpcError) throw rpcError
+      setPresetCategoryFilter('all')
+      if (presetCategoryDraft === category.id) setPresetCategoryDraft('')
+      await loadTilePresets()
+    })
+  }
+
+  function startNewPreset() {
+    setSelectedPresetId(null)
+    setPresetNameDraft(tileDraft?.tile_type === 'start' ? '' : tileDraft?.name ?? '')
+    setPresetCategoryDraft(presetCategoryFilter !== 'all' && presetCategoryFilter !== 'uncategorized' ? presetCategoryFilter : '')
+  }
+
+  async function persistPresetSourceTile(tile: RoomTile) {
+    if (!supabase) return
+    const { error: rpcError } = await supabase.rpc('admin_update_room_tile', {
+      p_tile_id: tile.id,
+      p_name: tile.name.trim(),
+      p_short_name: tile.short_name.trim(),
+      p_tile_type: tile.tile_type,
+      p_detail: tile.detail.trim(),
+      p_effect_type: tile.effect_type,
+      p_effect_value: Number(tile.effect_value),
+      p_tile_color: tile.tile_color || null,
+      p_is_randomized: tile.is_randomized,
+    })
+    if (rpcError) throw rpcError
+  }
+
+  function saveTilePreset() {
+    const name = presetNameDraft.trim()
+    if (!name) {
+      setError('请输入预设名称')
+      return
+    }
+    void runAdminAction(async () => {
+      if (!supabase) return
+      if (selectedPreset) {
+        const { error: rpcError } = await supabase.rpc('admin_update_tile_preset', {
+          p_preset_id: selectedPreset.id,
+          p_name: name,
+          p_category_id: presetCategoryDraft || null,
+        })
+        if (rpcError) throw rpcError
+      } else {
+        if (!tileDraft || tileDraft.tile_type === 'start') throw new Error('请先选择一个普通格子')
+        await persistPresetSourceTile(tileDraft)
+        const { data, error: rpcError } = await supabase.rpc('admin_save_tile_preset', {
+          p_tile_id: tileDraft.id,
+          p_name: name,
+          p_category_id: presetCategoryDraft || null,
+        })
+        if (rpcError) throw rpcError
+        setSelectedPresetId(data as string)
+      }
+      await loadTilePresets()
+    })
+  }
+
+  function replaceTilePreset() {
+    if (!selectedPreset || !tileDraft || tileDraft.tile_type === 'start') return
+    void runAdminAction(async () => {
+      if (!supabase) return
+      await persistPresetSourceTile(tileDraft)
+      const { error: rpcError } = await supabase.rpc('admin_replace_tile_preset_from_tile', {
+        p_preset_id: selectedPreset.id,
+        p_tile_id: tileDraft.id,
+      })
+      if (rpcError) throw rpcError
+      await loadTilePresets()
+    })
+  }
+
+  function copyTilePreset() {
+    if (!selectedPreset) return
+    void runAdminAction(async () => {
+      if (!supabase) return
+      const { data, error: rpcError } = await supabase.rpc('admin_copy_tile_preset', { p_preset_id: selectedPreset.id })
+      if (rpcError) throw rpcError
+      await loadTilePresets()
+      setSelectedPresetId(data as string)
+    })
+  }
+
+  function deleteTilePreset() {
+    if (!selectedPreset || !window.confirm(`删除预设“${selectedPreset.name}”？`)) return
+    void runAdminAction(async () => {
+      if (!supabase) return
+      const { error: rpcError } = await supabase.rpc('admin_delete_tile_preset', { p_preset_id: selectedPreset.id })
+      if (rpcError) throw rpcError
+      setSelectedPresetId(null)
+      setPresetNameDraft('')
+      await loadTilePresets()
+    })
+  }
+
+  function dropTilePreset(presetId: string, position: BoardCanvasPoint, target: { tileId?: string; edgeId?: string }) {
+    if (!selectedRoom || selectedRoom.status !== 'lobby') return
+    void runAdminAction(async () => {
+      if (!supabase) return
+      const fallbackLinkId = !target.tileId && !target.edgeId && selectedTileId && selectedRoundTiles.some((tile) => tile.id === selectedTileId)
+        ? selectedTileId
+        : null
+      const { data, error: rpcError } = await supabase.rpc('admin_create_room_tile', {
+        p_room_id: selectedRoom.id,
+        p_round: editorRound,
+        p_preset_id: presetId,
+        p_layout_x: Math.round(position.x * 10) / 10,
+        p_layout_y: Math.round(position.y * 10) / 10,
+        p_insert_edge_id: target.edgeId ?? null,
+        p_link_from_tile_id: target.tileId ?? fallbackLinkId,
+        p_is_bidirectional: presetDropBidirectional,
+      })
+      if (rpcError) throw rpcError
+      const createdId = data as string
+      await refreshBoardEditor(selectedRoom.id)
+      setSelectedTileId(createdId)
+      setLinkingTileId(target.edgeId ? null : createdId)
     })
   }
 
@@ -2612,9 +2886,9 @@ function AdminPanel({ onBack, visuals }: { onBack: () => void; visuals: SiteVisu
                     {roundSizes.slice(0, totalRounds).map((size, index) => (
                       <div className="structure-stepper" key={index}>
                         <span>{roundLabel(index + 1)}格子</span>
-                        <button aria-label={`减少${roundLabel(index + 1)}格子`} disabled={selectedRoom.status !== 'lobby' || size <= MIN_BOARD_SIZE} onClick={() => setRoundSizes((values) => values.map((value, valueIndex) => valueIndex === index ? Math.max(MIN_BOARD_SIZE, value - 2) : value))} title="减少格子" type="button"><Minus size={15} /></button>
-                        <input aria-label={`${roundLabel(index + 1)}格子数`} disabled={selectedRoom.status !== 'lobby'} max={MAX_BOARD_SIZE} min={MIN_BOARD_SIZE} onChange={(event) => setRoundSizes((values) => values.map((value, valueIndex) => valueIndex === index ? Number(event.target.value) : value))} step="2" type="number" value={size} />
-                        <button aria-label={`增加${roundLabel(index + 1)}格子`} disabled={selectedRoom.status !== 'lobby' || size >= MAX_BOARD_SIZE} onClick={() => setRoundSizes((values) => values.map((value, valueIndex) => valueIndex === index ? Math.min(MAX_BOARD_SIZE, value + 2) : value))} title="增加格子" type="button"><Plus size={15} /></button>
+                        <button aria-label={`减少${roundLabel(index + 1)}格子`} disabled={selectedRoom.status !== 'lobby' || size <= MIN_BOARD_SIZE} onClick={() => setRoundSizes((values) => values.map((value, valueIndex) => valueIndex === index ? Math.max(MIN_BOARD_SIZE, value - 1) : value))} title="减少格子" type="button"><Minus size={15} /></button>
+                        <input aria-label={`${roundLabel(index + 1)}格子数`} disabled={selectedRoom.status !== 'lobby'} max={MAX_BOARD_SIZE} min={MIN_BOARD_SIZE} onChange={(event) => setRoundSizes((values) => values.map((value, valueIndex) => valueIndex === index ? Number(event.target.value) : value))} step="1" type="number" value={size} />
+                        <button aria-label={`增加${roundLabel(index + 1)}格子`} disabled={selectedRoom.status !== 'lobby' || size >= MAX_BOARD_SIZE} onClick={() => setRoundSizes((values) => values.map((value, valueIndex) => valueIndex === index ? Math.min(MAX_BOARD_SIZE, value + 1) : value))} title="增加格子" type="button"><Plus size={15} /></button>
                       </div>
                     ))}
                     <button className="button secondary" disabled={busy || selectedRoom.status !== 'lobby'} onClick={saveBoardStructure} type="button"><Save size={17} /> 保存棋盘结构</button>
@@ -2635,7 +2909,6 @@ function AdminPanel({ onBack, visuals }: { onBack: () => void; visuals: SiteVisu
                       ))}
                     </div>
                   </div>
-                  <p className="probability-note">画布可无限平移缩放，格子支持任意像素位置与重叠。先选择格子，再在右侧围绕它新增两格或编辑路线。</p>
                   <div className="round-tabs" role="tablist" aria-label="选择编辑轮次">
                     {Array.from({ length: selectedRoom.total_rounds ?? 3 }, (_, index) => index + 1).map((round) => (
                       <button aria-selected={editorRound === round} className={editorRound === round ? 'active' : ''} key={round} onClick={() => setEditorRound(round)} role="tab" type="button">
@@ -2643,27 +2916,106 @@ function AdminPanel({ onBack, visuals }: { onBack: () => void; visuals: SiteVisu
                       </button>
                     ))}
                   </div>
-                  <div className="tile-editor-layout">
-                    {selectedRoundTiles.length > 0 && (
-                      <Board
-                        className="admin-board"
-                        displayRound={editorRound}
-                        edges={selectedRoundEdges}
-                        onTileMove={moveTile}
-                        onTileSelect={chooseTile}
-                        players={NO_PLAYERS}
-                        room={selectedRoom}
-                        selectedTileId={selectedTileId}
-                        tiles={roomTiles}
-                      />
-                    )}
+                  <div className="tile-builder-layout">
+                    <aside className="tile-preset-library">
+                      <div className="tile-preset-heading">
+                        <span><Bookmark size={15} /> 格子预设库</span>
+                        <button aria-label="新建预设" disabled={busy} onClick={startNewPreset} title="新建预设" type="button"><Plus size={15} /></button>
+                      </div>
+                      <div className="tile-preset-filters">
+                        <input aria-label="搜索格子预设" onChange={(event) => setPresetSearch(event.target.value)} placeholder="搜索预设" type="search" value={presetSearch} />
+                        <span>
+                          <select aria-label="筛选预设分类" onChange={(event) => setPresetCategoryFilter(event.target.value)} value={presetCategoryFilter}>
+                            <option value="all">全部分类</option>
+                            <option value="uncategorized">未分类</option>
+                            {tilePresetCategories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
+                          </select>
+                          <button aria-label="重命名当前分类" disabled={busy || !tilePresetCategories.some((category) => category.id === presetCategoryFilter)} onClick={renamePresetCategory} title="重命名分类" type="button"><SquarePen size={14} /></button>
+                          <button aria-label="删除当前分类" disabled={busy || !tilePresetCategories.some((category) => category.id === presetCategoryFilter)} onClick={deletePresetCategory} title="删除分类" type="button"><Trash2 size={14} /></button>
+                        </span>
+                      </div>
+                      <div className="tile-preset-category-create">
+                        <input aria-label="新分类名称" maxLength={30} onChange={(event) => setNewPresetCategoryName(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && createPresetCategory()} placeholder="新分类" value={newPresetCategoryName} />
+                        <button aria-label="创建分类" disabled={busy || !newPresetCategoryName.trim()} onClick={createPresetCategory} title="创建分类" type="button"><FolderPlus size={15} /></button>
+                      </div>
+                      <div className="edge-direction preset-link-direction" role="group" aria-label="拖入格子的连线方向">
+                        <button className={!presetDropBidirectional ? 'active' : ''} onClick={() => setPresetDropBidirectional(false)} type="button"><ArrowRight size={14} /> 单向</button>
+                        <button className={presetDropBidirectional ? 'active' : ''} onClick={() => setPresetDropBidirectional(true)} type="button"><ArrowLeft size={14} /><ArrowRight size={14} /> 双向</button>
+                      </div>
+                      <div className="tile-preset-list">
+                        {filteredTilePresets.map((preset) => {
+                          const imageUrl = tileImages.find((image) => image.id === preset.image_id)?.public_url
+                          return (
+                            <button
+                              aria-pressed={selectedPresetId === preset.id}
+                              className={selectedPresetId === preset.id ? 'selected' : ''}
+                              disabled={busy || selectedRoom.status !== 'lobby'}
+                              draggable={!busy && selectedRoom.status === 'lobby'}
+                              key={preset.id}
+                              onClick={() => setSelectedPresetId(preset.id)}
+                              onDragStart={(event) => {
+                                event.dataTransfer.setData(TILE_PRESET_DRAG_TYPE, preset.id)
+                                event.dataTransfer.effectAllowed = 'copy'
+                              }}
+                              style={preset.tile_color ? { '--preset-color': preset.tile_color } as React.CSSProperties : undefined}
+                              type="button"
+                            >
+                              <span className="tile-preset-thumb">{imageUrl ? <img alt="" decoding="async" draggable={false} src={imageUrl} /> : <Sparkles size={17} />}</span>
+                              <span><strong>{preset.name}</strong><small>{preset.short_name} · {EFFECT_LABELS[preset.effect_type]}</small></span>
+                            </button>
+                          )
+                        })}
+                        {filteredTilePresets.length === 0 && <p className="admin-empty">当前分类没有预设。</p>}
+                      </div>
+                      <div className="tile-preset-editor">
+                        <input aria-label="预设名称" maxLength={60} onChange={(event) => setPresetNameDraft(event.target.value)} placeholder="预设名称" value={presetNameDraft} />
+                        <select aria-label="预设所属分类" onChange={(event) => setPresetCategoryDraft(event.target.value)} value={presetCategoryDraft}>
+                          <option value="">未分类</option>
+                          {tilePresetCategories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
+                        </select>
+                        <div>
+                          <button className="button primary" disabled={busy || !presetNameDraft.trim() || (!selectedPreset && (!tileDraft || tileDraft.tile_type === 'start'))} onClick={saveTilePreset} type="button"><Save size={15} /> {selectedPreset ? '保存' : '保存当前格'}</button>
+                          {selectedPreset && <button aria-label="用当前格覆盖预设" disabled={busy || !tileDraft || tileDraft.tile_type === 'start'} onClick={replaceTilePreset} title="用当前格覆盖" type="button"><RotateCcw size={14} /></button>}
+                          {selectedPreset && <button aria-label="复制预设" disabled={busy} onClick={copyTilePreset} title="复制预设" type="button"><Copy size={14} /></button>}
+                          {selectedPreset && <button aria-label="删除预设" disabled={busy} onClick={deleteTilePreset} title="删除预设" type="button"><Trash2 size={14} /></button>}
+                        </div>
+                      </div>
+                    </aside>
+                    <div className="tile-builder-main">
+                      <div className="tile-selection-toolbar">
+                        <button aria-pressed={tileSelectionMode} className={tileSelectionMode ? 'active' : ''} disabled={busy || selectedRoom.status !== 'lobby'} onClick={toggleTileSelectionMode} type="button"><Check size={15} /> 多选</button>
+                        {tileSelectionMode && <>
+                          <strong>已选择 {selectedTileIds.length} 个</strong>
+                          <button disabled={busy} onClick={selectAllDeletableTiles} type="button">全选可删除格</button>
+                          <button disabled={busy || selectedTileIds.length === 0} onClick={() => setSelectedTileIds([])} type="button">取消选择</button>
+                          <button disabled={busy || selectedTileIds.length === 0} onClick={saveSelectedTilesAsPresets} type="button"><Bookmark size={15} /> 存为预设</button>
+                          <button className="danger" disabled={busy || selectedTileIds.length === 0 || selectedRoundTiles.length - selectedTileIds.length < MIN_BOARD_SIZE} onClick={() => deleteTiles(selectedTileIds)} type="button"><Trash2 size={15} /> 删除所选</button>
+                        </>}
+                        {linkingTileId && <span className="tile-linking-status"><Link2 size={15} /> 选择目标格 <button aria-label="取消连线" onClick={() => setLinkingTileId(null)} title="取消连线" type="button"><X size={14} /></button></span>}
+                      </div>
+                      <div className="tile-editor-layout">
+                        {selectedRoundTiles.length > 0 && (
+                          <Board
+                            className="admin-board"
+                            displayRound={editorRound}
+                            edges={selectedRoundEdges}
+                            onPresetDrop={dropTilePreset}
+                            onTileMove={tileSelectionMode ? undefined : moveTile}
+                            onTileSelect={chooseTile}
+                            players={NO_PLAYERS}
+                            room={selectedRoom}
+                            selectedTileId={selectedTileId}
+                            selectedTileIds={selectedTileIds}
+                            tiles={roomTiles}
+                          />
+                        )}
                     {tileDraft ? (
                       <div className="tile-edit-form">
                         <div className="tile-edit-title">
                           <span>第 {tileDraft.position + 1} 格</span>
                           <span className="tile-edit-title-actions">
                             <strong>{roundLabel(tileDraft.round_number)}</strong>
-                            <button disabled={busy || selectedRoom.status !== 'lobby' || selectedRoundTiles.length > MAX_BOARD_SIZE - 2} onClick={addTiles} type="button"><Plus size={14} /> 围绕此格添加 2 格</button>
+                            <button disabled={busy || selectedRoom.status !== 'lobby' || selectedRoundTiles.length >= MAX_BOARD_SIZE} onClick={addTile} type="button"><Plus size={14} /> 在此格后添加</button>
                           </span>
                         </div>
                         <div className="tile-form-grid">
@@ -2747,7 +3099,7 @@ function AdminPanel({ onBack, visuals }: { onBack: () => void; visuals: SiteVisu
                         </div>
                         <div className="tile-form-actions">
                           <button className="button primary" disabled={busy || selectedRoom.status !== 'lobby'} onClick={saveTile} type="button"><Save size={17} /> 保存格子内容</button>
-                          <button className="button danger" disabled={busy || selectedRoom.status !== 'lobby' || tileDraft.tile_type === 'start' || selectedRoundTiles.length <= MIN_BOARD_SIZE} onClick={deleteTilePair} type="button"><Trash2 size={17} /> 删除选中及末格</button>
+                          <button className="button danger" disabled={busy || selectedRoom.status !== 'lobby' || tileDraft.tile_type === 'start' || selectedRoundTiles.length <= MIN_BOARD_SIZE} onClick={() => deleteTiles([tileDraft.id])} type="button"><Trash2 size={17} /> 删除这个格子</button>
                         </div>
                         <div className="edge-editor">
                           <div className="edge-editor-title"><span>路线连接</span><Route size={16} /></div>
@@ -2773,7 +3125,9 @@ function AdminPanel({ onBack, visuals }: { onBack: () => void; visuals: SiteVisu
                           </div>
                         </div>
                       </div>
-                    ) : <p className="admin-empty">这一轮还没有生成棋盘格。</p>}
+                        ) : <p className="admin-empty">这一轮还没有生成棋盘格。</p>}
+                      </div>
+                    </div>
                   </div>
                   {cropSource && <TileImageCropDialog name={cropSource.name} onCancel={cancelImageCrop} onConfirm={uploadCroppedImage} sourceUrl={cropSource.url} />}
                 </section>
@@ -3081,8 +3435,10 @@ const Board = memo(function Board({
   displayRound = room.current_round,
   className = '',
   selectedTileId,
+  selectedTileIds = [],
   onTileSelect,
   onTileMove,
+  onPresetDrop,
   movementEvent,
   movementPath,
   onMovementStateChange,
@@ -3097,8 +3453,10 @@ const Board = memo(function Board({
   displayRound?: GameRound
   className?: string
   selectedTileId?: string | null
+  selectedTileIds?: string[]
   onTileSelect?: (tile: RoomTile) => void
   onTileMove?: (tile: RoomTile, x: number, y: number) => void
+  onPresetDrop?: (presetId: string, position: BoardCanvasPoint, target: { tileId?: string; edgeId?: string }) => void
   movementEvent?: GameEvent
   movementPath?: string[]
   onMovementStateChange?: (moving: boolean) => void
@@ -3140,6 +3498,7 @@ const Board = memo(function Board({
   const [movingPlayerId, setMovingPlayerId] = useState<string | null>(null)
   const [activeStepPosition, setActiveStepPosition] = useState<number | null>(null)
   const routeChoiceTileIdSet = useMemo(() => new Set(routeChoiceTileIds), [routeChoiceTileIds])
+  const selectedTileIdSet = useMemo(() => new Set(selectedTileIds), [selectedTileIds])
 
   const tileCanvasPositions = useMemo(() => new Map(tiles.map((tile, index) => [
     tile.id,
@@ -3397,8 +3756,9 @@ const Board = memo(function Board({
   }
 
   function startTileDrag(event: React.PointerEvent<HTMLButtonElement>, tile: RoomTile, index: number) {
-    if (!onTileMove || event.button !== 0) return
+    if (event.button !== 0) return
     event.stopPropagation()
+    if (!onTileMove) return
     const origin = getRoomTileCanvasPosition(tile, index, tiles.length)
     tileDragRef.current = {
       pointerId: event.pointerId,
@@ -3494,6 +3854,60 @@ const Board = memo(function Board({
     window.setTimeout(() => { suppressTileClickRef.current = false }, 0)
   }
 
+  function allowPresetDrop(event: React.DragEvent<HTMLDivElement>) {
+    if (!onPresetDrop || !event.dataTransfer.types.includes(TILE_PRESET_DRAG_TYPE)) return
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'copy'
+  }
+
+  function acceptPresetDrop(event: React.DragEvent<HTMLDivElement>) {
+    if (!onPresetDrop) return
+    const presetId = event.dataTransfer.getData(TILE_PRESET_DRAG_TYPE)
+    const stage = stageRef.current
+    if (!presetId || !stage) return
+    event.preventDefault()
+    event.stopPropagation()
+    const rect = stage.getBoundingClientRect()
+    const point = {
+      x: (event.clientX - rect.left - viewRef.current.x) / viewRef.current.scale,
+      y: (event.clientY - rect.top - viewRef.current.y) / viewRef.current.scale,
+    }
+    const targetTile = tiles.find((tile) => {
+      const position = tileCanvasPositions.get(tile.id)!
+      return point.x >= position.x && point.x <= position.x + BOARD_TILE_WIDTH
+        && point.y >= position.y && point.y <= position.y + BOARD_TILE_HEIGHT
+    })
+    let edgeId: string | undefined
+    if (!targetTile) {
+      let nearestDistance = 30 / viewRef.current.scale
+      for (const line of edgeLines) {
+        const dx = line.x2 - line.x1
+        const dy = line.y2 - line.y1
+        const lengthSquared = dx * dx + dy * dy
+        const ratio = lengthSquared === 0 ? 0 : Math.max(0, Math.min(1, ((point.x - line.x1) * dx + (point.y - line.y1) * dy) / lengthSquared))
+        const distance = Math.hypot(point.x - (line.x1 + ratio * dx), point.y - (line.y1 + ratio * dy))
+        if (distance < nearestDistance) {
+          nearestDistance = distance
+          edgeId = line.edge.id
+        }
+      }
+    }
+    const targetPosition = targetTile ? tileCanvasPositions.get(targetTile.id) : null
+    const adjacentCandidates = targetPosition ? [
+      { x: targetPosition.x + BOARD_TILE_WIDTH + 30, y: targetPosition.y },
+      { x: targetPosition.x, y: targetPosition.y + BOARD_TILE_HEIGHT + 30 },
+      { x: targetPosition.x - BOARD_TILE_WIDTH - 30, y: targetPosition.y },
+      { x: targetPosition.x, y: targetPosition.y - BOARD_TILE_HEIGHT - 30 },
+    ] : []
+    const createdPosition = adjacentCandidates.find((candidate) => ![...tileCanvasPositions.values()].some((existing) => (
+      Math.abs(existing.x - candidate.x) < BOARD_TILE_WIDTH && Math.abs(existing.y - candidate.y) < BOARD_TILE_HEIGHT
+    ))) ?? {
+      x: point.x - BOARD_TILE_WIDTH / 2,
+      y: point.y - BOARD_TILE_HEIGHT / 2,
+    }
+    onPresetDrop(presetId, createdPosition, targetTile ? { tileId: targetTile.id } : edgeId ? { edgeId } : {})
+  }
+
   return (
     <div className={`board-viewport ${className === 'admin-board' ? 'admin-board-viewport' : ''}`}>
       <div className="board-toolbar" aria-label="棋盘缩放工具">
@@ -3505,6 +3919,8 @@ const Board = memo(function Board({
       </div>
       <div
         className={`board-stage ${isDragging ? 'dragging' : ''}`}
+        onDragOver={allowPresetDrop}
+        onDrop={acceptPresetDrop}
         onPointerCancel={stopBoardDrag}
         onPointerDown={startBoardDrag}
         onPointerMove={moveBoard}
@@ -3546,13 +3962,13 @@ const Board = memo(function Board({
                 </div>
               </>
             )
-            const tileClassName = `tile tile-${tile.tile_type} ${selectedTileId === tile.id ? 'selected' : ''} ${activeStepPosition === tile.position ? 'tile-step-active' : ''}`.trim()
+            const tileClassName = `tile tile-${tile.tile_type} ${selectedTileId === tile.id ? 'selected' : ''} ${selectedTileIdSet.has(tile.id) ? 'multi-selected' : ''} ${activeStepPosition === tile.position ? 'tile-step-active' : ''}`.trim()
             const canvasPosition = getRoomTileCanvasPosition(tile, index, tiles.length)
             const positionStyle = { left: canvasPosition.x, top: canvasPosition.y, ...tileColorStyle(tile) }
             return onTileSelect ? (
               <button
                 aria-label={`编辑第 ${index + 1} 格：${tile.short_name}`}
-                aria-pressed={selectedTileId === tile.id}
+                aria-pressed={selectedTileId === tile.id || selectedTileIdSet.has(tile.id)}
                 className={tileClassName}
                 key={tile.id}
                 onPointerCancel={cancelTileDrag}
