@@ -816,6 +816,7 @@ function AdminPanel({ onBack, visuals }: { onBack: () => void; visuals: SiteVisu
   const [siteImageSlots, setSiteImageSlots] = useState<SiteImageSlot[]>([])
   const [configFavorites, setConfigFavorites] = useState<RoomConfigFavorite[]>([])
   const [siteContentDraft, setSiteContentDraft] = useState<SiteContent>(DEFAULT_SITE_CONTENT)
+  const [adminView, setAdminView] = useState<'rooms' | 'site'>('rooms')
   const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null)
   const [roomNameDraft, setRoomNameDraft] = useState('')
   const [roomPendingDelete, setRoomPendingDelete] = useState<string | null>(null)
@@ -1221,6 +1222,7 @@ function AdminPanel({ onBack, visuals }: { onBack: () => void; visuals: SiteVisu
       setConfigFavorites([])
       setSiteImages([])
       setSiteImageSlots([])
+      setAdminView('rooms')
       setSelectedRoomId(null)
     })
   }
@@ -2268,9 +2270,35 @@ function AdminPanel({ onBack, visuals }: { onBack: () => void; visuals: SiteVisu
         <Logo />
         <div className="admin-header-tools">
           {authorized && (
-            <button className="back-link cache-button" disabled={busy} onClick={clearCaches} title="清理前端与后端缓存" type="button">
-              {cacheCleared ? <Check size={17} /> : <RotateCcw size={17} />} <span>{cacheCleared ? '已清理' : '清理缓存'}</span>
-            </button>
+            <>
+              <button
+                aria-pressed={adminView === 'rooms'}
+                className={`back-link admin-view-switch ${adminView === 'rooms' ? 'active' : ''}`}
+                onClick={() => {
+                  setAdminView('rooms')
+                  setConfigNotice('')
+                }}
+                title="房间管理"
+                type="button"
+              >
+                <Settings2 size={17} /> <span>房间管理</span>
+              </button>
+              <button
+                aria-pressed={adminView === 'site'}
+                className={`back-link admin-view-switch ${adminView === 'site' ? 'active' : ''}`}
+                onClick={() => {
+                  setAdminView('site')
+                  setConfigNotice('')
+                }}
+                title="网站内容"
+                type="button"
+              >
+                <Images size={17} /> <span>网站内容</span>
+              </button>
+              <button className="back-link cache-button" disabled={busy} onClick={clearCaches} title="清理前端与后端缓存" type="button">
+                {cacheCleared ? <Check size={17} /> : <RotateCcw size={17} />} <span>{cacheCleared ? '已清理' : '清理缓存'}</span>
+              </button>
+            </>
           )}
           <button className="back-link" onClick={onBack} type="button"><ArrowLeft size={17} /> 返回玩家入口</button>
         </div>
@@ -2304,8 +2332,9 @@ function AdminPanel({ onBack, visuals }: { onBack: () => void; visuals: SiteVisu
           </section>
         </main>
       ) : (
-        <main className="admin-shell">
-          <aside className="admin-room-list">
+        <main className={`admin-shell ${adminView === 'site' ? 'admin-site-shell' : ''}`}>
+          {adminView === 'rooms' && (
+            <aside className="admin-room-list">
             <div className="admin-section-heading">
               <div><p className="kicker">ROOMS</p><h1>房间管理</h1></div>
             </div>
@@ -2375,11 +2404,21 @@ function AdminPanel({ onBack, visuals }: { onBack: () => void; visuals: SiteVisu
               })}
               {rooms.length === 0 && <p className="admin-empty">还没有房间，点击上方按钮创建。</p>}
             </div>
-            <button className="button ghost full admin-logout" disabled={busy} onClick={logout} type="button"><LogOut size={17} /> 退出管理员</button>
-          </aside>
+              <button className="button ghost full admin-logout" disabled={busy} onClick={logout} type="button"><LogOut size={17} /> 退出管理员</button>
+            </aside>
+          )}
 
-          <section className="admin-room-detail">
-            <section className="admin-site-content-panel" aria-labelledby="site-content-title">
+          <section className={`admin-room-detail ${adminView === 'site' ? 'admin-site-detail' : ''}`}>
+            {adminView === 'site' ? (
+              <>
+                <div className="admin-detail-header admin-site-detail-header">
+                  <div>
+                    <p className="kicker">SITE CONTENT</p>
+                    <h1 className="admin-room-title">网站内容管理</h1>
+                  </div>
+                </div>
+                {configNotice && <p className="admin-operation-notice" role="status"><Check size={15} /> {configNotice}</p>}
+                <section className="admin-site-content-panel" aria-labelledby="site-content-title">
               <div className="section-title">
                 <div>
                   <p className="kicker">首页主视觉</p>
@@ -2395,8 +2434,8 @@ function AdminPanel({ onBack, visuals }: { onBack: () => void; visuals: SiteVisu
                 <label className="site-content-wide"><span>主标题下方说明</span><textarea maxLength={80} onChange={(event) => setSiteContentDraft({ ...siteContentDraft, hero_subtitle: event.target.value })} rows={2} value={siteContentDraft.hero_subtitle} /></label>
               </div>
               <button className="button primary" disabled={busy} onClick={saveSiteContent} type="button"><Save size={17} /> 保存首页文案</button>
-            </section>
-            <section className="admin-site-assets-panel" aria-labelledby="site-assets-title">
+                </section>
+                <section className="admin-site-assets-panel" aria-labelledby="site-assets-title">
               <div className="section-title">
                 <div>
                   <p className="kicker">SITE MEDIA</p>
@@ -2435,8 +2474,9 @@ function AdminPanel({ onBack, visuals }: { onBack: () => void; visuals: SiteVisu
                 ))}
                 {siteImages.length === 0 && <p className="admin-empty">还没有网站图片素材。</p>}
               </div>
-            </section>
-            {selectedRoom ? (
+                </section>
+              </>
+            ) : selectedRoom ? (
               <>
                 <div className="admin-detail-header">
                   <div>
