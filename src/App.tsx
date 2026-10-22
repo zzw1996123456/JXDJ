@@ -654,7 +654,7 @@ function MonopolyEntry({
           </button>
         </div>
 
-        <p className="config-note">退出或关闭网页不会清除席位，使用同一房间码和原行动代号即可继续。</p>
+        <p className="config-note">返回入口或关闭网页不会清除席位。同一账号可保留多个房间席位，当前页面一次查看一个房间；输入对应房间码和原行动代号即可切换或继续。</p>
 
         <div className="divider"><span>或</span></div>
         <button className="button ghost full" disabled={busy} onClick={demo} type="button">
@@ -730,7 +730,7 @@ function DiceRollOverlay({ state }: { state: DiceAnimationState }) {
   )
 }
 
-function RoomHeader({ snapshot, imageUrl }: { snapshot: GameSnapshot; imageUrl?: string }) {
+function RoomHeader({ snapshot, imageUrl, onExit }: { snapshot: GameSnapshot; imageUrl?: string; onExit: () => void }) {
   const [copied, setCopied] = useState(false)
 
   async function copyCode() {
@@ -745,6 +745,9 @@ function RoomHeader({ snapshot, imageUrl }: { snapshot: GameSnapshot; imageUrl?:
       <Logo />
       <div className="room-actions">
         <StatusPill online={!snapshot.isDemo} />
+        <button aria-label="返回入口" className="room-exit-button" onClick={onExit} title="返回房间入口，当前席位会保留" type="button">
+          <ArrowLeft size={16} /> <span>返回入口</span>
+        </button>
         <button className="room-code" onClick={copyCode} title="复制房间码" type="button">
           <span title={snapshot.room.name}>{snapshot.room.name}</span>
           <strong>{snapshot.room.code}</strong>
@@ -2811,6 +2814,7 @@ function LobbyView({
   snapshot,
   busy,
   roomHeaderImage,
+  onExit,
   onReady,
   onProfileUpdate,
   onStart,
@@ -2818,6 +2822,7 @@ function LobbyView({
   snapshot: GameSnapshot
   busy: boolean
   roomHeaderImage?: string
+  onExit: () => void
   onReady: () => void
   onProfileUpdate: (nickname: string, role: PlayerRole) => void
   onStart: () => void
@@ -2841,7 +2846,7 @@ function LobbyView({
 
   return (
     <div className="app-shell">
-      <RoomHeader imageUrl={roomHeaderImage} snapshot={snapshot} />
+      <RoomHeader imageUrl={roomHeaderImage} onExit={onExit} snapshot={snapshot} />
       <main className="lobby-layout">
         <section className="lobby-intro">
           <p className="eyebrow"><Radio size={14} /> 集结阶段</p>
@@ -3580,7 +3585,7 @@ function GameView({
 
   return (
     <div className="app-shell game-shell">
-      <RoomHeader imageUrl={roomHeaderImage} snapshot={snapshot} />
+      <RoomHeader imageUrl={roomHeaderImage} onExit={onExit} snapshot={snapshot} />
       <main className="game-layout">
         <section className="board-section">
           <div className="turn-strip">
@@ -4167,7 +4172,7 @@ export default function App() {
         />
       )}
       {snapshot?.room.status === 'lobby' && (
-        <LobbyView busy={busy} onProfileUpdate={updateLobbyProfile} onReady={toggleReady} onStart={startGame} roomHeaderImage={siteVisuals.room_header} snapshot={snapshot} />
+        <LobbyView busy={busy} onExit={exitRoom} onProfileUpdate={updateLobbyProfile} onReady={toggleReady} onStart={startGame} roomHeaderImage={siteVisuals.room_header} snapshot={snapshot} />
       )}
       {snapshot && snapshot.room.status !== 'lobby' && (
         <GameView busy={busy} dice={dice} onAddDemoDice={addDemoDice} onApproveDiceRequest={approveDiceRequest} onApproveGuaranteeRequest={approveGuaranteeRequest} onChooseRoute={chooseRoute} onCreateDiceRequest={createDiceRequest} onCreateGuaranteeRequest={createGuaranteeRequest} onExit={exitRoom} onRejectDiceRequest={rejectDiceRequest} onRejectGuaranteeRequest={rejectGuaranteeRequest} onRestart={restartDemo} onRoll={rollDice} roomHeaderImage={siteVisuals.room_header} snapshot={snapshot} />

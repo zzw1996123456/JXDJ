@@ -738,6 +738,23 @@ button.mode-card {
   cursor: pointer;
 }
 
+.room-exit-button {
+  height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0 10px;
+  background: #1b1e18;
+  color: var(--ink);
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
 .room-code span {
   color: var(--muted);
   font-size: 10px;
@@ -768,6 +785,7 @@ button.mode-card {
 }
 
 .icon-button:hover,
+.room-exit-button:hover,
 .room-code:hover {
   border-color: #707866;
 }
@@ -3371,6 +3389,14 @@ button.mode-card {
     display: none;
   }
 
+  .room-exit-button {
+    width: 38px;
+    flex: 0 0 38px;
+    padding: 0;
+  }
+
+  .room-exit-button span { display: none; }
+
   .brand-mark {
     width: 27px;
     height: 27px;
@@ -3554,6 +3580,7 @@ body::after {
 .portal-channel,
 .back-link,
 .status-pill,
+.room-exit-button,
 .room-code,
 .admin-code {
   border-color: rgb(214 231 205 / 20%);
@@ -3570,6 +3597,7 @@ body::after {
 }
 
 .back-link:hover,
+.room-exit-button:hover,
 .room-code:hover,
 .admin-code:hover {
   border-color: rgb(217 255 94 / 62%);
